@@ -16,7 +16,8 @@ cmake --build build --config Debug
 
 Clean:
 
-```cmake --build build --config Debug --target clean
+```
+cmake --build build --config Debug --target clean
 ```
 
 Run:
