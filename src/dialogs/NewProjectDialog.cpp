@@ -179,6 +179,7 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
 
     const std::vector<std::filesystem::path> directories = {
         project_root / "Scenes",
+        project_root / "Graphs",
         project_root / "Assets",
         project_root / "Assets" / "Models",
         project_root / "Assets" / "Textures",

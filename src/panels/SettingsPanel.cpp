@@ -38,7 +38,7 @@ void SettingsPanel::Render(EngineState& state)
     {
         ImGui::Checkbox("Show grid overlay", &state.show_grid_overlay);
         ImGui::Checkbox("Snap to grid", &state.snap_to_grid);
-        ImGui::SliderFloat("Grid size", &state.grid_size, 8.0f, 128.0f, "%.0f px");
+        ImGui::SliderFloat("Grid spacing", &state.grid_size, 0.125f, 16.0f, "%.3f u", ImGuiSliderFlags_Logarithmic);
     }
 
     if (ImGui::CollapsingHeader("Editor", ImGuiTreeNodeFlags_DefaultOpen))

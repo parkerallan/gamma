@@ -3,10 +3,25 @@
 #include "imgui.h"
 
 #include <cstdint>
+#include <cstring>
+#include <unordered_map>
 
 namespace
 {
 constexpr const char* kGraphNodeDragPayload = "GRAPH_NODE_LIBRARY_ITEM";
+
+std::uint32_t FindPinIndex(const std::vector<std::shared_ptr<ImFlow::Pin>>& pins, const ImFlow::Pin* pin)
+{
+    for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(pins.size()); ++index)
+    {
+        if (pins[index].get() == pin)
+        {
+            return index;
+        }
+    }
+
+    return static_cast<std::uint32_t>(pins.size());
+}
 }
 
 WorkspacePanel::WorkspacePanel() = default;
@@ -14,6 +29,62 @@ WorkspacePanel::WorkspacePanel() = default;
 WorkspacePanel::~WorkspacePanel()
 {
     Shutdown();
+}
+
+bool WorkspacePanel::InitializeSceneRenderer(SDL_GPUDevice* device, SDL_GPUTextureFormat color_target_format)
+{
+    return scene_view_renderer_.Initialize(device, color_target_format);
+}
+
+void WorkspacePanel::BeginFrame()
+{
+    scene_view_renderer_.BeginFrame();
+}
+
+void WorkspacePanel::RenderSceneGpuPass(SDL_GPUCommandBuffer* command_buffer)
+{
+    scene_view_renderer_.RenderGpu(command_buffer);
+}
+
+const CachedModelAssetEntry& WorkspacePanel::GetModelAssetEntry(const std::filesystem::path& path)
+{
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
+    CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
+    if (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded)
+    {
+        cache_entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
+        cache_entry.asset = LoadModelAsset(path);
+    }
+
+    return cache_entry;
+}
+
+const SceneMetadata& WorkspacePanel::GetSceneMetadata(const std::filesystem::path& path)
+{
+    if (path.empty())
+    {
+        static SceneMetadata empty_metadata{};
+        return empty_metadata;
+    }
+
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
+    const bool cache_valid = has_cached_scene_metadata_ && cached_scene_path_ == path && !error && cached_scene_write_time_ == write_time;
+    if (!cache_valid)
+    {
+        cached_scene_path_ = path;
+        cached_scene_write_time_ = write_time;
+        cached_scene_metadata_ = LoadSceneMetadata(path);
+        has_cached_scene_metadata_ = true;
+    }
+
+    return cached_scene_metadata_;
+}
+
+const ModelAsset& WorkspacePanel::GetModelAsset(const std::filesystem::path& path)
+{
+    return GetModelAssetEntry(path).asset;
 }
 
 void WorkspacePanel::Render(EngineState& state)
@@ -37,7 +108,7 @@ void WorkspacePanel::Render(EngineState& state)
         {
             state.CompleteTabRequest(WorkspaceTab::Scene);
             new_active_tab = WorkspaceTab::Scene;
-            RenderSceneViewport();
+            RenderSceneViewport(state);
             ImGui::EndTabItem();
         }
 
@@ -94,44 +165,257 @@ ImFlow::ImNodeFlow& WorkspacePanel::GetGraph()
 
 void WorkspacePanel::Shutdown()
 {
+    scene_view_renderer_.Shutdown();
     graph_.reset();
+    current_graph_document_ = GraphDocument{};
+    saved_graph_contents_.clear();
+    cached_scene_path_.clear();
+    cached_scene_metadata_ = SceneMetadata{};
+    has_cached_scene_metadata_ = false;
+    model_asset_cache_.clear();
 }
 
-void WorkspacePanel::RenderSceneViewport()
+bool WorkspacePanel::LoadGraphFile(EngineState& state, const std::filesystem::path& path)
 {
-    ImGui::TextUnformatted("Scene Viewport");
-    ImGui::Separator();
+    GraphDocument document = LoadGraphDocument(path);
+    if (!document.parsed)
+    {
+        state.AddLog("Failed to open graph: " + state.GetDisplayPath(path));
+        if (!document.error_message.empty())
+        {
+            state.AddLog("Graph load reason: " + document.error_message);
+        }
+        state.requested_graph_path.clear();
+        state.graph_reload_requested = false;
+        return false;
+    }
 
-    const ImVec2 available = ImGui::GetContentRegionAvail();
-    const ImVec2 min = ImGui::GetCursorScreenPos();
-    const ImVec2 max(min.x + available.x, min.y + available.y);
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    current_graph_document_ = std::move(document);
+    saved_graph_contents_ = SerializeGraphDocument(current_graph_document_);
+    state.open_graph_path = path;
+    state.requested_graph_path.clear();
+    state.graph_reload_requested = false;
+    state.open_graph_dirty = false;
+    RebuildGraphFromDocument();
+    state.RequestTab(WorkspaceTab::Graph);
+    state.AddLog("Opened graph: " + state.GetDisplayPath(path));
+    return true;
+}
 
-    draw_list->AddRectFilled(min, max, IM_COL32(24, 28, 32, 255), 8.0f);
-    draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
+void WorkspacePanel::HandleGraphSessionRequests(EngineState& state)
+{
+    if (!state.requested_graph_path.empty())
+    {
+        if (state.open_graph_path != state.requested_graph_path || graph_ == nullptr)
+        {
+            LoadGraphFile(state, state.requested_graph_path);
+            return;
+        }
 
-    const char* primary = "Scene Viewport";
-    const char* secondary = "Future framebuffer texture area";
-    const ImVec2 primary_size = ImGui::CalcTextSize(primary);
-    const ImVec2 secondary_size = ImGui::CalcTextSize(secondary);
-    const ImVec2 center((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
+        state.requested_graph_path.clear();
+        state.RequestTab(WorkspaceTab::Graph);
+    }
 
-    draw_list->AddText(
-        ImVec2(center.x - primary_size.x * 0.5f, center.y - primary_size.y),
-        IM_COL32(235, 238, 242, 255),
-        primary);
-    draw_list->AddText(
-        ImVec2(center.x - secondary_size.x * 0.5f, center.y + 8.0f),
-        IM_COL32(145, 152, 163, 255),
-        secondary);
+    if (state.graph_reload_requested && state.HasOpenGraph())
+    {
+        LoadGraphFile(state, state.open_graph_path);
+    }
+}
 
-    ImGui::Dummy(available);
+void WorkspacePanel::RebuildGraphFromDocument()
+{
+    graph_.reset();
+    ImFlow::ImNodeFlow& graph = GetGraph();
+    std::unordered_map<std::uint64_t, std::shared_ptr<GraphNodeBase>> nodes_by_id;
+
+    for (const GraphNodeRecord& node_record : current_graph_document_.nodes)
+    {
+        std::shared_ptr<GraphNodeBase> node = SpawnGraphNodeAtGridPosition(
+            graph,
+            node_record.type_key,
+            ImVec2(node_record.position_x, node_record.position_y));
+        if (!node)
+        {
+            continue;
+        }
+
+        node->setUID(static_cast<ImFlow::NodeUID>(node_record.id));
+        node->DeserializeProperties(node_record.properties);
+
+        nodes_by_id[node_record.id] = node;
+    }
+
+    for (const GraphLinkRecord& link_record : current_graph_document_.links)
+    {
+        const auto source_it = nodes_by_id.find(link_record.source_node_id);
+        const auto target_it = nodes_by_id.find(link_record.target_node_id);
+        if (source_it == nodes_by_id.end() || target_it == nodes_by_id.end())
+        {
+            continue;
+        }
+
+        const std::vector<std::shared_ptr<ImFlow::Pin>>& source_pins = source_it->second->getOuts();
+        const std::vector<std::shared_ptr<ImFlow::Pin>>& target_pins = target_it->second->getIns();
+        ImFlow::Pin* source_pin = link_record.source_port_index < source_pins.size() ? source_pins[link_record.source_port_index].get() : nullptr;
+        ImFlow::Pin* target_pin = link_record.target_port_index < target_pins.size() ? target_pins[link_record.target_port_index].get() : nullptr;
+        if (source_pin != nullptr && target_pin != nullptr)
+        {
+            source_pin->createLink(target_pin);
+        }
+    }
+}
+
+void WorkspacePanel::SyncGraphDocumentFromUi(EngineState& state)
+{
+    if (!state.HasOpenGraph() || graph_ == nullptr)
+    {
+        return;
+    }
+
+    GraphDocument document;
+    document.parsed = true;
+    document.graph_name = current_graph_document_.graph_name.empty() ? state.open_graph_path.stem().string() : current_graph_document_.graph_name;
+
+    for (const auto& node_entry : graph_->getNodes())
+    {
+        if (!node_entry.second)
+        {
+            continue;
+        }
+
+        GraphNodeBase* graph_node = dynamic_cast<GraphNodeBase*>(node_entry.second.get());
+        if (graph_node == nullptr)
+        {
+            continue;
+        }
+
+        GraphNodeRecord node_record;
+        node_record.id = static_cast<std::uint64_t>(node_entry.second->getUID());
+        node_record.type_key = GetGraphNodeTypeKey(graph_node->GetNodeType());
+        node_record.position_x = node_entry.second->getPos().x;
+        node_record.position_y = node_entry.second->getPos().y;
+        graph_node->SerializeProperties(node_record.properties);
+
+        document.nodes.push_back(std::move(node_record));
+    }
+
+    for (const std::weak_ptr<ImFlow::Link>& weak_link : graph_->getLinks())
+    {
+        if (weak_link.expired())
+        {
+            continue;
+        }
+
+        const std::shared_ptr<ImFlow::Link> link = weak_link.lock();
+        if (!link || link->left() == nullptr || link->right() == nullptr)
+        {
+            continue;
+        }
+
+        GraphLinkRecord link_record;
+        link_record.source_node_id = static_cast<std::uint64_t>(link->left()->getParent()->getUID());
+        link_record.source_port_index = FindPinIndex(link->left()->getParent()->getOuts(), link->left());
+        link_record.target_node_id = static_cast<std::uint64_t>(link->right()->getParent()->getUID());
+        link_record.target_port_index = FindPinIndex(link->right()->getParent()->getIns(), link->right());
+        document.links.push_back(std::move(link_record));
+    }
+
+    current_graph_document_ = std::move(document);
+    state.open_graph_dirty = SerializeGraphDocument(current_graph_document_) != saved_graph_contents_;
+}
+
+bool WorkspacePanel::SaveOpenGraph(EngineState& state)
+{
+    if (!state.HasOpenGraph())
+    {
+        return false;
+    }
+
+    SyncGraphDocumentFromUi(state);
+    if (!SaveGraphDocument(state.open_graph_path, current_graph_document_))
+    {
+        state.AddLog("Failed to save graph: " + state.GetOpenGraphDisplayPath());
+        return false;
+    }
+
+    saved_graph_contents_ = SerializeGraphDocument(current_graph_document_);
+    state.open_graph_dirty = false;
+    state.AddLog("Saved graph: " + state.GetOpenGraphDisplayPath());
+    return true;
+}
+
+bool WorkspacePanel::ReloadOpenGraph(EngineState& state)
+{
+    if (!state.HasOpenGraph())
+    {
+        return false;
+    }
+
+    state.RequestReloadOpenGraph();
+    HandleGraphSessionRequests(state);
+    return state.HasOpenGraph();
+}
+
+void WorkspacePanel::RenderSceneViewport(EngineState& state)
+{
+    if (!state.HasActiveScene())
+    {
+        ImGui::TextUnformatted("Scene Viewport");
+        ImGui::Separator();
+        ImGui::TextWrapped("Open a project with an active scene to preview attached models here.");
+        return;
+    }
+
+    const SceneMetadata& scene_metadata = GetSceneMetadata(state.active_scene_path);
+    if (!scene_metadata.parsed)
+    {
+        ImGui::TextUnformatted("Scene Viewport");
+        ImGui::Separator();
+        ImGui::TextWrapped("Failed to load active scene: %s", scene_metadata.error_message.empty() ? "unknown error" : scene_metadata.error_message.c_str());
+        return;
+    }
+
+    scene_view_renderer_.RenderUi(state, scene_metadata, [this](const std::filesystem::path& path) -> SceneViewportResolvedModel
+    {
+        const CachedModelAssetEntry& entry = GetModelAssetEntry(path);
+        return SceneViewportResolvedModel{&entry.asset, entry.write_time};
+    }, scene_view_camera_);
 }
 
 void WorkspacePanel::RenderGraphViewport(EngineState& state)
 {
+    HandleGraphSessionRequests(state);
+
     ImGui::TextUnformatted("Node Graph");
+    if (state.HasOpenGraph())
+    {
+        ImGui::SameLine();
+        ImGui::TextUnformatted(state.GetOpenGraphDisplayPath().c_str());
+        ImGui::SameLine();
+
+        if (ImGui::Button("Save"))
+        {
+            SaveOpenGraph(state);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reload"))
+        {
+            ReloadOpenGraph(state);
+        }
+
+        if (state.open_graph_dirty)
+        {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("(modified)");
+        }
+    }
     ImGui::Separator();
+
+    if (!state.HasOpenGraph())
+    {
+        ImGui::TextWrapped("Select a .graph file from the Files panel to open it here.");
+        return;
+    }
 
     const float library_width = 220.0f;
     const float splitter_spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -150,6 +434,7 @@ void WorkspacePanel::RenderGraphViewport(EngineState& state)
     ImGui::EndChild();
 
     HandleGraphNodeDrop(state);
+    SyncGraphDocumentFromUi(state);
 }
 
 void WorkspacePanel::RenderNodeLibrary()
@@ -207,6 +492,7 @@ void WorkspacePanel::HandleGraphNodeDrop(EngineState& state)
         const GraphNodeType node_type = static_cast<GraphNodeType>(payload_value);
         SpawnGraphNode(GetGraph(), node_type, ImGui::GetMousePos());
         state.AddLog(std::string("Created graph node: ") + GetGraphNodeLabel(node_type));
+        SyncGraphDocumentFromUi(state);
     }
 
     ImGui::EndDragDropTarget();
@@ -224,10 +510,6 @@ void WorkspacePanel::RenderEditorViewport(EngineState& state)
 
     ImGui::TextUnformatted(state.GetOpenFileDisplayPath().c_str());
     ImGui::SameLine();
-    if (state.open_file_dirty)
-    {
-        ImGui::TextUnformatted("(modified)");
-    }
 
     if (ImGui::Button("Save"))
     {
@@ -237,6 +519,12 @@ void WorkspacePanel::RenderEditorViewport(EngineState& state)
     if (ImGui::Button("Reload"))
     {
         state.OpenTextFile(state.open_file_path);
+    }
+
+    if (state.open_file_dirty)
+    {
+        ImGui::SameLine();
+        ImGui::TextUnformatted("(modified)");
     }
 
     ImGui::Separator();

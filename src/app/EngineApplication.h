@@ -8,6 +8,7 @@
 #include "panels/WorkspacePanel.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_gpu.h>
 
 class EngineApplication
 {
@@ -18,7 +19,7 @@ public:
 
 private:
     SDL_Window* window_ = nullptr;
-    SDL_Renderer* renderer_ = nullptr;
+    SDL_GPUDevice* gpu_device_ = nullptr;
     float display_scale_ = 1.0f;
     bool running_ = false;
 

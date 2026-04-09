@@ -19,6 +19,7 @@ private:
         None,
         Folder,
         Script,
+        Graph,
         Scene,
         Material,
         Object,

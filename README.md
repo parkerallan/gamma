@@ -25,3 +25,4 @@ Run:
 ```powershell
 .\build\Debug\engine.exe
 ```
+Make the Scene viewport parse the active scene and draw a simple object list or transform gizmo overlay from the attached scene data

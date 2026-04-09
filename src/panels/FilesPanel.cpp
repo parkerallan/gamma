@@ -297,11 +297,15 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
     if (!node.is_directory && node.children.empty())
     {
-        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanFullWidth;
     }
     else if (filter_active)
     {
         flags |= ImGuiTreeNodeFlags_DefaultOpen;
+    }
+    if (node.is_directory || !node.children.empty())
+    {
+        flags |= ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanFullWidth;
     }
     if (is_selected)
     {
@@ -319,7 +323,8 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     {
         ImGui::PopStyleColor();
     }
-    const bool tree_item_clicked = ImGui::IsItemClicked();
+    const bool tree_item_released = ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+    const bool tree_item_toggled = ImGui::IsItemToggledOpen();
     const bool moved_from_source = !node.is_scene_object && RenderMoveSource(node, state);
     bool moved_to_directory = false;
 
@@ -331,10 +336,9 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     if (node.is_directory)
     {
         moved_to_directory = RenderMoveTarget(node.path, state);
-        refresh_requested_ = creation_menu_.RenderButton(state, node.path) || refresh_requested_;
     }
 
-    if (tree_item_clicked && !moved_from_source && !moved_to_directory)
+    if (tree_item_released && !tree_item_toggled && !moved_from_source && !moved_to_directory)
     {
         if (node.is_scene_object)
         {

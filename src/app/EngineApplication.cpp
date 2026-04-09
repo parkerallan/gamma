@@ -2,7 +2,7 @@
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
-#include "imgui_impl_sdlrenderer3.h"
+#include "imgui_impl_sdlgpu3.h"
 #include "imgui_internal.h"
 
 #include <filesystem>
@@ -69,14 +69,20 @@ bool EngineApplication::Init()
         return false;
     }
 
-    renderer_ = SDL_CreateRenderer(window_, nullptr);
-    if (renderer_ == nullptr)
+    gpu_device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, "vulkan");
+    if (gpu_device_ == nullptr)
     {
-        SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
+        SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         return false;
     }
 
-    SDL_SetRenderVSync(renderer_, 1);
+    if (!SDL_ClaimWindowForGPUDevice(gpu_device_, window_))
+    {
+        SDL_Log("SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
+        return false;
+    }
+
+    SDL_SetGPUSwapchainParameters(gpu_device_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, SDL_GPU_PRESENTMODE_VSYNC);
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window_);
 
@@ -90,12 +96,23 @@ bool EngineApplication::Init()
 
     ApplyStyle();
 
-    ImGui_ImplSDL3_InitForSDLRenderer(window_, renderer_);
-    ImGui_ImplSDLRenderer3_Init(renderer_);
+    ImGui_ImplSDL3_InitForSDLGPU(window_);
+    ImGui_ImplSDLGPU3_InitInfo init_info = {};
+    init_info.Device = gpu_device_;
+    init_info.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(gpu_device_, window_);
+    init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
+    init_info.SwapchainComposition = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+    init_info.PresentMode = SDL_GPU_PRESENTMODE_VSYNC;
+    ImGui_ImplSDLGPU3_Init(&init_info);
 
     if (io.Fonts->AddFontDefaultVector() == nullptr)
     {
         io.Fonts->AddFontDefaultBitmap();
+    }
+
+    if (!workspace_panel_.InitializeSceneRenderer(gpu_device_, init_info.ColorTargetFormat))
+    {
+        SDL_Log("Scene viewport renderer initialization failed: %s", SDL_GetError());
     }
 
     state_.SetWorkspaceRoot(ResolveWorkspaceRoot());
@@ -117,20 +134,41 @@ void EngineApplication::RunLoop()
             continue;
         }
 
-        ImGui_ImplSDLRenderer3_NewFrame();
+        workspace_panel_.BeginFrame();
+        ImGui_ImplSDLGPU3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
         RenderUI();
 
         ImGui::Render();
-        ImGuiIO& io = ImGui::GetIO();
+        ImDrawData* draw_data = ImGui::GetDrawData();
+        const bool is_minimized = draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f;
 
-        SDL_SetRenderScale(renderer_, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
-        SDL_SetRenderDrawColorFloat(renderer_, 0.08f, 0.09f, 0.11f, 1.0f);
-        SDL_RenderClear(renderer_);
-        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer_);
-        SDL_RenderPresent(renderer_);
+        SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(gpu_device_);
+        workspace_panel_.RenderSceneGpuPass(command_buffer);
+        SDL_GPUTexture* swapchain_texture = nullptr;
+        SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window_, &swapchain_texture, nullptr, nullptr);
+
+        if (swapchain_texture != nullptr && !is_minimized)
+        {
+            ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);
+
+            SDL_GPUColorTargetInfo target_info = {};
+            target_info.texture = swapchain_texture;
+            target_info.clear_color = SDL_FColor{0.08f, 0.09f, 0.11f, 1.0f};
+            target_info.load_op = SDL_GPU_LOADOP_CLEAR;
+            target_info.store_op = SDL_GPU_STOREOP_STORE;
+            target_info.mip_level = 0;
+            target_info.layer_or_depth_plane = 0;
+            target_info.cycle = false;
+
+            SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(command_buffer, &target_info, 1, nullptr);
+            ImGui_ImplSDLGPU3_RenderDrawData(draw_data, command_buffer, render_pass);
+            SDL_EndGPURenderPass(render_pass);
+        }
+
+        SDL_SubmitGPUCommandBuffer(command_buffer);
     }
 }
 
@@ -139,14 +177,24 @@ void EngineApplication::Shutdown()
     workspace_panel_.Shutdown();
     info_panel_.Shutdown();
 
-    ImGui_ImplSDLRenderer3_Shutdown();
+    if (gpu_device_ != nullptr)
+    {
+        SDL_WaitForGPUIdle(gpu_device_);
+    }
+
+    ImGui_ImplSDLGPU3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
-    if (renderer_ != nullptr)
+    if (gpu_device_ != nullptr && window_ != nullptr)
     {
-        SDL_DestroyRenderer(renderer_);
-        renderer_ = nullptr;
+        SDL_ReleaseWindowFromGPUDevice(gpu_device_, window_);
+    }
+
+    if (gpu_device_ != nullptr)
+    {
+        SDL_DestroyGPUDevice(gpu_device_);
+        gpu_device_ = nullptr;
     }
 
     if (window_ != nullptr)
@@ -173,6 +221,18 @@ void EngineApplication::ProcessEvents()
         if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(window_))
         {
             running_ = false;
+        }
+
+        if (event.type == SDL_EVENT_KEY_DOWN && (event.key.mod & SDL_KMOD_CTRL) != 0 && event.key.key == SDLK_S)
+        {
+            if (state_.active_tab == WorkspaceTab::Graph && state_.HasOpenGraph())
+            {
+                workspace_panel_.SaveOpenGraph(state_);
+            }
+            else if (state_.HasOpenFile())
+            {
+                state_.SaveOpenFile();
+            }
         }
     }
 }
@@ -210,7 +270,7 @@ void EngineApplication::RenderUI()
     files_panel_.Render(state_);
     workspace_panel_.Render(state_);
     settings_panel_.Render(state_);
-    info_panel_.Render(state_, renderer_);
+    info_panel_.Render(state_, nullptr);
     log_panel_.Render(state_);
 }
 
@@ -241,15 +301,29 @@ void EngineApplication::RenderMainMenuBar()
 
         ImGui::Separator();
 
-        const bool has_open_file = state_.HasOpenFile();
-        if (ImGui::MenuItem("Save", "Ctrl+S", false, has_open_file))
+        const bool can_save_or_reload = state_.HasOpenFile() || state_.HasOpenGraph();
+        if (ImGui::MenuItem("Save", "Ctrl+S", false, can_save_or_reload))
         {
-            state_.SaveOpenFile();
+            if (state_.active_tab == WorkspaceTab::Graph && state_.HasOpenGraph())
+            {
+                workspace_panel_.SaveOpenGraph(state_);
+            }
+            else
+            {
+                state_.SaveOpenFile();
+            }
         }
 
-        if (ImGui::MenuItem("Reload", nullptr, false, has_open_file))
+        if (ImGui::MenuItem("Reload", nullptr, false, can_save_or_reload))
         {
-            state_.OpenTextFile(state_.open_file_path);
+            if (state_.active_tab == WorkspaceTab::Graph && state_.HasOpenGraph())
+            {
+                workspace_panel_.ReloadOpenGraph(state_);
+            }
+            else
+            {
+                state_.OpenTextFile(state_.open_file_path);
+            }
         }
 
         ImGui::Separator();
@@ -264,16 +338,30 @@ void EngineApplication::RenderMainMenuBar()
 
     if (ImGui::BeginMenu("Edit"))
     {
-        const bool has_open_file = state_.HasOpenFile();
+        const bool has_open_file = state_.HasOpenFile() || state_.HasOpenGraph();
 
         if (ImGui::MenuItem("Save Current File", "Ctrl+S", false, has_open_file))
         {
-            state_.SaveOpenFile();
+            if (state_.active_tab == WorkspaceTab::Graph && state_.HasOpenGraph())
+            {
+                workspace_panel_.SaveOpenGraph(state_);
+            }
+            else
+            {
+                state_.SaveOpenFile();
+            }
         }
 
         if (ImGui::MenuItem("Reload From Disk", nullptr, false, has_open_file))
         {
-            state_.OpenTextFile(state_.open_file_path);
+            if (state_.active_tab == WorkspaceTab::Graph && state_.HasOpenGraph())
+            {
+                workspace_panel_.ReloadOpenGraph(state_);
+            }
+            else
+            {
+                state_.OpenTextFile(state_.open_file_path);
+            }
         }
 
         ImGui::Separator();

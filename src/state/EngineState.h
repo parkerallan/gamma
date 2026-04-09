@@ -41,10 +41,12 @@ struct EngineState
     std::filesystem::path selected_item_path;
     std::string selected_scene_object_name;
     std::filesystem::path open_file_path;
+    std::filesystem::path requested_graph_path;
+    std::filesystem::path open_graph_path;
     float ui_scale = 1.0f;
     bool show_grid_overlay = true;
     bool snap_to_grid = true;
-    float grid_size = 32.0f;
+    float grid_size = 1.0f;
     bool auto_open_startup_scene = true;
     bool confirm_before_delete = true;
     bool auto_save_on_focus_loss = false;
@@ -55,6 +57,8 @@ struct EngineState
     std::string open_file_contents;
     std::vector<char> editor_buffer = std::vector<char>(kEditorBufferCapacity, '\0');
     bool open_file_dirty = false;
+    bool open_graph_dirty = false;
+    bool graph_reload_requested = false;
     std::vector<std::string> log_messages;
 
     void AddLog(const std::string& message)
@@ -113,9 +117,13 @@ struct EngineState
         selected_item_path.clear();
         selected_scene_object_name.clear();
         open_file_path.clear();
+        requested_graph_path.clear();
+        open_graph_path.clear();
         saved_file_contents.clear();
         open_file_contents.clear();
         open_file_dirty = false;
+        open_graph_dirty = false;
+        graph_reload_requested = false;
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }
@@ -142,6 +150,11 @@ struct EngineState
     bool HasOpenFile() const
     {
         return !open_file_path.empty();
+    }
+
+    bool HasOpenGraph() const
+    {
+        return !open_graph_path.empty();
     }
 
     static std::filesystem::path RemapMovedPath(const std::filesystem::path& current_path, const std::filesystem::path& from_path, const std::filesystem::path& to_path)
@@ -179,6 +192,8 @@ struct EngineState
         active_scene_path = RemapMovedPath(active_scene_path, from_path, to_path);
         selected_item_path = RemapMovedPath(selected_item_path, from_path, to_path);
         open_file_path = RemapMovedPath(open_file_path, from_path, to_path);
+        requested_graph_path = RemapMovedPath(requested_graph_path, from_path, to_path);
+        open_graph_path = RemapMovedPath(open_graph_path, from_path, to_path);
 
         if (!previous_active_scene_path.empty() && active_scene_path != previous_active_scene_path)
         {
@@ -238,6 +253,27 @@ struct EngineState
                 AddLog("Closed deleted file from editor");
             }
         }
+
+        if (!requested_graph_path.empty())
+        {
+            const std::filesystem::path remapped_requested_graph = RemapMovedPath(requested_graph_path, deleted_path, {});
+            if (remapped_requested_graph != requested_graph_path)
+            {
+                requested_graph_path.clear();
+            }
+        }
+
+        if (!open_graph_path.empty())
+        {
+            const std::filesystem::path remapped_open_graph = RemapMovedPath(open_graph_path, deleted_path, {});
+            if (remapped_open_graph != open_graph_path)
+            {
+                open_graph_path.clear();
+                open_graph_dirty = false;
+                graph_reload_requested = false;
+                AddLog("Closed deleted graph asset");
+            }
+        }
     }
 
     std::string GetDisplayPath(const std::filesystem::path& path) const
@@ -281,6 +317,11 @@ struct EngineState
         return GetDisplayPath(open_file_path);
     }
 
+    std::string GetOpenGraphDisplayPath() const
+    {
+        return GetDisplayPath(open_graph_path);
+    }
+
     std::string GetSelectedItemDisplayPath() const
     {
         return GetDisplayPath(selected_item_path);
@@ -321,10 +362,34 @@ struct EngineState
             extension == ".toml" ||
             extension == ".yml" ||
             extension == ".yaml" ||
+            extension == ".graph" ||
                 extension == ".engineproj" ||
             extension == ".scene" ||
             extension == ".mat" ||
             path.filename() == "CMakeLists.txt";
+    }
+
+    static bool IsGraphFile(const std::filesystem::path& path)
+    {
+        std::string extension = path.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        return extension == ".graph";
+    }
+
+    void RequestOpenGraphFile(const std::filesystem::path& path)
+    {
+        requested_graph_path = path;
+        RequestTab(WorkspaceTab::Graph);
+    }
+
+    void RequestReloadOpenGraph()
+    {
+        if (HasOpenGraph())
+        {
+            graph_reload_requested = true;
+            RequestTab(WorkspaceTab::Graph);
+        }
     }
 
     static std::string ExtractProjectValue(const std::string& manifest_contents, const std::string& key)
@@ -488,6 +553,13 @@ struct EngineState
 
     bool OpenTextFile(const std::filesystem::path& path)
     {
+        if (IsGraphFile(path))
+        {
+            RequestOpenGraphFile(path);
+            AddLog("Opening graph asset: " + GetDisplayPath(path));
+            return true;
+        }
+
         if (!IsSupportedTextFile(path))
         {
             AddLog("Skipped non-text file: " + GetDisplayPath(path));

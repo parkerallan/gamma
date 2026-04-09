@@ -67,6 +67,15 @@ std::string BuildScriptStub(const std::string& file_stem)
         "}\n";
 }
 
+std::string BuildGraphStub(const std::string& graph_name)
+{
+    return std::string("{\n") +
+        "  \"name\": \"" + graph_name + "\",\n" +
+        "  \"nodes\": [],\n" +
+        "  \"links\": []\n" +
+        "}\n";
+}
+
 std::string BuildSceneStub(const std::string& scene_name)
 {
     return "Scene: " + scene_name + "\n";
@@ -319,6 +328,12 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
             OpenCreateDialog(directory_path, CreateTarget::Script);
         }
 
+        const std::filesystem::path graph_directory = directory_path == state.project_root ? state.project_root / "Graphs" : directory_path;
+        if (ImGui::MenuItem("New Graph (.graph)"))
+        {
+            OpenCreateDialog(graph_directory, CreateTarget::Graph);
+        }
+
         const std::filesystem::path scene_directory = directory_path == state.project_root ? state.project_root / "Scenes" : directory_path;
         if (ImGui::MenuItem("New Scene (.scene)"))
         {
@@ -376,12 +391,14 @@ bool CreationMenu::Render(EngineState& state)
 
     const bool creating_folder = create_target_ == CreateTarget::Folder;
     const bool creating_script = create_target_ == CreateTarget::Script;
+    const bool creating_graph = create_target_ == CreateTarget::Graph;
     const bool creating_scene = create_target_ == CreateTarget::Scene;
     const bool creating_material = create_target_ == CreateTarget::Material;
     const bool creating_object = create_target_ == CreateTarget::Object;
 
     const char* title = creating_folder ? "Create Folder"
         : creating_script ? "Create Script"
+        : creating_graph ? "Create Graph"
         : creating_scene ? "Create Scene"
         : creating_material ? "Create Material"
         : "Add Object";
@@ -402,6 +419,7 @@ bool CreationMenu::Render(EngineState& state)
     ImGui::PushItemWidth(240.0f);
     const char* input_label = creating_folder ? "Folder Name"
         : creating_script ? "Script Name"
+        : creating_graph ? "Graph Name"
         : creating_scene ? "Scene Name"
         : creating_material ? "Material Name"
         : "Object Name";
@@ -478,6 +496,10 @@ bool CreationMenu::CreateItem(EngineState& state)
     {
         target_path += ".cpp";
     }
+    else if (create_target_ == CreateTarget::Graph && target_path.extension() != ".graph")
+    {
+        target_path += ".graph";
+    }
     else if (create_target_ == CreateTarget::Scene && target_path.extension() != ".scene")
     {
         target_path += ".scene";
@@ -526,6 +548,10 @@ bool CreationMenu::CreateItem(EngineState& state)
     {
         output << BuildScriptStub(target_path.stem().string());
     }
+    else if (create_target_ == CreateTarget::Graph)
+    {
+        output << BuildGraphStub(target_path.stem().string());
+    }
     else if (create_target_ == CreateTarget::Scene)
     {
         output << BuildSceneStub(target_path.stem().string());
@@ -542,6 +568,7 @@ bool CreationMenu::CreateItem(EngineState& state)
     }
 
     const char* item_kind = create_target_ == CreateTarget::Script ? "script"
+        : create_target_ == CreateTarget::Graph ? "graph"
         : create_target_ == CreateTarget::Scene ? "scene"
         : "material";
     state.AddLog(std::string("Created ") + item_kind + ": " + state.GetDisplayPath(target_path));

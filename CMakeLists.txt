@@ -10,6 +10,26 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_program(GLSLC_EXECUTABLE
+    NAMES glslc
+    HINTS
+        "$ENV{VULKAN_SDK}/Bin"
+        "$ENV{VULKAN_SDK}/Bin32"
+)
+
+if(NOT GLSLC_EXECUTABLE)
+    file(GLOB VULKAN_SDK_GLSLC "C:/VulkanSDK/*/Bin/glslc.exe")
+    if(VULKAN_SDK_GLSLC)
+        list(SORT VULKAN_SDK_GLSLC)
+        list(REVERSE VULKAN_SDK_GLSLC)
+        list(GET VULKAN_SDK_GLSLC 0 GLSLC_EXECUTABLE)
+    endif()
+endif()
+
+if(NOT GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "glslc was not found. Install the Vulkan SDK or add glslc to PATH.")
+endif()
+
 include(FetchContent)
 
 set(SDL_SHARED ON CACHE BOOL "" FORCE)
@@ -48,6 +68,17 @@ if(NOT imnodeflow_POPULATED)
     FetchContent_Populate(imnodeflow)
 endif()
 
+FetchContent_Declare(
+    imguizmo
+    GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(imguizmo)
+if(NOT imguizmo_POPULATED)
+    FetchContent_Populate(imguizmo)
+endif()
+
 set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
@@ -72,8 +103,41 @@ if(NOT stb_POPULATED)
     FetchContent_Populate(stb)
 endif()
 
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
 set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
+set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
+set(ENGINE_SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/shaders)
+set(ENGINE_SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
+
+add_custom_command(
+    OUTPUT ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
+    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=vert -o ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.vert
+    DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.vert
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
+    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=frag -o ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.frag
+    DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.frag
+    VERBATIM
+)
+
+add_custom_target(engine_scene_shaders
+    DEPENDS
+        ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv
+        ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv
+)
 
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp
@@ -82,7 +146,7 @@ add_library(imgui STATIC
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
     ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdlgpu3.cpp
 )
 
 target_include_directories(imgui
@@ -97,6 +161,10 @@ add_library(imnodeflow STATIC
     ${IMNODEFLOW_DIR}/src/ImNodeFlow.cpp
 )
 
+add_library(imguizmo STATIC
+    ${IMGUIZMO_DIR}/ImGuizmo.cpp
+)
+
 target_include_directories(imnodeflow
     PUBLIC
         ${IMNODEFLOW_DIR}/include
@@ -107,28 +175,43 @@ target_include_directories(imnodeflow
 target_compile_definitions(imnodeflow PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
 target_link_libraries(imnodeflow PUBLIC imgui)
 
+target_include_directories(imguizmo
+    PUBLIC
+        ${IMGUIZMO_DIR}
+        ${IMGUI_DIR}
+)
+
+target_link_libraries(imguizmo PUBLIC imgui)
+
 if(MSVC)
     target_compile_options(imnodeflow PRIVATE /wd4100 /wd4244)
+    target_compile_options(imguizmo PRIVATE /wd4100 /wd4244 /wd4456)
 endif()
 
 add_executable(engine
     src/app/main.cpp
     src/assets/AssetMetadata.cpp
+    src/assets/ModelAsset.cpp
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp
+    src/assets/SceneMetadata.cpp
     src/components/CreationMenu.cpp
     src/components/FileContextMenu.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
+    src/graph/GraphDocument.cpp
     src/graph/NodeLibrary.cpp
     src/panels/FilesPanel.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
+    src/panels/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/panels/WorkspacePanel.cpp
 )
 
-target_include_directories(engine PRIVATE src)
+target_include_directories(engine PRIVATE
+    src
+)
 
 target_compile_definitions(engine PRIVATE
     SDL_MAIN_HANDLED
@@ -138,7 +221,9 @@ target_compile_definitions(engine PRIVATE
 target_link_libraries(engine PRIVATE
     SDL3::SDL3
     imgui
+    imguizmo
     imnodeflow
+    nlohmann_json::nlohmann_json
 )
 
 if(TARGET assimp::assimp)
@@ -147,10 +232,18 @@ elseif(TARGET assimp)
     target_link_libraries(engine PRIVATE assimp)
 endif()
 
+add_dependencies(engine engine_scene_shaders)
+
 if(WIN32)
     target_link_libraries(engine PRIVATE Ole32 Shell32)
 
     add_custom_command(TARGET engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            $<TARGET_FILE_DIR:engine>/shaders
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv
+            ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv
+            $<TARGET_FILE_DIR:engine>/shaders
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_RUNTIME_DLLS:engine>
             $<TARGET_FILE_DIR:engine>
