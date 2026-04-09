@@ -29,9 +29,17 @@ struct EngineState
     bool has_requested_tab = false;
     bool request_open_project_dialog = false;
     bool request_new_project_dialog = false;
+    bool show_files_panel = true;
+    bool show_workspace_panel = true;
+    bool show_settings_panel = true;
+    bool show_info_panel = true;
+    bool show_log_panel = true;
     std::filesystem::path workspace_root;
     std::filesystem::path project_root;
     std::filesystem::path project_file_path;
+    std::filesystem::path active_scene_path;
+    std::filesystem::path selected_item_path;
+    std::string selected_scene_object_name;
     std::filesystem::path open_file_path;
     float ui_scale = 1.0f;
     bool show_grid_overlay = true;
@@ -65,10 +73,45 @@ struct EngineState
         return !project_root.empty();
     }
 
+    bool HasSelectedItem() const
+    {
+        return !selected_item_path.empty();
+    }
+
+    bool HasActiveScene() const
+    {
+        return !active_scene_path.empty();
+    }
+
+    bool IsActiveScene(const std::filesystem::path& path) const
+    {
+        return !active_scene_path.empty() && active_scene_path == path;
+    }
+
+    bool HasSelectedSceneObject() const
+    {
+        return !selected_scene_object_name.empty();
+    }
+
+    void SetSelectedItem(std::filesystem::path path)
+    {
+        selected_item_path = std::move(path);
+        selected_scene_object_name.clear();
+    }
+
+    void SetSelectedSceneObject(std::filesystem::path scene_path, std::string object_name)
+    {
+        selected_item_path = std::move(scene_path);
+        selected_scene_object_name = std::move(object_name);
+    }
+
     void ClearOpenProject()
     {
         project_root.clear();
         project_file_path.clear();
+        active_scene_path.clear();
+        selected_item_path.clear();
+        selected_scene_object_name.clear();
         open_file_path.clear();
         saved_file_contents.clear();
         open_file_contents.clear();
@@ -132,7 +175,15 @@ struct EngineState
     void UpdatePathsAfterMove(const std::filesystem::path& from_path, const std::filesystem::path& to_path)
     {
         project_file_path = RemapMovedPath(project_file_path, from_path, to_path);
+        const std::filesystem::path previous_active_scene_path = active_scene_path;
+        active_scene_path = RemapMovedPath(active_scene_path, from_path, to_path);
+        selected_item_path = RemapMovedPath(selected_item_path, from_path, to_path);
         open_file_path = RemapMovedPath(open_file_path, from_path, to_path);
+
+        if (!previous_active_scene_path.empty() && active_scene_path != previous_active_scene_path)
+        {
+            SaveActiveSceneToProject();
+        }
     }
 
     void UpdatePathsAfterDelete(const std::filesystem::path& deleted_path)
@@ -149,6 +200,28 @@ struct EngineState
             {
                 ClearOpenProject();
                 return;
+            }
+        }
+
+        if (!selected_item_path.empty())
+        {
+            const std::filesystem::path remapped_selected_item = RemapMovedPath(selected_item_path, deleted_path, {});
+            if (remapped_selected_item != selected_item_path)
+            {
+                selected_item_path.clear();
+                selected_scene_object_name.clear();
+                AddLog("Cleared deleted selection");
+            }
+        }
+
+        if (!active_scene_path.empty())
+        {
+            const std::filesystem::path remapped_active_scene = RemapMovedPath(active_scene_path, deleted_path, {});
+            if (remapped_active_scene != active_scene_path)
+            {
+                active_scene_path.clear();
+                SaveActiveSceneToProject();
+                AddLog("Cleared deleted active scene");
             }
         }
 
@@ -208,9 +281,19 @@ struct EngineState
         return GetDisplayPath(open_file_path);
     }
 
+    std::string GetSelectedItemDisplayPath() const
+    {
+        return GetDisplayPath(selected_item_path);
+    }
+
     std::string GetOpenProjectDisplayPath() const
     {
         return GetDisplayPath(project_root);
+    }
+
+    std::string GetActiveSceneDisplayPath() const
+    {
+        return GetDisplayPath(active_scene_path);
     }
 
     static bool IsSupportedTextFile(const std::filesystem::path& path)
@@ -274,6 +357,96 @@ struct EngineState
         return manifest_contents.substr(first_quote + 1, second_quote - first_quote - 1);
     }
 
+    static bool ReplaceProjectValue(std::string& manifest_contents, const std::string& key, const std::string& value)
+    {
+        const std::string needle = "\"" + key + "\"";
+        const std::size_t key_position = manifest_contents.find(needle);
+        if (key_position == std::string::npos)
+        {
+            return false;
+        }
+
+        const std::size_t colon_position = manifest_contents.find(':', key_position + needle.size());
+        if (colon_position == std::string::npos)
+        {
+            return false;
+        }
+
+        const std::size_t first_quote = manifest_contents.find('"', colon_position + 1);
+        if (first_quote == std::string::npos)
+        {
+            return false;
+        }
+
+        const std::size_t second_quote = manifest_contents.find('"', first_quote + 1);
+        if (second_quote == std::string::npos)
+        {
+            return false;
+        }
+
+        manifest_contents.replace(first_quote + 1, second_quote - first_quote - 1, value);
+        return true;
+    }
+
+    bool SaveActiveSceneToProject()
+    {
+        if (project_file_path.empty())
+        {
+            return false;
+        }
+
+        std::ifstream input(project_file_path, std::ios::binary);
+        if (!input)
+        {
+            AddLog("Failed to open project manifest for active scene update");
+            return false;
+        }
+
+        std::string manifest_contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        const std::string relative_scene_path = active_scene_path.empty()
+            ? std::string()
+            : std::filesystem::relative(active_scene_path, project_root).generic_string();
+        if (!ReplaceProjectValue(manifest_contents, "startupScene", relative_scene_path))
+        {
+            AddLog("Failed to update startupScene in project manifest");
+            return false;
+        }
+
+        std::ofstream output(project_file_path, std::ios::binary | std::ios::trunc);
+        if (!output)
+        {
+            AddLog("Failed to write project manifest after active scene update");
+            return false;
+        }
+
+        output.write(manifest_contents.data(), static_cast<std::streamsize>(manifest_contents.size()));
+        return static_cast<bool>(output);
+    }
+
+    bool SetActiveScene(const std::filesystem::path& scene_path)
+    {
+        if (scene_path.extension() != ".scene")
+        {
+            AddLog("Cannot set active scene: selected item is not a scene");
+            return false;
+        }
+
+        if (!std::filesystem::exists(scene_path))
+        {
+            AddLog("Cannot set active scene: scene file does not exist");
+            return false;
+        }
+
+        active_scene_path = scene_path;
+        if (!SaveActiveSceneToProject())
+        {
+            return false;
+        }
+
+        AddLog("Set active scene: " + GetDisplayPath(active_scene_path));
+        return true;
+    }
+
     bool LoadProject(const std::filesystem::path& manifest_path)
     {
         if (manifest_path.extension() != ".engineproj")
@@ -300,12 +473,15 @@ struct EngineState
         if (!startup_scene.empty())
         {
             const std::filesystem::path scene_path = resolved_project_root / startup_scene;
+            active_scene_path = scene_path;
             if (std::filesystem::exists(scene_path) && OpenTextFile(scene_path))
             {
                 AddLog("Loaded startup scene: " + GetDisplayPath(scene_path));
                 return true;
             }
         }
+
+        active_scene_path.clear();
 
         return OpenTextFile(manifest_path);
     }

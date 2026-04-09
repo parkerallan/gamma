@@ -1,0 +1,28 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${default}",
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/build/_deps/imgui-src",
+                "${workspaceFolder}/build/_deps/imgui-src/backends",
+                "${workspaceFolder}/build/_deps/assimp-src/include",
+                "${workspaceFolder}/build/_deps/imnodeflow-src/include",
+                "${workspaceFolder}/build/_deps/imnodeflow-src/src",
+                "${workspaceFolder}/build/_deps/stb-src",
+                "${workspaceFolder}/build/_deps/sdl3-src/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "windowsSdkVersion": "10.0.19041.0",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ],
+    "version": 4
+}

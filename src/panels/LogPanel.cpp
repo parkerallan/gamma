@@ -4,7 +4,16 @@
 
 void LogPanel::Render(EngineState& state)
 {
-    ImGui::Begin("Log");
+    if (!state.show_log_panel)
+    {
+        return;
+    }
+
+    if (!ImGui::Begin("Log", &state.show_log_panel))
+    {
+        ImGui::End();
+        return;
+    }
 
     if (ImGui::Button("Clear"))
     {

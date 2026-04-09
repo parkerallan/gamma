@@ -5,11 +5,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <string_view>
 #include <system_error>
 
 namespace
 {
+bool IsSceneFile(const std::filesystem::path& path)
+{
+    return path.extension() == ".scene";
+}
+
 bool ShouldSkipPath(const std::filesystem::path& path)
 {
     const std::string name = path.filename().string();
@@ -38,13 +44,40 @@ std::string ToLowerCopy(std::string_view value)
     });
     return lowered;
 }
+
+std::string TrimCopy(std::string value)
+{
+    const auto is_space = [](unsigned char character)
+    {
+        return std::isspace(character) != 0;
+    };
+
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char character)
+    {
+        return !is_space(character);
+    }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char character)
+    {
+        return !is_space(character);
+    }).base(), value.end());
+    return value;
+}
 }
 
 FilesPanel::FilesPanel() = default;
 
 void FilesPanel::Render(EngineState& state)
 {
-    ImGui::Begin("Files");
+    if (!state.show_files_panel)
+    {
+        return;
+    }
+
+    if (!ImGui::Begin("Files", &state.show_files_panel))
+    {
+        ImGui::End();
+        return;
+    }
     refresh_requested_ = false;
 
     if (current_root_ != state.project_root)
@@ -101,7 +134,7 @@ void FilesPanel::Render(EngineState& state)
         return;
     }
 
-    creation_menu_.RenderButton(state.project_root, "Add", false);
+    file_tree_changed = creation_menu_.RenderButton(state, state.project_root, "Add", false) || file_tree_changed;
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##FilesSearch", "Search", search_buffer_.data(), search_buffer_.size());
@@ -172,6 +205,10 @@ FileTreeNode FilesPanel::BuildNode(const std::filesystem::path& path) const
 
     if (!node.is_directory)
     {
+        if (IsSceneFile(path))
+        {
+            node.children = BuildSceneObjectNodes(path);
+        }
         return node;
     }
 
@@ -204,6 +241,42 @@ FileTreeNode FilesPanel::BuildNode(const std::filesystem::path& path) const
     return node;
 }
 
+std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesystem::path& scene_path) const
+{
+    std::vector<FileTreeNode> object_nodes;
+
+    std::ifstream input(scene_path, std::ios::binary);
+    if (!input)
+    {
+        return object_nodes;
+    }
+
+    std::string line;
+    while (std::getline(input, line))
+    {
+        const std::string trimmed = TrimCopy(line);
+        constexpr std::string_view object_prefix = "Object:";
+        if (trimmed.rfind(object_prefix, 0) != 0)
+        {
+            continue;
+        }
+
+        const std::string object_name = TrimCopy(trimmed.substr(object_prefix.size()));
+        if (object_name.empty())
+        {
+            continue;
+        }
+
+        FileTreeNode object_node;
+        object_node.path = scene_path;
+        object_node.label = object_name;
+        object_node.is_scene_object = true;
+        object_nodes.push_back(std::move(object_node));
+    }
+
+    return object_nodes;
+}
+
 void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::string_view filter)
 {
     if (!NodeMatchesFilter(node, filter))
@@ -212,10 +285,17 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     }
 
     const std::string full_path = state.GetDisplayPath(node.path);
+    const std::string tree_id = node.is_scene_object
+        ? full_path + "##" + node.label
+        : full_path;
+    const bool is_scene_file = !node.is_directory && !node.is_scene_object && IsSceneFile(node.path);
     const bool filter_active = !filter.empty();
+    const bool is_selected = node.is_scene_object
+        ? state.selected_item_path == node.path && state.selected_scene_object_name == node.label
+        : state.selected_item_path == node.path && !state.HasSelectedSceneObject();
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
-    if (!node.is_directory)
+    if (!node.is_directory && node.children.empty())
     {
         flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
     }
@@ -223,13 +303,27 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     {
         flags |= ImGuiTreeNodeFlags_DefaultOpen;
     }
+    if (is_selected)
+    {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
 
-    const bool opened = ImGui::TreeNodeEx(full_path.c_str(), flags, "%s", node.label.c_str());
+    if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.52f, 1.0f));
+    }
+
+    const bool opened = ImGui::TreeNodeEx(tree_id.c_str(), flags, "%s", node.label.c_str());
+
+    if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
+    {
+        ImGui::PopStyleColor();
+    }
     const bool tree_item_clicked = ImGui::IsItemClicked();
-    const bool moved_from_source = RenderMoveSource(node, state);
+    const bool moved_from_source = !node.is_scene_object && RenderMoveSource(node, state);
     bool moved_to_directory = false;
 
-    if (file_context_menu_.RenderItemMenu(node.path, node.is_directory, state))
+    if (!node.is_scene_object && file_context_menu_.RenderItemMenu(node.path, node.is_directory, state))
     {
         refresh_requested_ = true;
     }
@@ -237,22 +331,33 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     if (node.is_directory)
     {
         moved_to_directory = RenderMoveTarget(node.path, state);
-        creation_menu_.RenderButton(node.path);
+        refresh_requested_ = creation_menu_.RenderButton(state, node.path) || refresh_requested_;
     }
 
     if (tree_item_clicked && !moved_from_source && !moved_to_directory)
     {
-        if (node.is_directory)
+        if (node.is_scene_object)
         {
+            state.SetSelectedSceneObject(node.path, node.label);
+            state.OpenTextFile(node.path);
+            state.AddLog("Selected scene object: " + node.label + " in " + full_path);
+        }
+        else if (node.is_directory)
+        {
+            state.SetSelectedItem(node.path);
             state.AddLog("Selected folder: " + full_path);
         }
-        else if (!state.OpenTextFile(node.path))
+        else
         {
-            state.AddLog("Selected file item: " + full_path);
+            state.SetSelectedItem(node.path);
+            if (!state.OpenTextFile(node.path))
+            {
+                state.AddLog("Selected file item: " + full_path);
+            }
         }
     }
 
-    if (opened && node.is_directory)
+    if (opened && (!node.is_directory ? !node.children.empty() : true))
     {
         for (const FileTreeNode& child : node.children)
         {

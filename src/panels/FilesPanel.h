@@ -17,6 +17,7 @@ struct FileTreeNode
     std::filesystem::path path;
     std::string label;
     bool is_directory = false;
+    bool is_scene_object = false;
     std::vector<FileTreeNode> children;
 };
 
@@ -41,6 +42,7 @@ private:
 
     void RebuildTree(const std::filesystem::path& root);
     FileTreeNode BuildNode(const std::filesystem::path& path) const;
+    std::vector<FileTreeNode> BuildSceneObjectNodes(const std::filesystem::path& scene_path) const;
     void RenderNode(const FileTreeNode& node, EngineState& state, std::string_view filter);
     bool RenderProjectRootDropTarget(EngineState& state);
     bool RenderMoveSource(const FileTreeNode& node, EngineState& state);

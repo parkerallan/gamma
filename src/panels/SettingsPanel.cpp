@@ -4,7 +4,16 @@
 
 void SettingsPanel::Render(EngineState& state)
 {
-    ImGui::Begin("Settings");
+    if (!state.show_settings_panel)
+    {
+        return;
+    }
+
+    if (!ImGui::Begin("Settings", &state.show_settings_panel))
+    {
+        ImGui::End();
+        return;
+    }
 
     if (ImGui::CollapsingHeader("Project", ImGuiTreeNodeFlags_DefaultOpen))
     {

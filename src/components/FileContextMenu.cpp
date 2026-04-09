@@ -53,6 +53,18 @@ bool FileContextMenu::RenderItemMenu(const std::filesystem::path& target_path, b
     ImGui::PushID(target_path.generic_string().c_str());
     if (ImGui::BeginPopupContextItem("FileItemContextMenu"))
     {
+        const bool is_scene_file = !is_directory && target_path.extension() == ".scene";
+        if (is_scene_file)
+        {
+            const bool is_active_scene = state.IsActiveScene(target_path);
+            if (ImGui::MenuItem("Set as Active", nullptr, false, !is_active_scene))
+            {
+                changed = state.SetActiveScene(target_path) || changed;
+            }
+
+            ImGui::Separator();
+        }
+
         if (ImGui::MenuItem("Rename"))
         {
             QueueRename(target_path, is_directory);

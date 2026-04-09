@@ -86,6 +86,7 @@ bool EngineApplication::Init()
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+    io.ConfigDockingAlwaysTabBar = true;
 
     ApplyStyle();
 
@@ -136,6 +137,7 @@ void EngineApplication::RunLoop()
 void EngineApplication::Shutdown()
 {
     workspace_panel_.Shutdown();
+    info_panel_.Shutdown();
 
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
@@ -184,6 +186,7 @@ void EngineApplication::RenderUI()
     ImGui::SetNextWindowViewport(viewport->ID);
 
     ImGuiWindowFlags host_window_flags = ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_MenuBar |
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoResize |
@@ -197,6 +200,8 @@ void EngineApplication::RenderUI()
     ImGui::Begin("EngineDockHost", nullptr, host_window_flags);
     ImGui::PopStyleVar(3);
 
+    RenderMainMenuBar();
+
     const ImGuiID dockspace_id = ImGui::GetID("EngineDockSpace");
     BuildDefaultDockLayout(dockspace_id);
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
@@ -205,7 +210,122 @@ void EngineApplication::RenderUI()
     files_panel_.Render(state_);
     workspace_panel_.Render(state_);
     settings_panel_.Render(state_);
+    info_panel_.Render(state_, renderer_);
     log_panel_.Render(state_);
+}
+
+void EngineApplication::RenderMainMenuBar()
+{
+    if (!ImGui::BeginMenuBar())
+    {
+        return;
+    }
+
+    if (ImGui::BeginMenu("File"))
+    {
+        if (ImGui::MenuItem("Open Project..."))
+        {
+            state_.request_open_project_dialog = true;
+        }
+
+        if (ImGui::MenuItem("New Project..."))
+        {
+            state_.request_new_project_dialog = true;
+        }
+
+        const bool has_open_project = state_.HasOpenProject();
+        if (ImGui::MenuItem("Close Project", nullptr, false, has_open_project))
+        {
+            state_.ClearOpenProject();
+        }
+
+        ImGui::Separator();
+
+        const bool has_open_file = state_.HasOpenFile();
+        if (ImGui::MenuItem("Save", "Ctrl+S", false, has_open_file))
+        {
+            state_.SaveOpenFile();
+        }
+
+        if (ImGui::MenuItem("Reload", nullptr, false, has_open_file))
+        {
+            state_.OpenTextFile(state_.open_file_path);
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Exit"))
+        {
+            running_ = false;
+        }
+
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Edit"))
+    {
+        const bool has_open_file = state_.HasOpenFile();
+
+        if (ImGui::MenuItem("Save Current File", "Ctrl+S", false, has_open_file))
+        {
+            state_.SaveOpenFile();
+        }
+
+        if (ImGui::MenuItem("Reload From Disk", nullptr, false, has_open_file))
+        {
+            state_.OpenTextFile(state_.open_file_path);
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Scene Tab", nullptr, state_.active_tab == WorkspaceTab::Scene, true))
+        {
+            state_.show_workspace_panel = true;
+            state_.RequestTab(WorkspaceTab::Scene);
+        }
+
+        if (ImGui::MenuItem("Graph Tab", nullptr, state_.active_tab == WorkspaceTab::Graph, true))
+        {
+            state_.show_workspace_panel = true;
+            state_.RequestTab(WorkspaceTab::Graph);
+        }
+
+        if (ImGui::MenuItem("Editor Tab", nullptr, state_.active_tab == WorkspaceTab::Editor, true))
+        {
+            state_.show_workspace_panel = true;
+            state_.RequestTab(WorkspaceTab::Editor);
+        }
+
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Settings"))
+    {
+        if (ImGui::MenuItem("Open Settings Panel"))
+        {
+            state_.show_settings_panel = true;
+        }
+
+        ImGui::Separator();
+        ImGui::MenuItem("Auto-open startup scene", nullptr, &state_.auto_open_startup_scene);
+        ImGui::MenuItem("Confirm before delete", nullptr, &state_.confirm_before_delete);
+        ImGui::MenuItem("Highlight drop targets", nullptr, &state_.highlight_drop_targets);
+        ImGui::MenuItem("Wrap editor text", nullptr, &state_.wrap_editor_text);
+        ImGui::MenuItem("Auto-scroll log", nullptr, &state_.auto_scroll_log);
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Panels"))
+    {
+        ImGui::MenuItem("Files", nullptr, &state_.show_files_panel);
+        ImGui::MenuItem("Workspace", nullptr, &state_.show_workspace_panel);
+        ImGui::MenuItem("Settings", nullptr, &state_.show_settings_panel);
+        ImGui::MenuItem("Info", nullptr, &state_.show_info_panel);
+        ImGui::MenuItem("Log", nullptr, &state_.show_log_panel);
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMenuBar();
 }
 
 void EngineApplication::ApplyStyle()
@@ -272,7 +392,8 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
 
     ImGui::DockBuilderDockWindow("Files", left_id);
     ImGui::DockBuilderDockWindow("Workspace", center_id);
-    ImGui::DockBuilderDockWindow("Settings", right_id);
+    ImGui::DockBuilderDockWindow("Settings", center_id);
+    ImGui::DockBuilderDockWindow("Info", right_id);
     ImGui::DockBuilderDockWindow("Log", bottom_id);
     ImGui::DockBuilderFinish(dockspace_id);
 

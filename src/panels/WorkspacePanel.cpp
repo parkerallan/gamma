@@ -18,7 +18,16 @@ WorkspacePanel::~WorkspacePanel()
 
 void WorkspacePanel::Render(EngineState& state)
 {
-    ImGui::Begin("Workspace");
+    if (!state.show_workspace_panel)
+    {
+        return;
+    }
+
+    if (!ImGui::Begin("Workspace", &state.show_workspace_panel))
+    {
+        ImGui::End();
+        return;
+    }
 
     WorkspaceTab new_active_tab = state.active_tab;
 

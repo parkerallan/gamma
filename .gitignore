@@ -1,2 +1,4 @@
 /build
 /test*
+*.code-workspace
+*.log

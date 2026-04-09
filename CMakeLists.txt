@@ -48,6 +48,30 @@ if(NOT imnodeflow_POPULATED)
     FetchContent_Populate(imnodeflow)
 endif()
 
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    assimp
+    GIT_REPOSITORY https://github.com/assimp/assimp.git
+    GIT_TAG v5.4.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(assimp)
+
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()
+
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
 set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
 
@@ -89,13 +113,16 @@ endif()
 
 add_executable(engine
     src/app/main.cpp
+    src/assets/AssetMetadata.cpp
     src/app/EngineApplication.cpp
+    src/assets/ModelMetadata.cpp
     src/components/CreationMenu.cpp
     src/components/FileContextMenu.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
     src/graph/NodeLibrary.cpp
     src/panels/FilesPanel.cpp
+    src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
     src/panels/SettingsPanel.cpp
     src/panels/WorkspacePanel.cpp
@@ -113,6 +140,12 @@ target_link_libraries(engine PRIVATE
     imgui
     imnodeflow
 )
+
+if(TARGET assimp::assimp)
+    target_link_libraries(engine PRIVATE assimp::assimp)
+elseif(TARGET assimp)
+    target_link_libraries(engine PRIVATE assimp)
+endif()
 
 if(WIN32)
     target_link_libraries(engine PRIVATE Ole32 Shell32)
@@ -134,6 +167,8 @@ if(MSVC)
         "/external:I${IMNODEFLOW_DIR}/src"
         "/external:I${IMGUI_DIR}"
         "/external:I${IMGUI_DIR}/backends"
+        "/external:I${assimp_SOURCE_DIR}/include"
+        "/external:I${stb_SOURCE_DIR}"
     )
 else()
     target_compile_options(engine PRIVATE -Wall -Wextra -Wpedantic)

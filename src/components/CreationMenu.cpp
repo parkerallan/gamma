@@ -5,6 +5,17 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <string>
+#include <system_error>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <ShObjIdl.h>
+#include <combaseapi.h>
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -55,10 +66,231 @@ std::string BuildScriptStub(const std::string& file_stem)
         "    std::cout << \"" + file_stem + " running\\n\";\n" +
         "}\n";
 }
+
+std::string BuildSceneStub(const std::string& scene_name)
+{
+    return "Scene: " + scene_name + "\n";
 }
 
-void CreationMenu::RenderButton(const std::filesystem::path& directory_path, const char* label, bool align_right)
+std::string BuildMaterialStub(const std::string& material_name)
 {
+    return "Material: " + material_name + "\n"
+        "Shader: Default\n"
+        "BaseColor: 1.0, 1.0, 1.0, 1.0\n";
+}
+
+std::string BuildObjectStub(const std::string& object_name)
+{
+    return "\nObject: " + object_name + "\n"
+        "Type: Empty\n"
+        "Position: 0, 0, 0\n"
+        "Rotation: 0, 0, 0\n"
+        "Scale: 1, 1, 1\n";
+}
+
+bool IsPathWithin(const std::filesystem::path& parent_path, const std::filesystem::path& candidate_path)
+{
+    std::error_code error;
+    const std::filesystem::path relative = std::filesystem::relative(candidate_path, parent_path, error);
+    if (error)
+    {
+        return false;
+    }
+
+    const std::string relative_string = relative.generic_string();
+    return relative == "." || (!relative.empty() && relative_string != ".." && relative_string.rfind("../", 0) != 0);
+}
+
+bool HasExtension(const std::filesystem::path& path, std::initializer_list<const char*> extensions)
+{
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+
+    for (const char* candidate : extensions)
+    {
+        if (extension == candidate)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::filesystem::path GetAvailablePath(const std::filesystem::path& destination_directory, const std::filesystem::path& source_path)
+{
+    std::filesystem::path candidate_path = destination_directory / source_path.filename();
+    if (!std::filesystem::exists(candidate_path))
+    {
+        return candidate_path;
+    }
+
+    const std::string stem = source_path.stem().string();
+    const std::string extension = source_path.extension().string();
+    for (int index = 1; index < 1000; ++index)
+    {
+        candidate_path = destination_directory / (stem + " (" + std::to_string(index) + ")" + extension);
+        if (!std::filesystem::exists(candidate_path))
+        {
+            return candidate_path;
+        }
+    }
+
+    return {};
+}
+
+std::filesystem::path ResolveSceneTarget(const EngineState& state)
+{
+    if (state.HasSelectedItem() && HasExtension(state.selected_item_path, {".scene"}))
+    {
+        return state.selected_item_path;
+    }
+
+    if (state.HasOpenFile() && HasExtension(state.open_file_path, {".scene"}))
+    {
+        return state.open_file_path;
+    }
+
+    const std::filesystem::path default_scene_path = state.project_root / "Scenes" / "Main.scene";
+    if (std::filesystem::exists(default_scene_path))
+    {
+        return default_scene_path;
+    }
+
+    const std::filesystem::path scenes_directory = state.project_root / "Scenes";
+    std::error_code error;
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(scenes_directory, error))
+    {
+        if (error)
+        {
+            break;
+        }
+
+        if (entry.is_regular_file() && HasExtension(entry.path(), {".scene"}))
+        {
+            return entry.path();
+        }
+    }
+
+    return {};
+}
+
+#ifdef _WIN32
+class ScopedComInitialization
+{
+public:
+    ScopedComInitialization()
+        : result_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))
+    {
+    }
+
+    ~ScopedComInitialization()
+    {
+        if (SUCCEEDED(result_))
+        {
+            CoUninitialize();
+        }
+    }
+
+    HRESULT Result() const
+    {
+        return result_;
+    }
+
+private:
+    HRESULT result_;
+};
+
+std::filesystem::path ShowNativeImportDialog(const wchar_t* title, const COMDLG_FILTERSPEC* filters, std::size_t filter_count)
+{
+    ScopedComInitialization com;
+    if (FAILED(com.Result()))
+    {
+        return {};
+    }
+
+    IFileDialog* dialog = nullptr;
+    HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&dialog));
+    if (FAILED(result) || dialog == nullptr)
+    {
+        return {};
+    }
+
+    DWORD options = 0;
+    result = dialog->GetOptions(&options);
+    if (SUCCEEDED(result))
+    {
+        options |= FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST;
+        dialog->SetOptions(options);
+        dialog->SetTitle(title);
+        dialog->SetFileTypes(static_cast<UINT>(filter_count), filters);
+        dialog->SetFileTypeIndex(1);
+    }
+
+    std::filesystem::path selected_path;
+    result = dialog->Show(nullptr);
+    if (SUCCEEDED(result))
+    {
+        IShellItem* shell_item = nullptr;
+        result = dialog->GetResult(&shell_item);
+        if (SUCCEEDED(result) && shell_item != nullptr)
+        {
+            PWSTR display_name = nullptr;
+            result = shell_item->GetDisplayName(SIGDN_FILESYSPATH, &display_name);
+            if (SUCCEEDED(result) && display_name != nullptr)
+            {
+                selected_path = display_name;
+                CoTaskMemFree(display_name);
+            }
+            shell_item->Release();
+        }
+    }
+
+    dialog->Release();
+    return selected_path;
+}
+
+std::filesystem::path ShowNativeModelImportDialog()
+{
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"Supported Models", L"*.fbx;*.glb"},
+        {L"FBX", L"*.fbx"},
+        {L"Binary glTF", L"*.glb"},
+        {L"All Files", L"*.*"},
+    };
+    return ShowNativeImportDialog(L"Import Model (.fbx/.glb)", filters, std::size(filters));
+}
+
+std::filesystem::path ShowNativeMaterialImportDialog()
+{
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"Material Files", L"*.mat"},
+        {L"All Files", L"*.*"},
+    };
+    return ShowNativeImportDialog(L"Import Material (.mat)", filters, std::size(filters));
+}
+
+std::filesystem::path ShowNativeTextureImportDialog()
+{
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"Textures", L"*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.gif;*.psd;*.hdr"},
+        {L"PNG", L"*.png"},
+        {L"JPEG", L"*.jpg;*.jpeg"},
+        {L"Targa", L"*.tga"},
+        {L"Bitmap", L"*.bmp"},
+        {L"All Files", L"*.*"},
+    };
+    return ShowNativeImportDialog(L"Import Texture", filters, std::size(filters));
+}
+#endif
+}
+
+bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path& directory_path, const char* label, bool align_right)
+{
+    bool changed = false;
     ImGui::PushID(directory_path.generic_string().c_str());
 
     if (align_right)
@@ -87,10 +319,46 @@ void CreationMenu::RenderButton(const std::filesystem::path& directory_path, con
             OpenCreateDialog(directory_path, CreateTarget::Script);
         }
 
+        const std::filesystem::path scene_directory = directory_path == state.project_root ? state.project_root / "Scenes" : directory_path;
+        if (ImGui::MenuItem("New Scene (.scene)"))
+        {
+            OpenCreateDialog(scene_directory, CreateTarget::Scene);
+        }
+
+        const std::filesystem::path material_directory = directory_path == state.project_root ? state.project_root / "Assets" / "Materials" : directory_path;
+        if (ImGui::MenuItem("New Material (.mat)"))
+        {
+            OpenCreateDialog(material_directory, CreateTarget::Material);
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Import Model (.fbx/.glb)..."))
+        {
+            changed = ImportModel(state, directory_path) || changed;
+        }
+
+        if (ImGui::MenuItem("Import Material (.mat)..."))
+        {
+            changed = ImportMaterial(state, directory_path) || changed;
+        }
+
+        if (ImGui::MenuItem("Import Texture..."))
+        {
+            changed = ImportTexture(state, directory_path) || changed;
+        }
+
+        const std::filesystem::path target_scene_path = ResolveSceneTarget(state);
+        if (ImGui::MenuItem("Add Object", nullptr, false, !target_scene_path.empty()))
+        {
+            OpenCreateDialog(directory_path, CreateTarget::Object, target_scene_path);
+        }
+
         ImGui::EndPopup();
     }
 
     ImGui::PopID();
+    return changed;
 }
 
 bool CreationMenu::Render(EngineState& state)
@@ -107,8 +375,22 @@ bool CreationMenu::Render(EngineState& state)
     }
 
     const bool creating_folder = create_target_ == CreateTarget::Folder;
-    ImGui::TextUnformatted(creating_folder ? "Create Folder" : "Create Script");
+    const bool creating_script = create_target_ == CreateTarget::Script;
+    const bool creating_scene = create_target_ == CreateTarget::Scene;
+    const bool creating_material = create_target_ == CreateTarget::Material;
+    const bool creating_object = create_target_ == CreateTarget::Object;
+
+    const char* title = creating_folder ? "Create Folder"
+        : creating_script ? "Create Script"
+        : creating_scene ? "Create Scene"
+        : creating_material ? "Create Material"
+        : "Add Object";
+    ImGui::TextUnformatted(title);
     ImGui::Text("Target: %s", state.GetDisplayPath(target_directory_).c_str());
+    if (creating_object)
+    {
+        ImGui::Text("Scene: %s", state.GetDisplayPath(target_scene_path_).c_str());
+    }
     ImGui::Separator();
 
     if (focus_name_input_)
@@ -118,7 +400,12 @@ bool CreationMenu::Render(EngineState& state)
     }
 
     ImGui::PushItemWidth(240.0f);
-    const bool submitted = ImGui::InputText(creating_folder ? "Folder Name" : "Script Name", name_buffer_.data(), name_buffer_.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+    const char* input_label = creating_folder ? "Folder Name"
+        : creating_script ? "Script Name"
+        : creating_scene ? "Scene Name"
+        : creating_material ? "Material Name"
+        : "Object Name";
+    const bool submitted = ImGui::InputText(input_label, name_buffer_.data(), name_buffer_.size(), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
 
     bool created_item = false;
@@ -152,10 +439,52 @@ bool CreationMenu::CreateItem(EngineState& state)
         return false;
     }
 
+    if (create_target_ == CreateTarget::Object)
+    {
+        if (target_scene_path_.empty())
+        {
+            state.AddLog("Cannot add object: no target scene is available");
+            return false;
+        }
+
+        if (state.HasOpenFile() && state.open_file_path == target_scene_path_ && state.open_file_dirty)
+        {
+            state.AddLog("Cannot add object: save the open scene before editing it from the add menu");
+            return false;
+        }
+
+        std::ofstream output(target_scene_path_, std::ios::binary | std::ios::app);
+        if (!output)
+        {
+            state.AddLog("Failed to add object to scene: " + state.GetDisplayPath(target_scene_path_));
+            return false;
+        }
+
+        output << BuildObjectStub(item_name);
+        if (!output)
+        {
+            state.AddLog("Failed while writing scene object: " + state.GetDisplayPath(target_scene_path_));
+            return false;
+        }
+
+        state.AddLog("Added object to scene: " + state.GetDisplayPath(target_scene_path_));
+        state.SetSelectedItem(target_scene_path_);
+        state.OpenTextFile(target_scene_path_);
+        return true;
+    }
+
     std::filesystem::path target_path = target_directory_ / item_name;
     if (create_target_ == CreateTarget::Script && target_path.extension() != ".cpp")
     {
         target_path += ".cpp";
+    }
+    else if (create_target_ == CreateTarget::Scene && target_path.extension() != ".scene")
+    {
+        target_path += ".scene";
+    }
+    else if (create_target_ == CreateTarget::Material && target_path.extension() != ".mat")
+    {
+        target_path += ".mat";
     }
 
     if (std::filesystem::exists(target_path))
@@ -178,28 +507,236 @@ bool CreationMenu::CreateItem(EngineState& state)
         return true;
     }
 
+    std::error_code directory_error;
+    std::filesystem::create_directories(target_path.parent_path(), directory_error);
+    if (directory_error)
+    {
+        state.AddLog("Failed to create item directory: " + state.GetDisplayPath(target_path.parent_path()));
+        return false;
+    }
+
     std::ofstream output(target_path, std::ios::binary | std::ios::trunc);
     if (!output)
     {
-        state.AddLog("Failed to create script: " + state.GetDisplayPath(target_path));
+        state.AddLog("Failed to create item: " + state.GetDisplayPath(target_path));
         return false;
     }
 
-    output << BuildScriptStub(target_path.stem().string());
+    if (create_target_ == CreateTarget::Script)
+    {
+        output << BuildScriptStub(target_path.stem().string());
+    }
+    else if (create_target_ == CreateTarget::Scene)
+    {
+        output << BuildSceneStub(target_path.stem().string());
+    }
+    else if (create_target_ == CreateTarget::Material)
+    {
+        output << BuildMaterialStub(target_path.stem().string());
+    }
+
     if (!output)
     {
-        state.AddLog("Failed while writing script: " + state.GetDisplayPath(target_path));
+        state.AddLog("Failed while writing item: " + state.GetDisplayPath(target_path));
         return false;
     }
 
-    state.AddLog("Created script: " + state.GetDisplayPath(target_path));
+    const char* item_kind = create_target_ == CreateTarget::Script ? "script"
+        : create_target_ == CreateTarget::Scene ? "scene"
+        : "material";
+    state.AddLog(std::string("Created ") + item_kind + ": " + state.GetDisplayPath(target_path));
+    state.SetSelectedItem(target_path);
     state.OpenTextFile(target_path);
     return true;
 }
 
-void CreationMenu::OpenCreateDialog(const std::filesystem::path& directory_path, CreateTarget create_target)
+bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& directory_path)
+{
+    if (!state.HasOpenProject())
+    {
+        state.AddLog("Cannot import model: no project is loaded");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Models";
+    if (!directory_path.empty() && !state.project_root.empty() && IsPathWithin(state.project_root, directory_path))
+    {
+        const std::filesystem::path assets_directory = state.project_root / "Assets";
+        if (IsPathWithin(assets_directory, directory_path))
+        {
+            destination_directory = directory_path;
+        }
+    }
+
+    std::error_code directory_error;
+    std::filesystem::create_directories(destination_directory, directory_error);
+    if (directory_error)
+    {
+        state.AddLog("Failed to prepare model directory: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    const std::filesystem::path source_path = ShowNativeModelImportDialog();
+    if (source_path.empty())
+    {
+        return false;
+    }
+
+    if (!HasExtension(source_path, {".fbx", ".glb"}))
+    {
+        state.AddLog("Cannot import model: only .fbx and .glb are supported");
+        return false;
+    }
+
+    const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
+    if (destination_path.empty())
+    {
+        state.AddLog("Cannot import model: failed to choose a destination name");
+        return false;
+    }
+
+    std::error_code copy_error;
+    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
+    if (copy_error)
+    {
+        state.AddLog("Failed to import model into: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    state.SetSelectedItem(destination_path);
+    state.AddLog("Imported model: " + state.GetDisplayPath(destination_path));
+    return true;
+#else
+    state.AddLog("Model import is only implemented on Windows");
+    return false;
+#endif
+}
+
+bool CreationMenu::ImportMaterial(EngineState& state, const std::filesystem::path& directory_path)
+{
+    if (!state.HasOpenProject())
+    {
+        state.AddLog("Cannot import material: no project is loaded");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Materials";
+    const std::filesystem::path materials_directory = state.project_root / "Assets" / "Materials";
+    if (!directory_path.empty() && IsPathWithin(materials_directory, directory_path))
+    {
+        destination_directory = directory_path;
+    }
+
+    std::error_code directory_error;
+    std::filesystem::create_directories(destination_directory, directory_error);
+    if (directory_error)
+    {
+        state.AddLog("Failed to prepare material directory: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    const std::filesystem::path source_path = ShowNativeMaterialImportDialog();
+    if (source_path.empty())
+    {
+        return false;
+    }
+
+    if (!HasExtension(source_path, {".mat"}))
+    {
+        state.AddLog("Cannot import material: only .mat is supported");
+        return false;
+    }
+
+    const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
+    if (destination_path.empty())
+    {
+        state.AddLog("Cannot import material: failed to choose a destination name");
+        return false;
+    }
+
+    std::error_code copy_error;
+    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
+    if (copy_error)
+    {
+        state.AddLog("Failed to import material into: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    state.SetSelectedItem(destination_path);
+    state.AddLog("Imported material: " + state.GetDisplayPath(destination_path));
+    return true;
+#else
+    state.AddLog("Material import is only implemented on Windows");
+    return false;
+#endif
+}
+
+bool CreationMenu::ImportTexture(EngineState& state, const std::filesystem::path& directory_path)
+{
+    if (!state.HasOpenProject())
+    {
+        state.AddLog("Cannot import texture: no project is loaded");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Textures";
+    const std::filesystem::path textures_directory = state.project_root / "Assets" / "Textures";
+    if (!directory_path.empty() && IsPathWithin(textures_directory, directory_path))
+    {
+        destination_directory = directory_path;
+    }
+
+    std::error_code directory_error;
+    std::filesystem::create_directories(destination_directory, directory_error);
+    if (directory_error)
+    {
+        state.AddLog("Failed to prepare texture directory: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    const std::filesystem::path source_path = ShowNativeTextureImportDialog();
+    if (source_path.empty())
+    {
+        return false;
+    }
+
+    if (!HasExtension(source_path, {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".psd", ".hdr"}))
+    {
+        state.AddLog("Cannot import texture: unsupported texture format");
+        return false;
+    }
+
+    const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
+    if (destination_path.empty())
+    {
+        state.AddLog("Cannot import texture: failed to choose a destination name");
+        return false;
+    }
+
+    std::error_code copy_error;
+    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
+    if (copy_error)
+    {
+        state.AddLog("Failed to import texture into: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    state.SetSelectedItem(destination_path);
+    state.AddLog("Imported texture: " + state.GetDisplayPath(destination_path));
+    return true;
+#else
+    state.AddLog("Texture import is only implemented on Windows");
+    return false;
+#endif
+}
+
+void CreationMenu::OpenCreateDialog(const std::filesystem::path& directory_path, CreateTarget create_target, std::filesystem::path target_scene_path)
 {
     target_directory_ = directory_path;
+    target_scene_path_ = std::move(target_scene_path);
     create_target_ = create_target;
     focus_name_input_ = true;
     open_create_popup_ = true;
@@ -209,6 +746,7 @@ void CreationMenu::OpenCreateDialog(const std::filesystem::path& directory_path,
 void CreationMenu::Reset()
 {
     target_directory_.clear();
+    target_scene_path_.clear();
     create_target_ = CreateTarget::None;
     focus_name_input_ = false;
     open_create_popup_ = false;
