@@ -593,7 +593,6 @@ struct EngineState
         open_file_dirty = false;
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         std::copy(open_file_contents.begin(), open_file_contents.end(), editor_buffer.begin());
-        RequestTab(WorkspaceTab::Editor);
         AddLog("Opened text file in engine: " + GetDisplayPath(path));
         return true;
     }

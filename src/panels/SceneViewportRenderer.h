@@ -1,10 +1,11 @@
 #pragma once
 
+#include "app/VulkanContext.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "state/EngineState.h"
 
-#include <SDL3/SDL_gpu.h>
+#include <vulkan/vulkan.h>
 
 #include <array>
 #include <cstdint>
@@ -32,7 +33,7 @@ using SceneViewportModelResolver = std::function<SceneViewportResolvedModel(cons
 class SceneViewportRenderer
 {
 public:
-    bool Initialize(SDL_GPUDevice* device, SDL_GPUTextureFormat color_target_format);
+    bool Initialize(VulkanContext* context);
     void Shutdown();
     void BeginFrame();
     void RenderUi(
@@ -40,7 +41,7 @@ public:
         const SceneMetadata& scene_metadata,
         const SceneViewportModelResolver& resolve_model_asset,
         SceneViewportCameraState& camera_state);
-    void RenderGpu(SDL_GPUCommandBuffer* command_buffer);
+    void RenderGpu();
 
 public:
     struct GpuMeshSection
@@ -50,19 +51,34 @@ public:
         std::uint32_t material_index = 0;
     };
 
+    struct GpuBuffer
+    {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDeviceSize size = 0;
+    };
+
+    struct GpuTexture
+    {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    };
+
     struct GpuMeshCacheEntry
     {
         std::filesystem::file_time_type write_time{};
-        SDL_GPUBuffer* vertex_buffer = nullptr;
-        SDL_GPUBuffer* index_buffer = nullptr;
+        GpuBuffer vertex_buffer{};
+        GpuBuffer index_buffer{};
         std::vector<GpuMeshSection> sections;
-        std::vector<SDL_GPUTexture*> material_textures;
+        std::vector<GpuTexture> material_textures;
     };
 
     struct GridCacheEntry
     {
-        SDL_GPUBuffer* vertex_buffer = nullptr;
-        SDL_GPUBuffer* index_buffer = nullptr;
+        GpuBuffer vertex_buffer{};
+        GpuBuffer index_buffer{};
         std::uint32_t index_count = 0;
         float spacing = 0.0f;
         float extent = 0.0f;
@@ -84,13 +100,27 @@ public:
     };
 
 private:
-    SDL_GPUDevice* device_ = nullptr;
-    SDL_GPUTextureFormat color_target_format_ = SDL_GPU_TEXTUREFORMAT_INVALID;
-    SDL_GPUGraphicsPipeline* pipeline_ = nullptr;
-    SDL_GPUSampler* material_sampler_ = nullptr;
-    SDL_GPUTexture* fallback_texture_ = nullptr;
-    SDL_GPUTexture* color_texture_ = nullptr;
-    SDL_GPUTexture* depth_texture_ = nullptr;
+    VulkanContext* vulkan_context_ = nullptr;
+    VkPipelineLayout scene_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline scene_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout material_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkSampler material_sampler_ = VK_NULL_HANDLE;
+    GpuTexture fallback_texture_{};
+    VkRenderPass offscreen_render_pass_ = VK_NULL_HANDLE;
+    VkFramebuffer offscreen_framebuffer_ = VK_NULL_HANDLE;
+    VkImage offscreen_color_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory offscreen_color_memory_ = VK_NULL_HANDLE;
+    VkImageView offscreen_color_view_ = VK_NULL_HANDLE;
+    VkSampler offscreen_color_sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSet offscreen_color_descriptor_set_ = VK_NULL_HANDLE;
+    VkImage offscreen_depth_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory offscreen_depth_memory_ = VK_NULL_HANDLE;
+    VkImageView offscreen_depth_view_ = VK_NULL_HANDLE;
+    VkCommandPool offscreen_command_pool_ = VK_NULL_HANDLE;
+    VkCommandBuffer offscreen_command_buffer_ = VK_NULL_HANDLE;
+    VkFence offscreen_render_fence_ = VK_NULL_HANDLE;
+    VkImageLayout offscreen_color_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint32_t target_width_ = 0;
     std::uint32_t target_height_ = 0;
     bool render_requested_ = false;
@@ -106,6 +136,8 @@ private:
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
     GridCacheEntry grid_cache_{};
 
+    void ReleaseBuffer(GpuBuffer& buffer);
+    void ReleaseTexture(GpuTexture& texture);
     void ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry);
     void ReleaseGridCacheEntry();
     void DestroyRenderTargets();

@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_package(Vulkan REQUIRED)
+
 find_program(GLSLC_EXECUTABLE
     NAMES glslc
     HINTS
@@ -147,6 +149,7 @@ add_library(imgui STATIC
     ${IMGUI_DIR}/imgui_widgets.cpp
     ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
     ${IMGUI_DIR}/backends/imgui_impl_sdlgpu3.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
 
 target_include_directories(imgui
@@ -155,7 +158,7 @@ target_include_directories(imgui
         ${IMGUI_DIR}/backends
 )
 
-target_link_libraries(imgui PUBLIC SDL3::SDL3)
+target_link_libraries(imgui PUBLIC SDL3::SDL3 Vulkan::Vulkan)
 
 add_library(imnodeflow STATIC
     ${IMNODEFLOW_DIR}/src/ImNodeFlow.cpp
@@ -190,6 +193,7 @@ endif()
 
 add_executable(engine
     src/app/main.cpp
+    src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
     src/assets/ModelAsset.cpp
     src/app/EngineApplication.cpp
@@ -206,6 +210,7 @@ add_executable(engine
     src/panels/LogPanel.cpp
     src/panels/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
+    src/panels/TextureInfoRenderer.cpp
     src/panels/WorkspacePanel.cpp
 )
 

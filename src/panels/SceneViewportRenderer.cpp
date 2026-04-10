@@ -4,11 +4,13 @@
 
 #include <ImGuizmo.h>
 
+#include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -40,6 +42,19 @@ struct SceneUniformBlock
     float model[16] = {};
     float model_view_projection[16] = {};
 };
+
+std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties);
+bool CreateVulkanImage(
+    VkPhysicalDevice physical_device,
+    VkDevice device,
+    std::uint32_t width,
+    std::uint32_t height,
+    VkFormat format,
+    VkImageUsageFlags usage,
+    VkImageAspectFlags aspect_mask,
+    VkImage& image,
+    VkDeviceMemory& memory,
+    VkImageView& image_view);
 
 SceneGpuVertex BuildColoredVertex(float x, float y, float z, float nx, float ny, float nz, float r, float g, float b, float a)
 {
@@ -396,124 +411,352 @@ SceneGpuVertex BuildSceneGpuVertex(const ModelVertex& vertex, const ModelMateria
     return gpu_vertex;
 }
 
-SDL_GPUShader* LoadShaderFromFile(
-    SDL_GPUDevice* device,
-    const std::filesystem::path& path,
-    SDL_GPUShaderStage stage,
-    Uint32 num_uniform_buffers,
-    Uint32 num_samplers)
+VkShaderModule LoadShaderModule(VkDevice device, const std::filesystem::path& path)
 {
     const std::vector<std::uint8_t> shader_bytes = ReadBinaryFile(path);
     if (shader_bytes.empty())
     {
         SDL_Log("Failed to read shader file: %s", path.string().c_str());
-        return nullptr;
+        return VK_NULL_HANDLE;
     }
 
-    SDL_GPUShaderCreateInfo create_info = {};
-    create_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
-    create_info.code = shader_bytes.data();
-    create_info.code_size = static_cast<Uint32>(shader_bytes.size());
-    create_info.entrypoint = "main";
-    create_info.stage = stage;
-    create_info.num_uniform_buffers = num_uniform_buffers;
-    create_info.num_samplers = num_samplers;
-    create_info.num_storage_buffers = 0;
-    create_info.num_storage_textures = 0;
-    return SDL_CreateGPUShader(device, &create_info);
+    VkShaderModuleCreateInfo create_info = {};
+    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = shader_bytes.size();
+    create_info.pCode = reinterpret_cast<const std::uint32_t*>(shader_bytes.data());
+
+    VkShaderModule shader_module = VK_NULL_HANDLE;
+    const VkResult result = vkCreateShaderModule(device, &create_info, nullptr, &shader_module);
+    VulkanContext::CheckVkResult(result);
+    return result == VK_SUCCESS ? shader_module : VK_NULL_HANDLE;
 }
 
-bool UploadTexture(SDL_GPUDevice* device, SDL_GPUTexture* texture, const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height)
+bool CreateVulkanBuffer(
+    VkPhysicalDevice physical_device,
+    VkDevice device,
+    VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags properties,
+    SceneViewportRenderer::GpuBuffer& buffer)
 {
-    if (device == nullptr || texture == nullptr || pixels == nullptr || width == 0 || height == 0)
+    VkBufferCreateInfo buffer_info = {};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = usage;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkResult result = vkCreateBuffer(device, &buffer_info, nullptr, &buffer.buffer);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
     {
         return false;
     }
 
-    const Uint32 upload_size = width * height * 4u;
+    VkMemoryRequirements requirements = {};
+    vkGetBufferMemoryRequirements(device, buffer.buffer, &requirements);
 
-    SDL_GPUTransferBufferCreateInfo transfer_info = {};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = upload_size;
-    SDL_GPUTransferBuffer* transfer_buffer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
-    if (transfer_buffer == nullptr)
+    VkMemoryAllocateInfo allocate_info = {};
+    allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate_info.allocationSize = requirements.size;
+    allocate_info.memoryTypeIndex = FindMemoryType(physical_device, requirements.memoryTypeBits, properties);
+    if (allocate_info.memoryTypeIndex == UINT32_MAX)
     {
+        vkDestroyBuffer(device, buffer.buffer, nullptr);
+        buffer.buffer = VK_NULL_HANDLE;
         return false;
     }
 
-    void* mapped = SDL_MapGPUTransferBuffer(device, transfer_buffer, false);
-    if (mapped == nullptr)
+    result = vkAllocateMemory(device, &allocate_info, nullptr, &buffer.memory);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
     {
-        SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+        vkDestroyBuffer(device, buffer.buffer, nullptr);
+        buffer.buffer = VK_NULL_HANDLE;
         return false;
     }
 
-    std::memcpy(mapped, pixels, upload_size);
-    SDL_UnmapGPUTransferBuffer(device, transfer_buffer);
-
-    SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(device);
-    if (command_buffer == nullptr)
+    result = vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
     {
-        SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+        vkFreeMemory(device, buffer.memory, nullptr);
+        vkDestroyBuffer(device, buffer.buffer, nullptr);
+        buffer.memory = VK_NULL_HANDLE;
+        buffer.buffer = VK_NULL_HANDLE;
         return false;
     }
 
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
-
-    SDL_GPUTextureTransferInfo source = {};
-    source.transfer_buffer = transfer_buffer;
-    source.offset = 0;
-    source.pixels_per_row = width;
-    source.rows_per_layer = height;
-
-    SDL_GPUTextureRegion destination = {};
-    destination.texture = texture;
-    destination.mip_level = 0;
-    destination.layer = 0;
-    destination.x = 0;
-    destination.y = 0;
-    destination.z = 0;
-    destination.w = width;
-    destination.h = height;
-    destination.d = 1;
-
-    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
-    SDL_EndGPUCopyPass(copy_pass);
-    SDL_SubmitGPUCommandBuffer(command_buffer);
-    SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+    buffer.size = size;
     return true;
 }
 
-SDL_GPUTexture* CreateTextureFromAsset(SDL_GPUDevice* device, const ModelTextureAsset& texture_asset)
+bool UploadBufferData(VkDevice device, const SceneViewportRenderer::GpuBuffer& buffer, const void* data, std::size_t size)
 {
-    if (device == nullptr || !texture_asset.valid || texture_asset.width <= 0 || texture_asset.height <= 0 || texture_asset.pixels.empty())
+    if (buffer.buffer == VK_NULL_HANDLE || buffer.memory == VK_NULL_HANDLE || data == nullptr || size == 0)
     {
-        return nullptr;
+        return false;
     }
 
-    SDL_GPUTextureCreateInfo texture_info = {};
-    texture_info.type = SDL_GPU_TEXTURETYPE_2D;
-    texture_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    texture_info.width = static_cast<Uint32>(texture_asset.width);
-    texture_info.height = static_cast<Uint32>(texture_asset.height);
-    texture_info.layer_count_or_depth = 1;
-    texture_info.num_levels = 1;
-    texture_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    texture_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-
-    SDL_GPUTexture* texture = SDL_CreateGPUTexture(device, &texture_info);
-    if (texture == nullptr)
+    void* mapped = nullptr;
+    const VkResult result = vkMapMemory(device, buffer.memory, 0, size, 0, &mapped);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS || mapped == nullptr)
     {
-        return nullptr;
+        return false;
     }
 
-    if (!UploadTexture(device, texture, texture_asset.pixels.data(), texture_info.width, texture_info.height))
+    std::memcpy(mapped, data, size);
+    vkUnmapMemory(device, buffer.memory);
+    return true;
+}
+
+bool ExecuteImmediateCommands(
+    VkDevice device,
+    VkCommandPool command_pool,
+    VkQueue queue,
+    const std::function<void(VkCommandBuffer)>& record_commands)
+{
+    VkCommandBufferAllocateInfo allocate_info = {};
+    allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = command_pool;
+    allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1;
+
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    VkResult result = vkAllocateCommandBuffers(device, &allocate_info, &command_buffer);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
     {
-        SDL_ReleaseGPUTexture(device, texture);
-        return nullptr;
+        return false;
     }
 
-    return texture;
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(command_buffer, &begin_info);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+        return false;
+    }
+
+    record_commands(command_buffer);
+
+    result = vkEndCommandBuffer(command_buffer);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+        return false;
+    }
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+    result = vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+        return false;
+    }
+
+    result = vkQueueWaitIdle(queue);
+    VulkanContext::CheckVkResult(result);
+    vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+    return result == VK_SUCCESS;
+}
+
+void TransitionImageLayout(
+    VkCommandBuffer command_buffer,
+    VkImage image,
+    VkImageAspectFlags aspect_mask,
+    VkImageLayout old_layout,
+    VkImageLayout new_layout,
+    VkPipelineStageFlags src_stage,
+    VkPipelineStageFlags dst_stage,
+    VkAccessFlags src_access_mask,
+    VkAccessFlags dst_access_mask)
+{
+    VkImageMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = aspect_mask;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = src_access_mask;
+    barrier.dstAccessMask = dst_access_mask;
+
+    vkCmdPipelineBarrier(
+        command_buffer,
+        src_stage,
+        dst_stage,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+}
+
+bool AllocateMaterialDescriptorSet(
+    VkDevice device,
+    VkDescriptorPool descriptor_pool,
+    VkDescriptorSetLayout descriptor_set_layout,
+    VkSampler sampler,
+    VkImageView image_view,
+    VkDescriptorSet& descriptor_set)
+{
+    VkDescriptorSetAllocateInfo allocate_info = {};
+    allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocate_info.descriptorPool = descriptor_pool;
+    allocate_info.descriptorSetCount = 1;
+    allocate_info.pSetLayouts = &descriptor_set_layout;
+
+    VkResult result = vkAllocateDescriptorSets(device, &allocate_info, &descriptor_set);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkDescriptorImageInfo image_info = {};
+    image_info.sampler = sampler;
+    image_info.imageView = image_view;
+    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = descriptor_set;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image_info;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    return true;
+}
+
+bool CreateTextureFromAsset(
+    VulkanContext& context,
+    VkCommandPool command_pool,
+    VkDescriptorSetLayout descriptor_set_layout,
+    VkSampler sampler,
+    const ModelTextureAsset& texture_asset,
+    SceneViewportRenderer::GpuTexture& texture)
+{
+    if (!texture_asset.valid || texture_asset.width <= 0 || texture_asset.height <= 0 || texture_asset.pixels.empty())
+    {
+        return false;
+    }
+
+    const VkDevice device = context.GetDevice();
+    const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
+    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) * static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+
+    SceneViewportRenderer::GpuBuffer staging_buffer{};
+    if (!CreateVulkanBuffer(
+            physical_device,
+            device,
+            upload_size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            staging_buffer))
+    {
+        return false;
+    }
+
+    if (!UploadBufferData(device, staging_buffer, texture_asset.pixels.data(), static_cast<std::size_t>(upload_size)))
+    {
+        vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
+        return false;
+    }
+
+    if (!CreateVulkanImage(
+            physical_device,
+            device,
+            static_cast<std::uint32_t>(texture_asset.width),
+            static_cast<std::uint32_t>(texture_asset.height),
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            texture.image,
+            texture.memory,
+            texture.view))
+    {
+        vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
+        return false;
+    }
+
+    const bool upload_succeeded = ExecuteImmediateCommands(device, command_pool, context.GetQueue(), [&](VkCommandBuffer command_buffer)
+    {
+        TransitionImageLayout(
+            command_buffer,
+            texture.image,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+
+        VkBufferImageCopy copy_region = {};
+        copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy_region.imageSubresource.layerCount = 1;
+        copy_region.imageExtent.width = static_cast<std::uint32_t>(texture_asset.width);
+        copy_region.imageExtent.height = static_cast<std::uint32_t>(texture_asset.height);
+        copy_region.imageExtent.depth = 1;
+
+        vkCmdCopyBufferToImage(
+            command_buffer,
+            staging_buffer.buffer,
+            texture.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &copy_region);
+
+        TransitionImageLayout(
+            command_buffer,
+            texture.image,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+    });
+
+    vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
+    vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
+    if (!upload_succeeded)
+    {
+        vkDestroyImageView(device, texture.view, context.GetAllocator());
+        vkDestroyImage(device, texture.image, context.GetAllocator());
+        vkFreeMemory(device, texture.memory, context.GetAllocator());
+        texture = {};
+        return false;
+    }
+
+    if (!AllocateMaterialDescriptorSet(device, context.GetDescriptorPool(), descriptor_set_layout, sampler, texture.view, texture.descriptor_set))
+    {
+        vkDestroyImageView(device, texture.view, context.GetAllocator());
+        vkDestroyImage(device, texture.image, context.GetAllocator());
+        vkFreeMemory(device, texture.memory, context.GetAllocator());
+        texture = {};
+        return false;
+    }
+
+    return true;
 }
 
 bool UpdateSceneObjectTransform(
@@ -700,6 +943,114 @@ int PickSceneObject(
     return best_index;
 }
 
+std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties)
+{
+    VkPhysicalDeviceMemoryProperties memory_properties = {};
+    vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+    for (std::uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index)
+    {
+        const bool type_matches = (type_filter & (1u << index)) != 0;
+        const bool properties_match = (memory_properties.memoryTypes[index].propertyFlags & properties) == properties;
+        if (type_matches && properties_match)
+        {
+            return index;
+        }
+    }
+
+    return UINT32_MAX;
+}
+
+bool CreateVulkanImage(
+    VkPhysicalDevice physical_device,
+    VkDevice device,
+    std::uint32_t width,
+    std::uint32_t height,
+    VkFormat format,
+    VkImageUsageFlags usage,
+    VkImageAspectFlags aspect_mask,
+    VkImage& image,
+    VkDeviceMemory& memory,
+    VkImageView& image_view)
+{
+    VkImageCreateInfo image_info = {};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent.width = width;
+    image_info.extent.height = height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = usage;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkResult result = vkCreateImage(device, &image_info, nullptr, &image);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkMemoryRequirements memory_requirements = {};
+    vkGetImageMemoryRequirements(device, image, &memory_requirements);
+
+    VkMemoryAllocateInfo allocation_info = {};
+    allocation_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = memory_requirements.size;
+    allocation_info.memoryTypeIndex = FindMemoryType(physical_device, memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (allocation_info.memoryTypeIndex == UINT32_MAX)
+    {
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    result = vkAllocateMemory(device, &allocation_info, nullptr, &memory);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    result = vkBindImageMemory(device, image, memory, 0);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeMemory(device, memory, nullptr);
+        vkDestroyImage(device, image, nullptr);
+        memory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = aspect_mask;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.layerCount = 1;
+
+    result = vkCreateImageView(device, &view_info, nullptr, &image_view);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeMemory(device, memory, nullptr);
+        vkDestroyImage(device, image, nullptr);
+        memory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
+}
+
 struct AxisViewFlipResult
 {
     bool changed = false;
@@ -798,35 +1149,72 @@ AxisViewFlipResult DrawAxisViewFlipControl(const ImVec2& viewport_min, const ImV
 }
 }
 
-bool SceneViewportRenderer::Initialize(SDL_GPUDevice* device, SDL_GPUTextureFormat color_target_format)
+bool SceneViewportRenderer::Initialize(VulkanContext* context)
 {
-    device_ = device;
-    color_target_format_ = color_target_format;
+    vulkan_context_ = context;
     return EnsurePipeline();
+}
+
+void SceneViewportRenderer::ReleaseBuffer(GpuBuffer& buffer)
+{
+    if (vulkan_context_ == nullptr)
+    {
+        buffer = {};
+        return;
+    }
+
+    VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    if (buffer.buffer != VK_NULL_HANDLE)
+    {
+        vkDestroyBuffer(device, buffer.buffer, allocator);
+    }
+    if (buffer.memory != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(device, buffer.memory, allocator);
+    }
+    buffer = {};
+}
+
+void SceneViewportRenderer::ReleaseTexture(GpuTexture& texture)
+{
+    if (vulkan_context_ == nullptr)
+    {
+        texture = {};
+        return;
+    }
+
+    VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    if (texture.descriptor_set != VK_NULL_HANDLE)
+    {
+        vkFreeDescriptorSets(device, vulkan_context_->GetDescriptorPool(), 1, &texture.descriptor_set);
+        texture.descriptor_set = VK_NULL_HANDLE;
+    }
+    if (texture.view != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, texture.view, allocator);
+        texture.view = VK_NULL_HANDLE;
+    }
+    if (texture.image != VK_NULL_HANDLE)
+    {
+        vkDestroyImage(device, texture.image, allocator);
+        texture.image = VK_NULL_HANDLE;
+    }
+    if (texture.memory != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(device, texture.memory, allocator);
+        texture.memory = VK_NULL_HANDLE;
+    }
 }
 
 void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 {
-    if (device_ != nullptr)
+    ReleaseBuffer(entry.vertex_buffer);
+    ReleaseBuffer(entry.index_buffer);
+    for (GpuTexture& material_texture : entry.material_textures)
     {
-        if (entry.vertex_buffer != nullptr)
-        {
-            SDL_ReleaseGPUBuffer(device_, entry.vertex_buffer);
-            entry.vertex_buffer = nullptr;
-        }
-        if (entry.index_buffer != nullptr)
-        {
-            SDL_ReleaseGPUBuffer(device_, entry.index_buffer);
-            entry.index_buffer = nullptr;
-        }
-        for (SDL_GPUTexture*& material_texture : entry.material_textures)
-        {
-            if (material_texture != nullptr)
-            {
-                SDL_ReleaseGPUTexture(device_, material_texture);
-                material_texture = nullptr;
-            }
-        }
+        ReleaseTexture(material_texture);
     }
 
     entry.sections.clear();
@@ -835,19 +1223,8 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 
 void SceneViewportRenderer::ReleaseGridCacheEntry()
 {
-    if (device_ != nullptr)
-    {
-        if (grid_cache_.vertex_buffer != nullptr)
-        {
-            SDL_ReleaseGPUBuffer(device_, grid_cache_.vertex_buffer);
-            grid_cache_.vertex_buffer = nullptr;
-        }
-        if (grid_cache_.index_buffer != nullptr)
-        {
-            SDL_ReleaseGPUBuffer(device_, grid_cache_.index_buffer);
-            grid_cache_.index_buffer = nullptr;
-        }
-    }
+    ReleaseBuffer(grid_cache_.vertex_buffer);
+    ReleaseBuffer(grid_cache_.index_buffer);
 
     grid_cache_.index_count = 0;
     grid_cache_.spacing = 0.0f;
@@ -858,22 +1235,56 @@ void SceneViewportRenderer::ReleaseGridCacheEntry()
 
 void SceneViewportRenderer::DestroyRenderTargets()
 {
-    if (device_ != nullptr)
-    {
-        if (color_texture_ != nullptr)
-        {
-            SDL_ReleaseGPUTexture(device_, color_texture_);
-            color_texture_ = nullptr;
-        }
-        if (depth_texture_ != nullptr)
-        {
-            SDL_ReleaseGPUTexture(device_, depth_texture_);
-            depth_texture_ = nullptr;
-        }
-    }
-
     target_width_ = 0;
     target_height_ = 0;
+    offscreen_color_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (offscreen_color_descriptor_set_ != VK_NULL_HANDLE)
+    {
+        ImGui_ImplVulkan_RemoveTexture(offscreen_color_descriptor_set_);
+        offscreen_color_descriptor_set_ = VK_NULL_HANDLE;
+    }
+
+    if (vulkan_context_ != nullptr)
+    {
+        VkDevice vk_device = vulkan_context_->GetDevice();
+        if (offscreen_framebuffer_ != VK_NULL_HANDLE)
+        {
+            vkDestroyFramebuffer(vk_device, offscreen_framebuffer_, vulkan_context_->GetAllocator());
+            offscreen_framebuffer_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_depth_view_ != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(vk_device, offscreen_depth_view_, vulkan_context_->GetAllocator());
+            offscreen_depth_view_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_depth_image_ != VK_NULL_HANDLE)
+        {
+            vkDestroyImage(vk_device, offscreen_depth_image_, vulkan_context_->GetAllocator());
+            offscreen_depth_image_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_depth_memory_ != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(vk_device, offscreen_depth_memory_, vulkan_context_->GetAllocator());
+            offscreen_depth_memory_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_color_view_ != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(vk_device, offscreen_color_view_, vulkan_context_->GetAllocator());
+            offscreen_color_view_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_color_image_ != VK_NULL_HANDLE)
+        {
+            vkDestroyImage(vk_device, offscreen_color_image_, vulkan_context_->GetAllocator());
+            offscreen_color_image_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_color_memory_ != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(vk_device, offscreen_color_memory_, vulkan_context_->GetAllocator());
+            offscreen_color_memory_ = VK_NULL_HANDLE;
+        }
+    }
 }
 
 void SceneViewportRenderer::Shutdown()
@@ -887,28 +1298,57 @@ void SceneViewportRenderer::Shutdown()
     mesh_cache_.clear();
     ReleaseGridCacheEntry();
 
-    if (device_ != nullptr && fallback_texture_ != nullptr)
-    {
-        SDL_ReleaseGPUTexture(device_, fallback_texture_);
-        fallback_texture_ = nullptr;
-    }
+    ReleaseTexture(fallback_texture_);
 
-    if (device_ != nullptr && material_sampler_ != nullptr)
+    if (vulkan_context_ != nullptr)
     {
-        SDL_ReleaseGPUSampler(device_, material_sampler_);
-        material_sampler_ = nullptr;
-    }
-
-    if (device_ != nullptr && pipeline_ != nullptr)
-    {
-        SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_);
-        pipeline_ = nullptr;
+        VkDevice vk_device = vulkan_context_->GetDevice();
+        if (scene_pipeline_ != VK_NULL_HANDLE)
+        {
+            vkDestroyPipeline(vk_device, scene_pipeline_, vulkan_context_->GetAllocator());
+            scene_pipeline_ = VK_NULL_HANDLE;
+        }
+        if (scene_pipeline_layout_ != VK_NULL_HANDLE)
+        {
+            vkDestroyPipelineLayout(vk_device, scene_pipeline_layout_, vulkan_context_->GetAllocator());
+            scene_pipeline_layout_ = VK_NULL_HANDLE;
+        }
+        if (material_descriptor_set_layout_ != VK_NULL_HANDLE)
+        {
+            vkDestroyDescriptorSetLayout(vk_device, material_descriptor_set_layout_, vulkan_context_->GetAllocator());
+            material_descriptor_set_layout_ = VK_NULL_HANDLE;
+        }
+        if (material_sampler_ != VK_NULL_HANDLE)
+        {
+            vkDestroySampler(vk_device, material_sampler_, vulkan_context_->GetAllocator());
+            material_sampler_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_color_sampler_ != VK_NULL_HANDLE)
+        {
+            vkDestroySampler(vk_device, offscreen_color_sampler_, vulkan_context_->GetAllocator());
+            offscreen_color_sampler_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_render_pass_ != VK_NULL_HANDLE)
+        {
+            vkDestroyRenderPass(vk_device, offscreen_render_pass_, vulkan_context_->GetAllocator());
+            offscreen_render_pass_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_render_fence_ != VK_NULL_HANDLE)
+        {
+            vkDestroyFence(vk_device, offscreen_render_fence_, vulkan_context_->GetAllocator());
+            offscreen_render_fence_ = VK_NULL_HANDLE;
+        }
+        if (offscreen_command_pool_ != VK_NULL_HANDLE)
+        {
+            vkDestroyCommandPool(vk_device, offscreen_command_pool_, vulkan_context_->GetAllocator());
+            offscreen_command_pool_ = VK_NULL_HANDLE;
+            offscreen_command_buffer_ = VK_NULL_HANDLE;
+        }
     }
 
     queued_objects_.clear();
     render_requested_ = false;
-    device_ = nullptr;
-    color_target_format_ = SDL_GPU_TEXTUREFORMAT_INVALID;
+    vulkan_context_ = nullptr;
 }
 
 void SceneViewportRenderer::BeginFrame()
@@ -919,39 +1359,44 @@ void SceneViewportRenderer::BeginFrame()
 
 bool SceneViewportRenderer::EnsureMaterialResources()
 {
-    if (device_ == nullptr)
+    if (vulkan_context_ == nullptr || offscreen_command_pool_ == VK_NULL_HANDLE || material_descriptor_set_layout_ == VK_NULL_HANDLE)
     {
         return false;
     }
 
-    if (material_sampler_ == nullptr)
+    if (material_sampler_ == VK_NULL_HANDLE)
     {
-        SDL_GPUSamplerCreateInfo sampler_info = {};
-        sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
-        sampler_info.mag_filter = SDL_GPU_FILTER_LINEAR;
-        sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
-        sampler_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-        sampler_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-        sampler_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-        sampler_info.compare_op = SDL_GPU_COMPAREOP_NEVER;
-        sampler_info.min_lod = 0.0f;
-        sampler_info.max_lod = 0.0f;
-        material_sampler_ = SDL_CreateGPUSampler(device_, &sampler_info);
-        if (material_sampler_ == nullptr)
+        VkSamplerCreateInfo sampler_info = {};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = VK_FILTER_LINEAR;
+        sampler_info.minFilter = VK_FILTER_LINEAR;
+        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.maxLod = 1.0f;
+        const VkResult result = vkCreateSampler(vulkan_context_->GetDevice(), &sampler_info, vulkan_context_->GetAllocator(), &material_sampler_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
         {
             return false;
         }
     }
 
-    if (fallback_texture_ == nullptr)
+    if (fallback_texture_.image == VK_NULL_HANDLE)
     {
         ModelTextureAsset fallback_texture_asset;
         fallback_texture_asset.valid = true;
         fallback_texture_asset.width = 1;
         fallback_texture_asset.height = 1;
         fallback_texture_asset.pixels = {255, 255, 255, 255};
-        fallback_texture_ = CreateTextureFromAsset(device_, fallback_texture_asset);
-        if (fallback_texture_ == nullptr)
+        if (!CreateTextureFromAsset(
+                *vulkan_context_,
+                offscreen_command_pool_,
+                material_descriptor_set_layout_,
+                material_sampler_,
+                fallback_texture_asset,
+                fallback_texture_))
         {
             return false;
         }
@@ -962,98 +1407,313 @@ bool SceneViewportRenderer::EnsureMaterialResources()
 
 bool SceneViewportRenderer::EnsurePipeline()
 {
-    if (pipeline_ != nullptr)
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    if (offscreen_render_pass_ != VK_NULL_HANDLE &&
+        offscreen_command_pool_ != VK_NULL_HANDLE &&
+        offscreen_render_fence_ != VK_NULL_HANDLE &&
+        offscreen_color_sampler_ != VK_NULL_HANDLE &&
+        material_descriptor_set_layout_ != VK_NULL_HANDLE &&
+        scene_pipeline_layout_ != VK_NULL_HANDLE &&
+        scene_pipeline_ != VK_NULL_HANDLE)
     {
         return true;
     }
 
-    if (device_ == nullptr || color_target_format_ == SDL_GPU_TEXTUREFORMAT_INVALID)
-    {
-        return false;
-    }
+    const VkDevice vk_device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
 
-    if (!EnsureMaterialResources())
+    if (offscreen_render_pass_ == VK_NULL_HANDLE)
     {
-        return false;
-    }
+        VkAttachmentDescription color_attachment = {};
+        color_attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+        color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    SDL_GPUShader* vertex_shader = LoadShaderFromFile(device_, ResolveShaderPath("scene_viewport.vert.spv"), SDL_GPU_SHADERSTAGE_VERTEX, 1, 0);
-    SDL_GPUShader* fragment_shader = LoadShaderFromFile(device_, ResolveShaderPath("scene_viewport.frag.spv"), SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1);
-    if (vertex_shader == nullptr || fragment_shader == nullptr)
-    {
-        if (vertex_shader != nullptr)
+        VkAttachmentDescription depth_attachment = {};
+        depth_attachment.format = VK_FORMAT_D32_SFLOAT;
+        depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference color_reference = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference depth_reference = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color_reference;
+        subpass.pDepthStencilAttachment = &depth_reference;
+
+        std::array<VkAttachmentDescription, 2> attachments = {color_attachment, depth_attachment};
+        VkRenderPassCreateInfo render_pass_info = {};
+        render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        render_pass_info.attachmentCount = static_cast<std::uint32_t>(attachments.size());
+        render_pass_info.pAttachments = attachments.data();
+        render_pass_info.subpassCount = 1;
+        render_pass_info.pSubpasses = &subpass;
+
+        VkSubpassDependency dependency = {};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        render_pass_info.dependencyCount = 1;
+        render_pass_info.pDependencies = &dependency;
+
+        const VkResult result = vkCreateRenderPass(vk_device, &render_pass_info, allocator, &offscreen_render_pass_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
         {
-            SDL_ReleaseGPUShader(device_, vertex_shader);
+            return false;
         }
-        if (fragment_shader != nullptr)
-        {
-            SDL_ReleaseGPUShader(device_, fragment_shader);
-        }
-        return false;
     }
 
-    SDL_GPUColorTargetDescription color_target_desc = {};
-    color_target_desc.format = color_target_format_;
-    color_target_desc.blend_state.color_write_mask = 0xF;
+    if (material_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetLayoutBinding texture_binding = {};
+        texture_binding.binding = 0;
+        texture_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        texture_binding.descriptorCount = 1;
+        texture_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    SDL_GPUVertexBufferDescription vertex_buffer_desc = {};
-    vertex_buffer_desc.slot = 0;
-    vertex_buffer_desc.pitch = sizeof(SceneGpuVertex);
-    vertex_buffer_desc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        VkDescriptorSetLayoutCreateInfo layout_info = {};
+        layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layout_info.bindingCount = 1;
+        layout_info.pBindings = &texture_binding;
 
-    SDL_GPUVertexAttribute vertex_attributes[4] = {};
-    vertex_attributes[0].location = 0;
-    vertex_attributes[0].buffer_slot = 0;
-    vertex_attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
-    vertex_attributes[0].offset = 0;
-    vertex_attributes[1].location = 1;
-    vertex_attributes[1].buffer_slot = 0;
-    vertex_attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
-    vertex_attributes[1].offset = sizeof(float) * 3;
-    vertex_attributes[2].location = 2;
-    vertex_attributes[2].buffer_slot = 0;
-    vertex_attributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-    vertex_attributes[2].offset = sizeof(float) * 6;
-    vertex_attributes[3].location = 3;
-    vertex_attributes[3].buffer_slot = 0;
-    vertex_attributes[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    vertex_attributes[3].offset = sizeof(float) * 8;
+        VkResult result = vkCreateDescriptorSetLayout(vk_device, &layout_info, allocator, &material_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
 
-    SDL_GPUGraphicsPipelineCreateInfo pipeline_desc = {};
-    pipeline_desc.vertex_shader = vertex_shader;
-    pipeline_desc.fragment_shader = fragment_shader;
-    pipeline_desc.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-    pipeline_desc.target_info.num_color_targets = 1;
-    pipeline_desc.target_info.color_target_descriptions = &color_target_desc;
-    pipeline_desc.target_info.has_depth_stencil_target = true;
-    pipeline_desc.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM;
-    pipeline_desc.depth_stencil_state.enable_depth_test = true;
-    pipeline_desc.depth_stencil_state.enable_depth_write = true;
-    pipeline_desc.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
-    pipeline_desc.rasterizer_state.enable_depth_clip = true;
-    pipeline_desc.vertex_input_state.num_vertex_buffers = 1;
-    pipeline_desc.vertex_input_state.vertex_buffer_descriptions = &vertex_buffer_desc;
-    pipeline_desc.vertex_input_state.num_vertex_attributes = 4;
-    pipeline_desc.vertex_input_state.vertex_attributes = vertex_attributes;
+    if (scene_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange push_constant_range = {};
+        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        push_constant_range.offset = 0;
+        push_constant_range.size = sizeof(SceneUniformBlock);
 
-    pipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &pipeline_desc);
+        VkPipelineLayoutCreateInfo layout_info = {};
+        layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layout_info.setLayoutCount = 1;
+        layout_info.pSetLayouts = &material_descriptor_set_layout_;
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges = &push_constant_range;
 
-    SDL_ReleaseGPUShader(device_, vertex_shader);
-    SDL_ReleaseGPUShader(device_, fragment_shader);
+        VkResult result = vkCreatePipelineLayout(vk_device, &layout_info, allocator, &scene_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
 
-    return pipeline_ != nullptr;
+    if (scene_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule vertex_shader = LoadShaderModule(vk_device, ResolveShaderPath("scene_viewport.vert.spv"));
+        VkShaderModule fragment_shader = LoadShaderModule(vk_device, ResolveShaderPath("scene_viewport.frag.spv"));
+        if (vertex_shader == VK_NULL_HANDLE || fragment_shader == VK_NULL_HANDLE)
+        {
+            if (vertex_shader != VK_NULL_HANDLE)
+            {
+                vkDestroyShaderModule(vk_device, vertex_shader, allocator);
+            }
+            if (fragment_shader != VK_NULL_HANDLE)
+            {
+                vkDestroyShaderModule(vk_device, fragment_shader, allocator);
+            }
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo shader_stages[2] = {};
+        shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        shader_stages[0].module = vertex_shader;
+        shader_stages[0].pName = "main";
+        shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        shader_stages[1].module = fragment_shader;
+        shader_stages[1].pName = "main";
+
+        VkVertexInputBindingDescription binding_description = {};
+        binding_description.binding = 0;
+        binding_description.stride = sizeof(SceneGpuVertex);
+        binding_description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        std::array<VkVertexInputAttributeDescription, 4> attributes = {};
+        attributes[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, position))};
+        attributes[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, normal))};
+        attributes[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, uv))};
+        attributes[3] = {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, color))};
+
+        VkPipelineVertexInputStateCreateInfo vertex_input = {};
+        vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertex_input.vertexBindingDescriptionCount = 1;
+        vertex_input.pVertexBindingDescriptions = &binding_description;
+        vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+        vertex_input.pVertexAttributeDescriptions = attributes.data();
+
+        VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
+        input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo viewport_state = {};
+        viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewport_state.viewportCount = 1;
+        viewport_state.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterization = {};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.lineWidth = 1.0f;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+        VkPipelineMultisampleStateCreateInfo multisample = {};
+        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineDepthStencilStateCreateInfo depth_stencil = {};
+        depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depth_stencil.depthTestEnable = VK_TRUE;
+        depth_stencil.depthWriteEnable = VK_TRUE;
+        depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+        VkPipelineColorBlendAttachmentState color_blend_attachment = {};
+        color_blend_attachment.blendEnable = VK_TRUE;
+        color_blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        color_blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        color_blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+        color_blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        color_blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        color_blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        color_blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo color_blend = {};
+        color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        color_blend.attachmentCount = 1;
+        color_blend.pAttachments = &color_blend_attachment;
+
+        std::array<VkDynamicState, 2> dynamic_states = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamic_state = {};
+        dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamic_state.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+        dynamic_state.pDynamicStates = dynamic_states.data();
+
+        VkGraphicsPipelineCreateInfo pipeline_info = {};
+        pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipeline_info.stageCount = 2;
+        pipeline_info.pStages = shader_stages;
+        pipeline_info.pVertexInputState = &vertex_input;
+        pipeline_info.pInputAssemblyState = &input_assembly;
+        pipeline_info.pViewportState = &viewport_state;
+        pipeline_info.pRasterizationState = &rasterization;
+        pipeline_info.pMultisampleState = &multisample;
+        pipeline_info.pDepthStencilState = &depth_stencil;
+        pipeline_info.pColorBlendState = &color_blend;
+        pipeline_info.pDynamicState = &dynamic_state;
+        pipeline_info.layout = scene_pipeline_layout_;
+        pipeline_info.renderPass = offscreen_render_pass_;
+        pipeline_info.subpass = 0;
+
+        VkResult result = vkCreateGraphicsPipelines(vk_device, vulkan_context_->GetPipelineCache(), 1, &pipeline_info, allocator, &scene_pipeline_);
+        VulkanContext::CheckVkResult(result);
+        vkDestroyShaderModule(vk_device, vertex_shader, allocator);
+        vkDestroyShaderModule(vk_device, fragment_shader, allocator);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
+
+    if (offscreen_color_sampler_ == VK_NULL_HANDLE)
+    {
+        VkSamplerCreateInfo sampler_info = {};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = VK_FILTER_LINEAR;
+        sampler_info.minFilter = VK_FILTER_LINEAR;
+        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.maxLod = 1.0f;
+        const VkResult result = vkCreateSampler(vk_device, &sampler_info, allocator, &offscreen_color_sampler_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
+
+    if (offscreen_command_pool_ == VK_NULL_HANDLE)
+    {
+        VkCommandPoolCreateInfo pool_info = {};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_info.queueFamilyIndex = vulkan_context_->GetQueueFamily();
+        VkResult result = vkCreateCommandPool(vk_device, &pool_info, allocator, &offscreen_command_pool_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+
+        VkCommandBufferAllocateInfo allocate_info = {};
+        allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocate_info.commandPool = offscreen_command_pool_;
+        allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocate_info.commandBufferCount = 1;
+        result = vkAllocateCommandBuffers(vk_device, &allocate_info, &offscreen_command_buffer_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
+
+    if (offscreen_render_fence_ == VK_NULL_HANDLE)
+    {
+        VkFenceCreateInfo fence_info = {};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        const VkResult result = vkCreateFence(vk_device, &fence_info, allocator, &offscreen_render_fence_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool SceneViewportRenderer::EnsureGridCacheEntry()
 {
-    if (!grid_enabled_ || device_ == nullptr || grid_spacing_ <= 0.0f)
+    if (!grid_enabled_ || vulkan_context_ == nullptr || grid_spacing_ <= 0.0f)
     {
         ReleaseGridCacheEntry();
         return false;
     }
 
-    if (grid_cache_.vertex_buffer != nullptr &&
-        grid_cache_.index_buffer != nullptr &&
+    if (grid_cache_.vertex_buffer.buffer != VK_NULL_HANDLE &&
+        grid_cache_.index_buffer.buffer != VK_NULL_HANDLE &&
         std::abs(grid_cache_.spacing - grid_spacing_) < 0.0001f &&
         std::abs(grid_cache_.extent - grid_extent_) < 0.0001f &&
         std::abs(grid_cache_.origin_x - grid_origin_x_) < 0.0001f &&
@@ -1118,86 +1778,41 @@ bool SceneViewportRenderer::EnsureGridCacheEntry()
         return false;
     }
 
-    SDL_GPUBufferCreateInfo vertex_buffer_info = {};
-    vertex_buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-    vertex_buffer_info.size = static_cast<Uint32>(vertices.size() * sizeof(SceneGpuVertex));
-    grid_cache_.vertex_buffer = SDL_CreateGPUBuffer(device_, &vertex_buffer_info);
-    if (grid_cache_.vertex_buffer == nullptr)
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkPhysicalDevice physical_device = vulkan_context_->GetPhysicalDevice();
+    const VkDeviceSize vertex_buffer_size = static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex));
+    const VkDeviceSize index_buffer_size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+
+    if (!CreateVulkanBuffer(
+            physical_device,
+            device,
+            vertex_buffer_size,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            grid_cache_.vertex_buffer))
     {
         ReleaseGridCacheEntry();
         return false;
     }
 
-    SDL_GPUBufferCreateInfo index_buffer_info = {};
-    index_buffer_info.usage = SDL_GPU_BUFFERUSAGE_INDEX;
-    index_buffer_info.size = static_cast<Uint32>(indices.size() * sizeof(std::uint32_t));
-    grid_cache_.index_buffer = SDL_CreateGPUBuffer(device_, &index_buffer_info);
-    if (grid_cache_.index_buffer == nullptr)
+    if (!CreateVulkanBuffer(
+            physical_device,
+            device,
+            index_buffer_size,
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            grid_cache_.index_buffer))
     {
         ReleaseGridCacheEntry();
         return false;
     }
 
-    SDL_GPUTransferBufferCreateInfo vertex_transfer_info = {};
-    vertex_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    vertex_transfer_info.size = vertex_buffer_info.size;
-    SDL_GPUTransferBuffer* vertex_transfer = SDL_CreateGPUTransferBuffer(device_, &vertex_transfer_info);
-
-    SDL_GPUTransferBufferCreateInfo index_transfer_info = {};
-    index_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    index_transfer_info.size = index_buffer_info.size;
-    SDL_GPUTransferBuffer* index_transfer = SDL_CreateGPUTransferBuffer(device_, &index_transfer_info);
-    if (vertex_transfer == nullptr || index_transfer == nullptr)
+    if (!UploadBufferData(device, grid_cache_.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
+        !UploadBufferData(device, grid_cache_.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
     {
-        if (vertex_transfer != nullptr)
-        {
-            SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-        }
-        if (index_transfer != nullptr)
-        {
-            SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
-        }
         ReleaseGridCacheEntry();
         return false;
     }
-
-    void* vertex_map = SDL_MapGPUTransferBuffer(device_, vertex_transfer, false);
-    void* index_map = SDL_MapGPUTransferBuffer(device_, index_transfer, false);
-    if (vertex_map == nullptr || index_map == nullptr)
-    {
-        SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-        SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
-        ReleaseGridCacheEntry();
-        return false;
-    }
-
-    std::memcpy(vertex_map, vertices.data(), vertices.size() * sizeof(SceneGpuVertex));
-    std::memcpy(index_map, indices.data(), indices.size() * sizeof(std::uint32_t));
-    SDL_UnmapGPUTransferBuffer(device_, vertex_transfer);
-    SDL_UnmapGPUTransferBuffer(device_, index_transfer);
-
-    SDL_GPUCommandBuffer* upload_command_buffer = SDL_AcquireGPUCommandBuffer(device_);
-    if (upload_command_buffer == nullptr)
-    {
-        SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-        SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
-        ReleaseGridCacheEntry();
-        return false;
-    }
-
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(upload_command_buffer);
-    SDL_GPUTransferBufferLocation vertex_location = {vertex_transfer, 0};
-    SDL_GPUBufferRegion vertex_region = {grid_cache_.vertex_buffer, 0, vertex_buffer_info.size};
-    SDL_UploadToGPUBuffer(copy_pass, &vertex_location, &vertex_region, false);
-
-    SDL_GPUTransferBufferLocation index_location = {index_transfer, 0};
-    SDL_GPUBufferRegion index_region = {grid_cache_.index_buffer, 0, index_buffer_info.size};
-    SDL_UploadToGPUBuffer(copy_pass, &index_location, &index_region, false);
-    SDL_EndGPUCopyPass(copy_pass);
-    SDL_SubmitGPUCommandBuffer(upload_command_buffer);
-
-    SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-    SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
 
     grid_cache_.index_count = static_cast<std::uint32_t>(indices.size());
     grid_cache_.spacing = grid_spacing_;
@@ -1209,40 +1824,71 @@ bool SceneViewportRenderer::EnsureGridCacheEntry()
 
 bool SceneViewportRenderer::EnsureRenderTargets(std::uint32_t width, std::uint32_t height)
 {
-    if (color_texture_ != nullptr && depth_texture_ != nullptr && target_width_ == width && target_height_ == height)
+    if (offscreen_color_image_ != VK_NULL_HANDLE && offscreen_depth_image_ != VK_NULL_HANDLE && offscreen_framebuffer_ != VK_NULL_HANDLE && target_width_ == width && target_height_ == height)
     {
         return true;
     }
 
     DestroyRenderTargets();
 
-    SDL_GPUTextureCreateInfo color_info = {};
-    color_info.type = SDL_GPU_TEXTURETYPE_2D;
-    color_info.format = color_target_format_;
-    color_info.width = width;
-    color_info.height = height;
-    color_info.layer_count_or_depth = 1;
-    color_info.num_levels = 1;
-    color_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    color_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    color_texture_ = SDL_CreateGPUTexture(device_, &color_info);
-    if (color_texture_ == nullptr)
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    const VkDevice vk_device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (!CreateVulkanImage(
+            vulkan_context_->GetPhysicalDevice(),
+            vk_device,
+            width,
+            height,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            offscreen_color_image_,
+            offscreen_color_memory_,
+            offscreen_color_view_))
+    {
+        return false;
+    }
+
+    if (!CreateVulkanImage(
+            vulkan_context_->GetPhysicalDevice(),
+            vk_device,
+            width,
+            height,
+            VK_FORMAT_D32_SFLOAT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            offscreen_depth_image_,
+            offscreen_depth_memory_,
+            offscreen_depth_view_))
     {
         DestroyRenderTargets();
         return false;
     }
 
-    SDL_GPUTextureCreateInfo depth_info = {};
-    depth_info.type = SDL_GPU_TEXTURETYPE_2D;
-    depth_info.format = SDL_GPU_TEXTUREFORMAT_D16_UNORM;
-    depth_info.width = width;
-    depth_info.height = height;
-    depth_info.layer_count_or_depth = 1;
-    depth_info.num_levels = 1;
-    depth_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    depth_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-    depth_texture_ = SDL_CreateGPUTexture(device_, &depth_info);
-    if (depth_texture_ == nullptr)
+    std::array<VkImageView, 2> attachments = {offscreen_color_view_, offscreen_depth_view_};
+    VkFramebufferCreateInfo framebuffer_info = {};
+    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebuffer_info.renderPass = offscreen_render_pass_;
+    framebuffer_info.attachmentCount = static_cast<std::uint32_t>(attachments.size());
+    framebuffer_info.pAttachments = attachments.data();
+    framebuffer_info.width = width;
+    framebuffer_info.height = height;
+    framebuffer_info.layers = 1;
+    VkResult result = vkCreateFramebuffer(vk_device, &framebuffer_info, allocator, &offscreen_framebuffer_);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        DestroyRenderTargets();
+        return false;
+    }
+
+    offscreen_color_descriptor_set_ = ImGui_ImplVulkan_AddTexture(offscreen_color_sampler_, offscreen_color_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (offscreen_color_descriptor_set_ == VK_NULL_HANDLE)
     {
         DestroyRenderTargets();
         return false;
@@ -1250,18 +1896,20 @@ bool SceneViewportRenderer::EnsureRenderTargets(std::uint32_t width, std::uint32
 
     target_width_ = width;
     target_height_ = height;
+    offscreen_color_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     return true;
 }
 
 bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_path, const SceneViewportResolvedModel& resolved_model)
 {
-    if (device_ == nullptr || resolved_model.asset == nullptr || !resolved_model.asset->loaded)
+    if (vulkan_context_ == nullptr || resolved_model.asset == nullptr || !resolved_model.asset->loaded)
     {
         return false;
     }
 
     GpuMeshCacheEntry& cache_entry = mesh_cache_[model_path];
-    if (cache_entry.vertex_buffer != nullptr && cache_entry.index_buffer != nullptr && cache_entry.write_time == resolved_model.write_time)
+    if (cache_entry.vertex_buffer.buffer != VK_NULL_HANDLE && cache_entry.index_buffer.buffer != VK_NULL_HANDLE && cache_entry.write_time == resolved_model.write_time)
     {
         return true;
     }
@@ -1273,13 +1921,19 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     vertices.reserve(4096);
     indices.reserve(8192);
 
-    cache_entry.material_textures.resize(resolved_model.asset->materials.size(), nullptr);
+    cache_entry.material_textures.resize(resolved_model.asset->materials.size());
     for (std::size_t material_index = 0; material_index < resolved_model.asset->materials.size(); ++material_index)
     {
         const ModelMaterialAsset& material = resolved_model.asset->materials[material_index];
         if (material.base_color_texture.valid)
         {
-            cache_entry.material_textures[material_index] = CreateTextureFromAsset(device_, material.base_color_texture);
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                offscreen_command_pool_,
+                material_descriptor_set_layout_,
+                material_sampler_,
+                material.base_color_texture,
+                cache_entry.material_textures[material_index]);
         }
     }
 
@@ -1313,86 +1967,41 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         return false;
     }
 
-    SDL_GPUBufferCreateInfo vertex_buffer_info = {};
-    vertex_buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-    vertex_buffer_info.size = static_cast<Uint32>(vertices.size() * sizeof(SceneGpuVertex));
-    cache_entry.vertex_buffer = SDL_CreateGPUBuffer(device_, &vertex_buffer_info);
-    if (cache_entry.vertex_buffer == nullptr)
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkPhysicalDevice physical_device = vulkan_context_->GetPhysicalDevice();
+    const VkDeviceSize vertex_buffer_size = static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex));
+    const VkDeviceSize index_buffer_size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+
+    if (!CreateVulkanBuffer(
+            physical_device,
+            device,
+            vertex_buffer_size,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            cache_entry.vertex_buffer))
     {
         ReleaseMeshCacheEntry(cache_entry);
         return false;
     }
 
-    SDL_GPUBufferCreateInfo index_buffer_info = {};
-    index_buffer_info.usage = SDL_GPU_BUFFERUSAGE_INDEX;
-    index_buffer_info.size = static_cast<Uint32>(indices.size() * sizeof(std::uint32_t));
-    cache_entry.index_buffer = SDL_CreateGPUBuffer(device_, &index_buffer_info);
-    if (cache_entry.index_buffer == nullptr)
+    if (!CreateVulkanBuffer(
+            physical_device,
+            device,
+            index_buffer_size,
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            cache_entry.index_buffer))
     {
         ReleaseMeshCacheEntry(cache_entry);
         return false;
     }
 
-    SDL_GPUTransferBufferCreateInfo vertex_transfer_info = {};
-    vertex_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    vertex_transfer_info.size = vertex_buffer_info.size;
-    SDL_GPUTransferBuffer* vertex_transfer = SDL_CreateGPUTransferBuffer(device_, &vertex_transfer_info);
-
-    SDL_GPUTransferBufferCreateInfo index_transfer_info = {};
-    index_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    index_transfer_info.size = index_buffer_info.size;
-    SDL_GPUTransferBuffer* index_transfer = SDL_CreateGPUTransferBuffer(device_, &index_transfer_info);
-    if (vertex_transfer == nullptr || index_transfer == nullptr)
+    if (!UploadBufferData(device, cache_entry.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
+        !UploadBufferData(device, cache_entry.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
     {
-        if (vertex_transfer != nullptr)
-        {
-            SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-        }
-        if (index_transfer != nullptr)
-        {
-            SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
-        }
         ReleaseMeshCacheEntry(cache_entry);
         return false;
     }
-
-    void* vertex_map = SDL_MapGPUTransferBuffer(device_, vertex_transfer, false);
-    void* index_map = SDL_MapGPUTransferBuffer(device_, index_transfer, false);
-    if (vertex_map == nullptr || index_map == nullptr)
-    {
-        SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-        SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
-        ReleaseMeshCacheEntry(cache_entry);
-        return false;
-    }
-
-    std::memcpy(vertex_map, vertices.data(), vertices.size() * sizeof(SceneGpuVertex));
-    std::memcpy(index_map, indices.data(), indices.size() * sizeof(std::uint32_t));
-    SDL_UnmapGPUTransferBuffer(device_, vertex_transfer);
-    SDL_UnmapGPUTransferBuffer(device_, index_transfer);
-
-    SDL_GPUCommandBuffer* upload_command_buffer = SDL_AcquireGPUCommandBuffer(device_);
-    if (upload_command_buffer == nullptr)
-    {
-        SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-        SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
-        ReleaseMeshCacheEntry(cache_entry);
-        return false;
-    }
-
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(upload_command_buffer);
-    SDL_GPUTransferBufferLocation vertex_location = {vertex_transfer, 0};
-    SDL_GPUBufferRegion vertex_region = {cache_entry.vertex_buffer, 0, vertex_buffer_info.size};
-    SDL_UploadToGPUBuffer(copy_pass, &vertex_location, &vertex_region, false);
-
-    SDL_GPUTransferBufferLocation index_location = {index_transfer, 0};
-    SDL_GPUBufferRegion index_region = {cache_entry.index_buffer, 0, index_buffer_info.size};
-    SDL_UploadToGPUBuffer(copy_pass, &index_location, &index_region, false);
-    SDL_EndGPUCopyPass(copy_pass);
-    SDL_SubmitGPUCommandBuffer(upload_command_buffer);
-
-    SDL_ReleaseGPUTransferBuffer(device_, vertex_transfer);
-    SDL_ReleaseGPUTransferBuffer(device_, index_transfer);
 
     cache_entry.write_time = resolved_model.write_time;
     return true;
@@ -1440,16 +2049,22 @@ void SceneViewportRenderer::RenderUi(
     const std::uint32_t target_width = static_cast<std::uint32_t>((std::max)(1.0f, std::round(available.x * framebuffer_scale.x)));
     const std::uint32_t target_height = static_cast<std::uint32_t>((std::max)(1.0f, std::round(available.y * framebuffer_scale.y)));
 
-    if (!EnsurePipeline() || !EnsureRenderTargets(target_width, target_height))
+    if (!EnsurePipeline() || !EnsureMaterialResources() || !EnsureRenderTargets(target_width, target_height))
     {
         draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
         draw_list->AddText(ImVec2(min.x + 12.0f, min.y + 12.0f), IM_COL32(235, 238, 242, 255), "Scene GPU renderer unavailable");
+        ImGui::EndChild();
         return;
     }
 
-    if (color_texture_ != nullptr)
+    if (offscreen_color_descriptor_set_ != VK_NULL_HANDLE)
     {
-        draw_list->AddImage(reinterpret_cast<ImTextureID>(color_texture_), min, max);
+        draw_list->AddImage(
+            reinterpret_cast<ImTextureID>(offscreen_color_descriptor_set_),
+            min,
+            max,
+            ImVec2(0.0f, 1.0f),
+            ImVec2(1.0f, 0.0f));
     }
 
     draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
@@ -1462,6 +2077,23 @@ void SceneViewportRenderer::RenderUi(
         std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest()};
+    const bool has_selected_scene_object = state.selected_item_path == state.active_scene_path && !state.selected_scene_object_name.empty();
+    const SceneObjectMetadata* selected_scene_object_metadata = nullptr;
+    if (has_selected_scene_object)
+    {
+        const auto selected_object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+        {
+            return object.name == state.selected_scene_object_name;
+        });
+        if (selected_object_it != scene_metadata.objects.end())
+        {
+            selected_scene_object_metadata = &(*selected_object_it);
+        }
+    }
+    else if (scene_metadata.objects.size() == 1)
+    {
+        selected_scene_object_metadata = &scene_metadata.objects.front();
+    }
 
     queued_objects_.clear();
     for (const SceneObjectMetadata& object : scene_metadata.objects)
@@ -1481,7 +2113,6 @@ void SceneViewportRenderer::RenderUi(
         {
             continue;
         }
-
         QueuedSceneObject queued_object;
         queued_object.model_path = model_path;
         queued_object.name = object.name;
@@ -1499,16 +2130,38 @@ void SceneViewportRenderer::RenderUi(
         ExpandBoundsWithObject(world_min, world_max, queued_object, *resolved_model.asset);
     }
 
-    if (queued_objects_.empty())
+    QueuedSceneObject fallback_gizmo_object;
+    bool has_fallback_gizmo_object = false;
+    if (selected_scene_object_metadata != nullptr)
+    {
+        fallback_gizmo_object.name = selected_scene_object_metadata->name;
+        fallback_gizmo_object.position = selected_scene_object_metadata->position;
+        fallback_gizmo_object.rotation = selected_scene_object_metadata->rotation;
+        fallback_gizmo_object.scale = selected_scene_object_metadata->scale;
+        fallback_gizmo_object.selected = selected_scene_object_metadata->name == state.selected_scene_object_name;
+        has_fallback_gizmo_object = true;
+    }
+
+    if (queued_objects_.empty() && !has_fallback_gizmo_object)
     {
         const char* message = "No attached models found in the active scene";
         const ImVec2 message_size = ImGui::CalcTextSize(message);
         draw_list->AddText(ImVec2((min.x + max.x - message_size.x) * 0.5f, (min.y + max.y - message_size.y) * 0.5f), IM_COL32(235, 238, 242, 255), message);
+        ImGui::EndChild();
         return;
     }
 
-    const Vec3 scene_center = Multiply(Add(world_min, world_max), 0.5f);
-    const float scene_radius = (std::max)(0.75f, Length(Subtract(world_max, world_min)) * 0.6f);
+    Vec3 scene_center = {};
+    float scene_radius = 1.5f;
+    if (!queued_objects_.empty())
+    {
+        scene_center = Multiply(Add(world_min, world_max), 0.5f);
+        scene_radius = (std::max)(0.75f, Length(Subtract(world_max, world_min)) * 0.6f);
+    }
+    else
+    {
+        scene_center = ToVec3(fallback_gizmo_object.position);
+    }
     const Vec3 orbit_direction = Normalize(Vec3{
         std::cos(camera_state.pitch) * std::sin(camera_state.yaw),
         std::sin(camera_state.pitch),
@@ -1538,7 +2191,7 @@ void SceneViewportRenderer::RenderUi(
     grid_extent_ = (std::max)(grid_spacing_ * 24.0f, scene_radius * 4.0f);
 
     QueuedSceneObject* gizmo_object = nullptr;
-    if (state.selected_item_path == state.active_scene_path && !state.selected_scene_object_name.empty())
+    if (has_selected_scene_object)
     {
         const auto selected_object_it = std::find_if(queued_objects_.begin(), queued_objects_.end(), [&](const QueuedSceneObject& object)
         {
@@ -1549,10 +2202,18 @@ void SceneViewportRenderer::RenderUi(
         {
             gizmo_object = &(*selected_object_it);
         }
+        else if (has_fallback_gizmo_object)
+        {
+            gizmo_object = &fallback_gizmo_object;
+        }
     }
     else if (queued_objects_.size() == 1)
     {
         gizmo_object = &queued_objects_.front();
+    }
+    else if (has_fallback_gizmo_object)
+    {
+        gizmo_object = &fallback_gizmo_object;
     }
 
     if (gizmo_object != nullptr)
@@ -1634,88 +2295,205 @@ void SceneViewportRenderer::RenderUi(
 
     render_requested_ = true;
 
-    const std::string footer = std::to_string(queued_objects_.size()) + " model object" + (queued_objects_.size() == 1 ? "" : "s") + " rendered to GPU target";
+    const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
+    const std::string footer = "Viewport " + std::to_string(viewport_fps) + " FPS";
     draw_list->AddText(ImVec2(min.x + 12.0f, max.y - 24.0f), IM_COL32(145, 152, 163, 255), footer.c_str());
     ImGui::EndChild();
 }
 
-void SceneViewportRenderer::RenderGpu(SDL_GPUCommandBuffer* command_buffer)
+void SceneViewportRenderer::RenderGpu()
 {
-    if (!render_requested_ || device_ == nullptr || command_buffer == nullptr || pipeline_ == nullptr || color_texture_ == nullptr || depth_texture_ == nullptr)
+    if (!render_requested_ ||
+        vulkan_context_ == nullptr ||
+        offscreen_command_buffer_ == VK_NULL_HANDLE ||
+        offscreen_render_pass_ == VK_NULL_HANDLE ||
+        offscreen_framebuffer_ == VK_NULL_HANDLE ||
+        scene_pipeline_ == VK_NULL_HANDLE ||
+        scene_pipeline_layout_ == VK_NULL_HANDLE ||
+        fallback_texture_.descriptor_set == VK_NULL_HANDLE)
     {
         return;
     }
 
-    SDL_GPUColorTargetInfo color_target = {};
-    color_target.texture = color_texture_;
-    color_target.clear_color = SDL_FColor{0.08f, 0.09f, 0.11f, 1.0f};
-    color_target.load_op = SDL_GPU_LOADOP_CLEAR;
-    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    EnsureGridCacheEntry();
 
-    SDL_GPUDepthStencilTargetInfo depth_target = {};
-    depth_target.texture = depth_texture_;
-    depth_target.clear_depth = 1.0f;
-    depth_target.load_op = SDL_GPU_LOADOP_CLEAR;
-    depth_target.store_op = SDL_GPU_STOREOP_STORE;
-    depth_target.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-    depth_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    VkDevice vk_device = vulkan_context_->GetDevice();
+    VkResult result = vkWaitForFences(vk_device, 1, &offscreen_render_fence_, VK_TRUE, UINT64_MAX);
+    VulkanContext::CheckVkResult(result);
+    result = vkResetFences(vk_device, 1, &offscreen_render_fence_);
+    VulkanContext::CheckVkResult(result);
+    result = vkResetCommandPool(vk_device, offscreen_command_pool_, 0);
+    VulkanContext::CheckVkResult(result);
 
-    SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(command_buffer, &color_target, 1, &depth_target);
-    SDL_BindGPUGraphicsPipeline(render_pass, pipeline_);
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(offscreen_command_buffer_, &begin_info);
+    VulkanContext::CheckVkResult(result);
 
-    if (grid_enabled_ && EnsureGridCacheEntry())
+    TransitionImageLayout(
+        offscreen_command_buffer_,
+        offscreen_color_image_,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        offscreen_color_layout_,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        offscreen_color_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        offscreen_color_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    offscreen_color_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    TransitionImageLayout(
+        offscreen_command_buffer_,
+        offscreen_depth_image_,
+        VK_IMAGE_ASPECT_DEPTH_BIT,
+        offscreen_depth_layout_,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        offscreen_depth_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        0,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    offscreen_depth_layout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    std::array<VkClearValue, 2> clear_values = {};
+    clear_values[0].color.float32[0] = 0.08f;
+    clear_values[0].color.float32[1] = 0.09f;
+    clear_values[0].color.float32[2] = 0.11f;
+    clear_values[0].color.float32[3] = 1.0f;
+    clear_values[1].depthStencil.depth = 1.0f;
+
+    VkRenderPassBeginInfo render_pass_info = {};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    render_pass_info.renderPass = offscreen_render_pass_;
+    render_pass_info.framebuffer = offscreen_framebuffer_;
+    render_pass_info.renderArea.extent.width = target_width_;
+    render_pass_info.renderArea.extent.height = target_height_;
+    render_pass_info.clearValueCount = static_cast<std::uint32_t>(clear_values.size());
+    render_pass_info.pClearValues = clear_values.data();
+
+    vkCmdBeginRenderPass(offscreen_command_buffer_, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(offscreen_command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, scene_pipeline_);
+
+    VkViewport viewport = {};
+    viewport.width = static_cast<float>(target_width_);
+    viewport.height = static_cast<float>(target_height_);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(offscreen_command_buffer_, 0, 1, &viewport);
+
+    VkRect2D scissor = {};
+    scissor.extent.width = target_width_;
+    scissor.extent.height = target_height_;
+    vkCmdSetScissor(offscreen_command_buffer_, 0, 1, &scissor);
+
+    const VkDeviceSize vertex_offset = 0;
+
+    if (grid_enabled_ &&
+        grid_cache_.index_count > 0 &&
+        grid_cache_.vertex_buffer.buffer != VK_NULL_HANDLE &&
+        grid_cache_.index_buffer.buffer != VK_NULL_HANDLE)
     {
-        SDL_GPUBufferBinding grid_vertex_binding = {grid_cache_.vertex_buffer, 0};
-        SDL_GPUBufferBinding grid_index_binding = {grid_cache_.index_buffer, 0};
-        SDL_BindGPUVertexBuffers(render_pass, 0, &grid_vertex_binding, 1);
-        SDL_BindGPUIndexBuffer(render_pass, &grid_index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        SceneUniformBlock grid_uniforms = {};
+        SetIdentity(grid_uniforms.model);
+        std::memcpy(grid_uniforms.model_view_projection, view_projection_.data(), sizeof(grid_uniforms.model_view_projection));
 
-        SceneUniformBlock grid_uniform_block = {};
-        SetIdentity(grid_uniform_block.model);
-        std::memcpy(grid_uniform_block.model_view_projection, view_projection_.data(), sizeof(grid_uniform_block.model_view_projection));
-        SDL_PushGPUVertexUniformData(command_buffer, 0, &grid_uniform_block, sizeof(grid_uniform_block));
-
-        SDL_GPUTextureSamplerBinding grid_sampler_binding = {};
-        grid_sampler_binding.texture = fallback_texture_;
-        grid_sampler_binding.sampler = material_sampler_;
-        SDL_BindGPUFragmentSamplers(render_pass, 0, &grid_sampler_binding, 1);
-        SDL_DrawGPUIndexedPrimitives(render_pass, grid_cache_.index_count, 1, 0, 0, 0);
+        vkCmdPushConstants(
+            offscreen_command_buffer_,
+            scene_pipeline_layout_,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(SceneUniformBlock),
+            &grid_uniforms);
+        vkCmdBindDescriptorSets(
+            offscreen_command_buffer_,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            scene_pipeline_layout_,
+            0,
+            1,
+            &fallback_texture_.descriptor_set,
+            0,
+            nullptr);
+        vkCmdBindVertexBuffers(offscreen_command_buffer_, 0, 1, &grid_cache_.vertex_buffer.buffer, &vertex_offset);
+        vkCmdBindIndexBuffer(offscreen_command_buffer_, grid_cache_.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(offscreen_command_buffer_, grid_cache_.index_count, 1, 0, 0, 0);
     }
 
     for (const QueuedSceneObject& object : queued_objects_)
     {
-        const auto mesh_it = mesh_cache_.find(object.model_path);
-        if (mesh_it == mesh_cache_.end())
+        const auto mesh_entry_it = mesh_cache_.find(object.model_path);
+        if (mesh_entry_it == mesh_cache_.end())
         {
             continue;
         }
 
-        const GpuMeshCacheEntry& mesh_entry = mesh_it->second;
-        SDL_GPUBufferBinding vertex_binding = {mesh_entry.vertex_buffer, 0};
-        SDL_GPUBufferBinding index_binding = {mesh_entry.index_buffer, 0};
-        SDL_BindGPUVertexBuffers(render_pass, 0, &vertex_binding, 1);
-        SDL_BindGPUIndexBuffer(render_pass, &index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        const GpuMeshCacheEntry& mesh_entry = mesh_entry_it->second;
+        if (mesh_entry.vertex_buffer.buffer == VK_NULL_HANDLE || mesh_entry.index_buffer.buffer == VK_NULL_HANDLE)
+        {
+            continue;
+        }
 
-        SceneUniformBlock uniform_block = {};
-        BuildModelMatrix(object, uniform_block.model);
-        MultiplyMatrix(view_projection_.data(), uniform_block.model, uniform_block.model_view_projection);
-        SDL_PushGPUVertexUniformData(command_buffer, 0, &uniform_block, sizeof(uniform_block));
+        SceneUniformBlock scene_uniforms = {};
+        BuildModelMatrix(object, scene_uniforms.model);
+        MultiplyMatrix(view_projection_.data(), scene_uniforms.model, scene_uniforms.model_view_projection);
+        vkCmdPushConstants(
+            offscreen_command_buffer_,
+            scene_pipeline_layout_,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(SceneUniformBlock),
+            &scene_uniforms);
+
+        vkCmdBindVertexBuffers(offscreen_command_buffer_, 0, 1, &mesh_entry.vertex_buffer.buffer, &vertex_offset);
+        vkCmdBindIndexBuffer(offscreen_command_buffer_, mesh_entry.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
 
         for (const GpuMeshSection& section : mesh_entry.sections)
         {
-            SDL_GPUTexture* material_texture = fallback_texture_;
-            if (section.material_index < mesh_entry.material_textures.size() && mesh_entry.material_textures[section.material_index] != nullptr)
+            VkDescriptorSet descriptor_set = fallback_texture_.descriptor_set;
+            if (section.material_index < mesh_entry.material_textures.size())
             {
-                material_texture = mesh_entry.material_textures[section.material_index];
+                const GpuTexture& material_texture = mesh_entry.material_textures[section.material_index];
+                if (material_texture.descriptor_set != VK_NULL_HANDLE)
+                {
+                    descriptor_set = material_texture.descriptor_set;
+                }
             }
 
-            SDL_GPUTextureSamplerBinding sampler_binding = {};
-            sampler_binding.texture = material_texture;
-            sampler_binding.sampler = material_sampler_;
-            SDL_BindGPUFragmentSamplers(render_pass, 0, &sampler_binding, 1);
-            SDL_DrawGPUIndexedPrimitives(render_pass, section.index_count, 1, section.first_index, 0, 0);
+            vkCmdBindDescriptorSets(
+                offscreen_command_buffer_,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene_pipeline_layout_,
+                0,
+                1,
+                &descriptor_set,
+                0,
+                nullptr);
+            vkCmdDrawIndexed(offscreen_command_buffer_, section.index_count, 1, section.first_index, 0, 0);
         }
     }
 
-    SDL_EndGPURenderPass(render_pass);
+    vkCmdEndRenderPass(offscreen_command_buffer_);
+
+    TransitionImageLayout(
+        offscreen_command_buffer_,
+        offscreen_color_image_,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT);
+    offscreen_color_layout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    result = vkEndCommandBuffer(offscreen_command_buffer_);
+    VulkanContext::CheckVkResult(result);
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &offscreen_command_buffer_;
+    result = vkQueueSubmit(vulkan_context_->GetQueue(), 1, &submit_info, offscreen_render_fence_);
+    VulkanContext::CheckVkResult(result);
+    result = vkWaitForFences(vk_device, 1, &offscreen_render_fence_, VK_TRUE, UINT64_MAX);
+    VulkanContext::CheckVkResult(result);
 }

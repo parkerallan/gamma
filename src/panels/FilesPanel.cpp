@@ -16,6 +16,16 @@ bool IsSceneFile(const std::filesystem::path& path)
     return path.extension() == ".scene";
 }
 
+bool IsCppFile(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value)
+    {
+        return static_cast<char>(std::tolower(value));
+    });
+    return extension == ".cpp";
+}
+
 bool ShouldSkipPath(const std::filesystem::path& path)
 {
     const std::string name = path.filename().string();
@@ -317,14 +327,25 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.52f, 1.0f));
     }
 
+    const ImVec2 node_pos = ImGui::GetCursorScreenPos();
     const bool opened = ImGui::TreeNodeEx(tree_id.c_str(), flags, "%s", node.label.c_str());
 
     if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
     {
         ImGui::PopStyleColor();
     }
+    const bool has_toggle_arrow = node.is_directory || !node.children.empty();
     const bool tree_item_released = ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
     const bool tree_item_toggled = ImGui::IsItemToggledOpen();
+    bool released_on_arrow = false;
+    if (has_toggle_arrow && tree_item_released)
+    {
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float arrow_hit_x1 = node_pos.x - style.TouchExtraPadding.x;
+        const float arrow_hit_x2 = node_pos.x + ImGui::GetFontSize() + (style.FramePadding.x * 2.0f) + style.TouchExtraPadding.x;
+        const float mouse_x = ImGui::GetIO().MousePos.x;
+        released_on_arrow = mouse_x >= arrow_hit_x1 && mouse_x < arrow_hit_x2;
+    }
     const bool moved_from_source = !node.is_scene_object && RenderMoveSource(node, state);
     bool moved_to_directory = false;
 
@@ -338,12 +359,13 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
         moved_to_directory = RenderMoveTarget(node.path, state);
     }
 
-    if (tree_item_released && !tree_item_toggled && !moved_from_source && !moved_to_directory)
+    if (tree_item_released && !tree_item_toggled && !released_on_arrow && !moved_from_source && !moved_to_directory)
     {
         if (node.is_scene_object)
         {
             state.SetSelectedSceneObject(node.path, node.label);
             state.OpenTextFile(node.path);
+            state.RequestTab(WorkspaceTab::Scene);
             state.AddLog("Selected scene object: " + node.label + " in " + full_path);
         }
         else if (node.is_directory)
@@ -357,6 +379,14 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
             if (!state.OpenTextFile(node.path))
             {
                 state.AddLog("Selected file item: " + full_path);
+            }
+            else if (IsSceneFile(node.path))
+            {
+                state.RequestTab(WorkspaceTab::Scene);
+            }
+            else if (IsCppFile(node.path))
+            {
+                state.RequestTab(WorkspaceTab::Editor);
             }
         }
     }

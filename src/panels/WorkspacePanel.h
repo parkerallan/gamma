@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/VulkanContext.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "graph/GraphDocument.h"
@@ -28,9 +29,9 @@ public:
 
     void Render(EngineState& state);
     void Shutdown();
-    bool InitializeSceneRenderer(SDL_GPUDevice* device, SDL_GPUTextureFormat color_target_format);
+    bool InitializeSceneRenderer(VulkanContext* context);
     void BeginFrame();
-    void RenderSceneGpuPass(SDL_GPUCommandBuffer* command_buffer);
+    void RenderSceneGpuPass();
     bool SaveOpenGraph(EngineState& state);
     bool ReloadOpenGraph(EngineState& state);
 

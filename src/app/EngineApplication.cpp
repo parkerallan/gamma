@@ -2,7 +2,7 @@
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
-#include "imgui_impl_sdlgpu3.h"
+#include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
 
 #include <filesystem>
@@ -56,7 +56,7 @@ bool EngineApplication::Init()
 
     display_scale_ = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
 
-    const SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    const SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     window_ = SDL_CreateWindow(
         "Engine",
         static_cast<int>(1600.0f * display_scale_),
@@ -69,20 +69,10 @@ bool EngineApplication::Init()
         return false;
     }
 
-    gpu_device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, "vulkan");
-    if (gpu_device_ == nullptr)
+    if (!vulkan_context_.Initialize(window_))
     {
-        SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         return false;
     }
-
-    if (!SDL_ClaimWindowForGPUDevice(gpu_device_, window_))
-    {
-        SDL_Log("SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
-        return false;
-    }
-
-    SDL_SetGPUSwapchainParameters(gpu_device_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, SDL_GPU_PRESENTMODE_VSYNC);
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window_);
 
@@ -96,27 +86,38 @@ bool EngineApplication::Init()
 
     ApplyStyle();
 
-    ImGui_ImplSDL3_InitForSDLGPU(window_);
-    ImGui_ImplSDLGPU3_InitInfo init_info = {};
-    init_info.Device = gpu_device_;
-    init_info.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(gpu_device_, window_);
-    init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
-    init_info.SwapchainComposition = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
-    init_info.PresentMode = SDL_GPU_PRESENTMODE_VSYNC;
-    ImGui_ImplSDLGPU3_Init(&init_info);
+    ImGui_ImplSDL3_InitForVulkan(window_);
+    ImGui_ImplVulkan_InitInfo init_info = {};
+    init_info.ApiVersion = VK_API_VERSION_1_3;
+    init_info.Instance = vulkan_context_.GetInstance();
+    init_info.PhysicalDevice = vulkan_context_.GetPhysicalDevice();
+    init_info.Device = vulkan_context_.GetDevice();
+    init_info.QueueFamily = vulkan_context_.GetQueueFamily();
+    init_info.Queue = vulkan_context_.GetQueue();
+    init_info.PipelineCache = vulkan_context_.GetPipelineCache();
+    init_info.DescriptorPool = vulkan_context_.GetDescriptorPool();
+    init_info.MinImageCount = vulkan_context_.GetMinImageCount();
+    init_info.ImageCount = vulkan_context_.GetImageCount();
+    init_info.Allocator = vulkan_context_.GetAllocator();
+    init_info.PipelineInfoMain.RenderPass = vulkan_context_.GetRenderPass();
+    init_info.PipelineInfoMain.Subpass = 0;
+    init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    init_info.CheckVkResultFn = VulkanContext::CheckVkResult;
+    ImGui_ImplVulkan_Init(&init_info);
 
     if (io.Fonts->AddFontDefaultVector() == nullptr)
     {
         io.Fonts->AddFontDefaultBitmap();
     }
 
-    if (!workspace_panel_.InitializeSceneRenderer(gpu_device_, init_info.ColorTargetFormat))
+    if (!workspace_panel_.InitializeSceneRenderer(&vulkan_context_))
     {
-        SDL_Log("Scene viewport renderer initialization failed: %s", SDL_GetError());
+        SDL_Log("Scene viewport renderer initialization failed");
     }
 
     state_.SetWorkspaceRoot(ResolveWorkspaceRoot());
     state_.AddLog("Workspace root: " + state_.workspace_root.generic_string());
+    state_.AddLog("Rendering backend: raw Vulkan API");
     state_.AddLog("Engine started");
     running_ = true;
     return true;
@@ -135,7 +136,7 @@ void EngineApplication::RunLoop()
         }
 
         workspace_panel_.BeginFrame();
-        ImGui_ImplSDLGPU3_NewFrame();
+        ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
@@ -143,32 +144,8 @@ void EngineApplication::RunLoop()
 
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();
-        const bool is_minimized = draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f;
-
-        SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(gpu_device_);
-        workspace_panel_.RenderSceneGpuPass(command_buffer);
-        SDL_GPUTexture* swapchain_texture = nullptr;
-        SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window_, &swapchain_texture, nullptr, nullptr);
-
-        if (swapchain_texture != nullptr && !is_minimized)
-        {
-            ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);
-
-            SDL_GPUColorTargetInfo target_info = {};
-            target_info.texture = swapchain_texture;
-            target_info.clear_color = SDL_FColor{0.08f, 0.09f, 0.11f, 1.0f};
-            target_info.load_op = SDL_GPU_LOADOP_CLEAR;
-            target_info.store_op = SDL_GPU_STOREOP_STORE;
-            target_info.mip_level = 0;
-            target_info.layer_or_depth_plane = 0;
-            target_info.cycle = false;
-
-            SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(command_buffer, &target_info, 1, nullptr);
-            ImGui_ImplSDLGPU3_RenderDrawData(draw_data, command_buffer, render_pass);
-            SDL_EndGPURenderPass(render_pass);
-        }
-
-        SDL_SubmitGPUCommandBuffer(command_buffer);
+        workspace_panel_.RenderSceneGpuPass();
+        vulkan_context_.RenderFrame(window_, draw_data, ImVec4(0.08f, 0.09f, 0.11f, 1.0f));
     }
 }
 
@@ -177,25 +154,13 @@ void EngineApplication::Shutdown()
     workspace_panel_.Shutdown();
     info_panel_.Shutdown();
 
-    if (gpu_device_ != nullptr)
-    {
-        SDL_WaitForGPUIdle(gpu_device_);
-    }
+    vulkan_context_.WaitIdle();
 
-    ImGui_ImplSDLGPU3_Shutdown();
+    ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
-    if (gpu_device_ != nullptr && window_ != nullptr)
-    {
-        SDL_ReleaseWindowFromGPUDevice(gpu_device_, window_);
-    }
-
-    if (gpu_device_ != nullptr)
-    {
-        SDL_DestroyGPUDevice(gpu_device_);
-        gpu_device_ = nullptr;
-    }
+    vulkan_context_.Shutdown();
 
     if (window_ != nullptr)
     {
@@ -270,7 +235,7 @@ void EngineApplication::RenderUI()
     files_panel_.Render(state_);
     workspace_panel_.Render(state_);
     settings_panel_.Render(state_);
-    info_panel_.Render(state_, nullptr);
+    info_panel_.Render(state_, &vulkan_context_);
     log_panel_.Render(state_);
 }
 

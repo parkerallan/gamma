@@ -31,9 +31,9 @@ WorkspacePanel::~WorkspacePanel()
     Shutdown();
 }
 
-bool WorkspacePanel::InitializeSceneRenderer(SDL_GPUDevice* device, SDL_GPUTextureFormat color_target_format)
+bool WorkspacePanel::InitializeSceneRenderer(VulkanContext* context)
 {
-    return scene_view_renderer_.Initialize(device, color_target_format);
+    return scene_view_renderer_.Initialize(context);
 }
 
 void WorkspacePanel::BeginFrame()
@@ -41,9 +41,9 @@ void WorkspacePanel::BeginFrame()
     scene_view_renderer_.BeginFrame();
 }
 
-void WorkspacePanel::RenderSceneGpuPass(SDL_GPUCommandBuffer* command_buffer)
+void WorkspacePanel::RenderSceneGpuPass()
 {
-    scene_view_renderer_.RenderGpu(command_buffer);
+    scene_view_renderer_.RenderGpu();
 }
 
 const CachedModelAssetEntry& WorkspacePanel::GetModelAssetEntry(const std::filesystem::path& path)

@@ -1,11 +1,13 @@
 #include "panels/InfoPanel.h"
 
 #include "imgui.h"
-#include <stb_image.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 namespace
@@ -95,8 +97,20 @@ bool SaveSceneObjectVector3Edit(
         return false;
     }
 
+    if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && !state.open_file_dirty)
+    {
+        std::ifstream input(state.selected_item_path, std::ios::binary);
+        if (input)
+        {
+            state.saved_file_contents.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+            state.open_file_contents = state.saved_file_contents;
+            std::fill(state.editor_buffer.begin(), state.editor_buffer.end(), '\0');
+            std::copy(state.open_file_contents.begin(), state.open_file_contents.end(), state.editor_buffer.begin());
+            state.open_file_dirty = false;
+        }
+    }
+
     state.AddLog(std::string("Updated object ") + log_label + ": " + object.name);
-    state.OpenTextFile(state.selected_item_path);
     return true;
 }
 
@@ -124,7 +138,7 @@ InfoPanel::~InfoPanel()
 
 void InfoPanel::Shutdown()
 {
-    ClearTexturePreview();
+    texture_info_renderer_.Shutdown();
 }
 
 const ModelMetadata& InfoPanel::GetModelMetadata(const std::filesystem::path& path)
@@ -195,71 +209,6 @@ const TextureMetadata& InfoPanel::GetTextureMetadata(const std::filesystem::path
     return cached_texture_metadata_;
 }
 
-void InfoPanel::ClearTexturePreview()
-{
-    if (cached_texture_preview_ != nullptr)
-    {
-        SDL_DestroyTexture(cached_texture_preview_);
-        cached_texture_preview_ = nullptr;
-    }
-
-    cached_texture_preview_path_.clear();
-    cached_texture_preview_write_time_ = std::filesystem::file_time_type{};
-    cached_texture_preview_width_ = 0;
-    cached_texture_preview_height_ = 0;
-}
-
-SDL_Texture* InfoPanel::GetTexturePreview(const std::filesystem::path& path, SDL_Renderer* renderer)
-{
-    if (renderer == nullptr)
-    {
-        ClearTexturePreview();
-        return nullptr;
-    }
-
-    std::error_code error;
-    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
-    const bool cache_valid = cached_texture_preview_ != nullptr && cached_texture_preview_path_ == path && !error && cached_texture_preview_write_time_ == write_time;
-    if (cache_valid)
-    {
-        return cached_texture_preview_;
-    }
-
-    ClearTexturePreview();
-
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
-    if (pixels == nullptr)
-    {
-        return nullptr;
-    }
-
-    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, width, height);
-    if (texture == nullptr)
-    {
-        stbi_image_free(pixels);
-        return nullptr;
-    }
-
-    const bool updated = SDL_UpdateTexture(texture, nullptr, pixels, width * 4);
-    stbi_image_free(pixels);
-    if (!updated)
-    {
-        SDL_DestroyTexture(texture);
-        return nullptr;
-    }
-
-    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
-    cached_texture_preview_ = texture;
-    cached_texture_preview_path_ = path;
-    cached_texture_preview_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
-    cached_texture_preview_width_ = width;
-    cached_texture_preview_height_ = height;
-    return cached_texture_preview_;
-}
-
 void InfoPanel::RenderMaterialMetadata(const ParsedMaterialMetadata& metadata) const
 {
     ImGui::Spacing();
@@ -322,7 +271,7 @@ void InfoPanel::RenderMaterialMetadata(const ParsedMaterialMetadata& metadata) c
 
 }
 
-bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::filesystem::path& scene_path, const std::string& object_name, std::string_view attachment_kind)
+bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::filesystem::path& scene_path, const std::string& object_name)
 {
     bool changed = false;
     if (!ImGui::BeginDragDropTarget())
@@ -339,13 +288,9 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
         {
             state.AddLog("Save the open scene before attaching assets to an object");
         }
-        else if (attachment_kind == "Model")
+        else if (IsSupportedModelAttachment(source_path))
         {
-            if (!IsSupportedModelAttachment(source_path))
-            {
-                state.AddLog("Only .fbx and .glb files can be attached as object models");
-            }
-            else if (SetSceneObjectModel(scene_path, object_name, state.project_root, source_path))
+            if (SetSceneObjectModel(scene_path, object_name, state.project_root, source_path))
             {
                 state.AddLog("Attached model to object: " + object_name);
                 state.OpenTextFile(scene_path);
@@ -353,13 +298,9 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
                 changed = true;
             }
         }
-        else if (attachment_kind == "Script")
+        else if (IsSupportedScriptAttachment(source_path))
         {
-            if (!IsSupportedScriptAttachment(source_path))
-            {
-                state.AddLog("Only .cpp files can be attached as object scripts");
-            }
-            else if (AddSceneObjectScript(scene_path, object_name, state.project_root, source_path))
+            if (AddSceneObjectScript(scene_path, object_name, state.project_root, source_path))
             {
                 state.AddLog("Attached script to object: " + object_name);
                 state.OpenTextFile(scene_path);
@@ -367,19 +308,19 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
                 changed = true;
             }
         }
-        else if (attachment_kind == "Graph")
+        else if (IsSupportedGraphAttachment(source_path))
         {
-            if (!IsSupportedGraphAttachment(source_path))
-            {
-                state.AddLog("Only .graph files can be attached as object graphs");
-            }
-            else if (AddSceneObjectGraph(scene_path, object_name, state.project_root, source_path))
+            if (AddSceneObjectGraph(scene_path, object_name, state.project_root, source_path))
             {
                 state.AddLog("Attached graph to object: " + object_name);
                 state.OpenTextFile(scene_path);
                 has_cached_scene_metadata_ = false;
                 changed = true;
             }
+        }
+        else
+        {
+            state.AddLog("Attach supported assets only: .fbx/.glb model, .cpp script, or .graph graph");
         }
     }
 
@@ -411,13 +352,12 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         return;
     }
 
-    ImGui::Spacing();
-    ImGui::SeparatorText("Scene Object");
+    ImGui::SeparatorText("Object");
     ImGui::Text("Name: %s", object_it->name.c_str());
     ImGui::Text("Type: %s", object_it->type.empty() ? "Empty" : object_it->type.c_str());
 
     ImGui::Spacing();
-    ImGui::TextUnformatted("Transform");
+    ImGui::SeparatorText("Transform");
 
     float position[3] = {object_it->position[0], object_it->position[1], object_it->position[2]};
     if (ImGui::DragFloat3("Position", position, 0.1f))
@@ -426,7 +366,6 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         if (SaveSceneObjectVector3Edit(state, *object_it, "position", snapped_position, SetSceneObjectPosition))
         {
             has_cached_scene_metadata_ = false;
-            return;
         }
     }
 
@@ -436,7 +375,6 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         if (SaveSceneObjectVector3Edit(state, *object_it, "rotation", {rotation[0], rotation[1], rotation[2]}, SetSceneObjectRotation))
         {
             has_cached_scene_metadata_ = false;
-            return;
         }
     }
 
@@ -446,21 +384,22 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         if (SaveSceneObjectVector3Edit(state, *object_it, "scale", {scale[0], scale[1], scale[2]}, SetSceneObjectScale))
         {
             has_cached_scene_metadata_ = false;
-            return;
         }
     }
 
     ImGui::Spacing();
-    ImGui::TextUnformatted("Model");
-    if (object_it->model_path.empty())
+
+    if (!object_it->model_path.empty())
     {
-        ImGui::TextWrapped("Attach .fbx/.glb");
-    }
-    else
-    {
-        ImGui::TextWrapped("%s", object_it->model_path.c_str());
-        ImGui::SameLine();
-        if (ImGui::SmallButton("X##RemoveObjectModel"))
+        ImGui::PushID("Model");
+        bool keep_model_attachment = true;
+        if (ImGui::CollapsingHeader(object_it->model_path.c_str(), &keep_model_attachment, ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+            ImGui::TextDisabled("Transform source: Position / Rotation / Scale");
+        }
+        if (!keep_model_attachment)
         {
             if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
             {
@@ -471,108 +410,79 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
                 state.AddLog("Removed model from object: " + object_it->name);
                 state.OpenTextFile(state.selected_item_path);
                 has_cached_scene_metadata_ = false;
+                ImGui::PopID();
                 return;
             }
         }
+        ImGui::PopID();
     }
-    ImGui::InvisibleButton("##ObjectModelDropTarget", ImVec2(-FLT_MIN, 44.0f));
-    if (ImGui::IsItemVisible())
-    {
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        const ImVec2 min = ImGui::GetItemRectMin();
-        const ImVec2 max = ImGui::GetItemRectMax();
-        draw_list->AddRect(min, max, IM_COL32(94, 138, 190, 180), 6.0f, 0, 1.5f);
-    }
-    HandleSceneObjectAttachmentDrop(state, state.selected_item_path, object_it->name, "Model");
 
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Scripts");
-    if (object_it->script_paths.empty())
+    for (std::size_t script_index = 0; script_index < object_it->script_paths.size(); ++script_index)
     {
-        ImGui::TextWrapped("Attach .cpp script(s)");
-    }
-    else
-    {
-        for (std::size_t script_index = 0; script_index < object_it->script_paths.size(); ++script_index)
+        const std::string& script_path = object_it->script_paths[script_index];
+        ImGui::PushID(static_cast<int>(10000 + script_index));
+        bool keep_script_attachment = true;
+        if (ImGui::CollapsingHeader(script_path.c_str(), &keep_script_attachment, ImGuiTreeNodeFlags_DefaultOpen))
         {
-            const std::string& script_path = object_it->script_paths[script_index];
-            ImGui::PushID(static_cast<int>(script_index));
-            ImGui::TextWrapped("%s", script_path.c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("X##RemoveObjectScript"))
-            {
-                if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
-                {
-                    state.AddLog("Save the open scene before removing an object script");
-                }
-                else if (RemoveSceneObjectScript(state.selected_item_path, object_it->name, state.project_root, state.project_root / script_path))
-                {
-                    state.AddLog("Removed script from object: " + object_it->name);
-                    state.OpenTextFile(state.selected_item_path);
-                    has_cached_scene_metadata_ = false;
-                    ImGui::PopID();
-                    return;
-                }
-            }
-            ImGui::PopID();
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+            ImGui::TextDisabled("Execution order follows list order.");
         }
-    }
-
-    ImGui::InvisibleButton("##ObjectScriptDropTarget", ImVec2(-FLT_MIN, 44.0f));
-    if (ImGui::IsItemVisible())
-    {
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        const ImVec2 min = ImGui::GetItemRectMin();
-        const ImVec2 max = ImGui::GetItemRectMax();
-        draw_list->AddRect(min, max, IM_COL32(94, 138, 190, 180), 6.0f, 0, 1.5f);
-    }
-    HandleSceneObjectAttachmentDrop(state, state.selected_item_path, object_it->name, "Script");
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Graphs");
-    if (object_it->graph_paths.empty())
-    {
-        ImGui::TextWrapped("Attach .graph file(s)");
-    }
-    else
-    {
-        for (std::size_t graph_index = 0; graph_index < object_it->graph_paths.size(); ++graph_index)
+        if (!keep_script_attachment)
         {
-            const std::string& graph_path = object_it->graph_paths[graph_index];
-            ImGui::PushID(static_cast<int>(1000 + graph_index));
-            ImGui::TextWrapped("%s", graph_path.c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("X##RemoveObjectGraph"))
+            if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
             {
-                if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
-                {
-                    state.AddLog("Save the open scene before removing an object graph");
-                }
-                else if (RemoveSceneObjectGraph(state.selected_item_path, object_it->name, state.project_root, state.project_root / graph_path))
-                {
-                    state.AddLog("Removed graph from object: " + object_it->name);
-                    state.OpenTextFile(state.selected_item_path);
-                    has_cached_scene_metadata_ = false;
-                    ImGui::PopID();
-                    return;
-                }
+                state.AddLog("Save the open scene before removing an object script");
             }
-            ImGui::PopID();
+            else if (RemoveSceneObjectScript(state.selected_item_path, object_it->name, state.project_root, state.project_root / script_path))
+            {
+                state.AddLog("Removed script from object: " + object_it->name);
+                state.OpenTextFile(state.selected_item_path);
+                has_cached_scene_metadata_ = false;
+                ImGui::PopID();
+                return;
+            }
         }
+        ImGui::PopID();
     }
 
-    ImGui::InvisibleButton("##ObjectGraphDropTarget", ImVec2(-FLT_MIN, 44.0f));
-    if (ImGui::IsItemVisible())
+    for (std::size_t graph_index = 0; graph_index < object_it->graph_paths.size(); ++graph_index)
     {
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        const ImVec2 min = ImGui::GetItemRectMin();
-        const ImVec2 max = ImGui::GetItemRectMax();
-        draw_list->AddRect(min, max, IM_COL32(94, 138, 190, 180), 6.0f, 0, 1.5f);
+        const std::string& graph_path = object_it->graph_paths[graph_index];
+        ImGui::PushID(static_cast<int>(20000 + graph_index));
+        bool keep_graph_attachment = true;
+        if (ImGui::CollapsingHeader(graph_path.c_str(), &keep_graph_attachment, ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+            ImGui::TextDisabled("Graph assets are loaded on demand.");
+        }
+        if (!keep_graph_attachment)
+        {
+            if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
+            {
+                state.AddLog("Save the open scene before removing an object graph");
+            }
+            else if (RemoveSceneObjectGraph(state.selected_item_path, object_it->name, state.project_root, state.project_root / graph_path))
+            {
+                state.AddLog("Removed graph from object: " + object_it->name);
+                state.OpenTextFile(state.selected_item_path);
+                has_cached_scene_metadata_ = false;
+                ImGui::PopID();
+                return;
+            }
+        }
+        ImGui::PopID();
     }
-    HandleSceneObjectAttachmentDrop(state, state.selected_item_path, object_it->name, "Graph");
+
+    ImGui::InvisibleButton("##ObjectAttachmentDropTarget", ImVec2(-FLT_MIN, ImGui::GetContentRegionAvail().y));
+    if (HandleSceneObjectAttachmentDrop(state, state.selected_item_path, object_it->name))
+    {
+        return;
+    }
 }
 
-void InfoPanel::RenderTextureMetadata(const std::filesystem::path& path, const TextureMetadata& metadata, SDL_Renderer* renderer)
+void InfoPanel::RenderTextureMetadata(const std::filesystem::path& path, const TextureMetadata& metadata, VulkanContext* vulkan_context)
 {
     ImGui::Spacing();
     ImGui::SeparatorText("Texture");
@@ -587,19 +497,19 @@ void InfoPanel::RenderTextureMetadata(const std::filesystem::path& path, const T
         return;
     }
 
-    if (SDL_Texture* preview_texture = GetTexturePreview(path, renderer))
+    if (ImTextureID preview_texture = texture_info_renderer_.GetTexturePreview(path, vulkan_context))
     {
         const float available_width = ImGui::GetContentRegionAvail().x;
         const float max_preview_width = available_width > 0.0f ? available_width : 220.0f;
         const float max_preview_height = 220.0f;
-        const float width_scale = max_preview_width / static_cast<float>(cached_texture_preview_width_);
-        const float height_scale = max_preview_height / static_cast<float>(cached_texture_preview_height_);
+        const float width_scale = max_preview_width / static_cast<float>(texture_info_renderer_.GetPreviewWidth());
+        const float height_scale = max_preview_height / static_cast<float>(texture_info_renderer_.GetPreviewHeight());
         const float scale = (std::min)(1.0f, (std::min)(width_scale, height_scale));
         const ImVec2 preview_size(
-            static_cast<float>(cached_texture_preview_width_) * scale,
-            static_cast<float>(cached_texture_preview_height_) * scale);
+            static_cast<float>(texture_info_renderer_.GetPreviewWidth()) * scale,
+            static_cast<float>(texture_info_renderer_.GetPreviewHeight()) * scale);
 
-        ImGui::Image(reinterpret_cast<ImTextureID>(preview_texture), preview_size);
+        ImGui::Image(preview_texture, preview_size);
         ImGui::Spacing();
     }
 
@@ -712,7 +622,7 @@ void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
     }
 }
 
-void InfoPanel::Render(EngineState& state, SDL_Renderer* renderer)
+void InfoPanel::Render(EngineState& state, VulkanContext* vulkan_context)
 {
     if (!state.show_info_panel)
     {
@@ -752,15 +662,17 @@ void InfoPanel::Render(EngineState& state, SDL_Renderer* renderer)
 
     const bool is_directory = std::filesystem::is_directory(selected_path);
 
+    if (state.HasSelectedSceneObject())
+    {
+        RenderSelectedSceneObject(state);
+        ImGui::End();
+        return;
+    }
+
     ImGui::TextUnformatted(selected_path.filename().string().c_str());
     ImGui::Separator();
     ImGui::Text("Type: %s", is_directory ? "Folder" : "File");
     ImGui::TextWrapped("Path: %s", state.GetSelectedItemDisplayPath().c_str());
-    if (state.HasSelectedSceneObject())
-    {
-        ImGui::Text("Scene Object: %s", state.selected_scene_object_name.c_str());
-        RenderSelectedSceneObject(state);
-    }
 
     if (!is_directory)
     {
@@ -783,7 +695,7 @@ void InfoPanel::Render(EngineState& state, SDL_Renderer* renderer)
         }
         else if (TextureMetadata::IsSupportedPath(selected_path))
         {
-            RenderTextureMetadata(selected_path, GetTextureMetadata(selected_path), renderer);
+            RenderTextureMetadata(selected_path, GetTextureMetadata(selected_path), vulkan_context);
         }
     }
     else
