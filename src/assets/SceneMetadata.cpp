@@ -42,6 +42,11 @@ bool IsSceneObjectStart(std::string_view line)
     return StartsWith(line, "Object:");
 }
 
+bool RewriteSceneObjectLines(
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    const std::function<void(std::vector<std::string>&, std::size_t, std::size_t)>& mutator);
+
 bool ParseVector3(std::string_view value, SceneVector3& result)
 {
     std::istringstream stream{std::string(value)};
@@ -82,6 +87,349 @@ std::string FormatVector3(const SceneVector3& value)
     return stream.str();
 }
 
+bool ParseColor3(std::string_view value, SceneColor3& result)
+{
+    std::istringstream stream{std::string(value)};
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+    char separator = '\0';
+    if (!(stream >> r))
+    {
+        return false;
+    }
+    if (!(stream >> separator) || separator != ',')
+    {
+        return false;
+    }
+    if (!(stream >> g))
+    {
+        return false;
+    }
+    if (!(stream >> separator) || separator != ',')
+    {
+        return false;
+    }
+    if (!(stream >> b))
+    {
+        return false;
+    }
+
+    result = {r, g, b};
+    return true;
+}
+
+std::string FormatColor3(const SceneColor3& value)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3)
+        << value[0] << ", " << value[1] << ", " << value[2];
+    return stream.str();
+}
+
+std::string FormatScalar(float value)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3) << value;
+    return stream.str();
+}
+
+bool ParseScalar(std::string_view value, float& result)
+{
+    std::istringstream stream{std::string(value)};
+    return static_cast<bool>(stream >> result);
+}
+
+std::vector<std::string> ReadSceneLines(const std::filesystem::path& scene_path)
+{
+    std::ifstream input(scene_path, std::ios::binary);
+    if (!input)
+    {
+        return {};
+    }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        lines.push_back(line);
+    }
+
+    return lines;
+}
+
+bool WriteSceneLines(const std::filesystem::path& scene_path, const std::vector<std::string>& lines)
+{
+    std::ofstream output(scene_path, std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < lines.size(); ++index)
+    {
+        output << lines[index];
+        if (index + 1 < lines.size())
+        {
+            output << '\n';
+        }
+    }
+
+    return static_cast<bool>(output);
+}
+
+struct SceneObjectLineBlock
+{
+    std::string name;
+    std::size_t start = 0;
+    std::size_t end = 0;
+};
+
+std::vector<SceneObjectLineBlock> CollectSceneObjectLineBlocks(const std::vector<std::string>& lines)
+{
+    std::vector<SceneObjectLineBlock> blocks;
+    for (std::size_t index = 0; index < lines.size(); ++index)
+    {
+        const std::string trimmed = TrimCopy(lines[index]);
+        if (!IsSceneObjectStart(trimmed))
+        {
+            continue;
+        }
+
+        SceneObjectLineBlock block;
+        block.name = ExtractValue(trimmed, "Object:");
+        block.start = index;
+        block.end = lines.size();
+        for (std::size_t next_index = index + 1; next_index < lines.size(); ++next_index)
+        {
+            if (IsSceneObjectStart(TrimCopy(lines[next_index])))
+            {
+                block.end = next_index;
+                break;
+            }
+        }
+
+        blocks.push_back(block);
+    }
+
+    return blocks;
+}
+
+bool SceneObjectExists(const SceneMetadata& scene_metadata, const std::string& object_name)
+{
+    return std::any_of(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+    {
+        return object.name == object_name;
+    });
+}
+
+std::string BuildUniqueSceneObjectName(const SceneMetadata& scene_metadata, const std::string& desired_name, const std::vector<std::string>& reserved_names = {})
+{
+    auto name_exists = [&](const std::string& candidate)
+    {
+        if (candidate.empty())
+        {
+            return true;
+        }
+
+        if (SceneObjectExists(scene_metadata, candidate))
+        {
+            return true;
+        }
+
+        return std::find(reserved_names.begin(), reserved_names.end(), candidate) != reserved_names.end();
+    };
+
+    if (!name_exists(desired_name))
+    {
+        return desired_name;
+    }
+
+    for (int suffix_index = 1; suffix_index < 10000; ++suffix_index)
+    {
+        const std::string candidate = desired_name + std::to_string(suffix_index);
+        if (!name_exists(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    return {};
+}
+
+void CollectSceneObjectSubtreeNames(const SceneMetadata& scene_metadata, const std::string& root_name, std::vector<std::string>& names)
+{
+    names.push_back(root_name);
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        if (object.parent_name == root_name)
+        {
+            CollectSceneObjectSubtreeNames(scene_metadata, object.name, names);
+        }
+    }
+}
+
+bool IsSceneObjectDescendant(const SceneMetadata& scene_metadata, const std::string& object_name, const std::string& potential_parent_name)
+{
+    std::string current_name = potential_parent_name;
+    while (!current_name.empty())
+    {
+        if (current_name == object_name)
+        {
+            return true;
+        }
+
+        const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+        {
+            return object.name == current_name;
+        });
+        if (object_it == scene_metadata.objects.end())
+        {
+            break;
+        }
+
+        current_name = object_it->parent_name;
+    }
+
+    return false;
+}
+
+bool IsAttributePropertyLine(std::string_view line)
+{
+    return StartsWith(line, "AttributeColor:") ||
+        StartsWith(line, "AttributeIntensity:") ||
+        StartsWith(line, "AttributeRange:") ||
+        StartsWith(line, "AttributeInnerCone:") ||
+        StartsWith(line, "AttributeOuterCone:") ||
+        StartsWith(line, "AttributeFov:") ||
+        StartsWith(line, "AttributeNearClip:") ||
+        StartsWith(line, "AttributeFarClip:");
+}
+
+bool IsAttributeLine(std::string_view line)
+{
+    return StartsWith(line, "Attributes:") || IsAttributePropertyLine(line);
+}
+
+std::size_t FindSceneObjectAttributeInsertionIndex(const std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+{
+    for (std::size_t index = object_start + 1; index < object_end; ++index)
+    {
+        const std::string trimmed = TrimCopy(lines[index]);
+        if (StartsWith(trimmed, "Model:") || StartsWith(trimmed, "Script:") || StartsWith(trimmed, "Graph:"))
+        {
+            return index;
+        }
+    }
+
+    return object_end;
+}
+
+bool FindSceneObjectAttributeBlock(
+    const std::vector<std::string>& lines,
+    std::size_t object_start,
+    std::size_t object_end,
+    std::size_t attribute_index,
+    std::size_t& attribute_start,
+    std::size_t& attribute_end)
+{
+    std::size_t current_attribute_index = 0;
+    for (std::size_t index = object_start + 1; index < object_end; ++index)
+    {
+        if (!StartsWith(TrimCopy(lines[index]), "Attributes:"))
+        {
+            continue;
+        }
+
+        if (current_attribute_index == attribute_index)
+        {
+            attribute_start = index;
+            attribute_end = index + 1;
+            while (attribute_end < object_end && IsAttributePropertyLine(TrimCopy(lines[attribute_end])))
+            {
+                ++attribute_end;
+            }
+            return true;
+        }
+
+        ++current_attribute_index;
+    }
+
+    return false;
+}
+
+bool SetSceneObjectAttributeScalar(
+    std::string_view key,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    float value)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + FormatScalar(value);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
+bool SetSceneObjectAttributeColorValue(
+    std::string_view key,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    const SceneColor3& color)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + FormatColor3(color);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
 std::string MakeRelativePath(const std::filesystem::path& project_root, const std::filesystem::path& path)
 {
     std::error_code error;
@@ -96,17 +444,10 @@ bool UpdateSceneObjectAttachment(
     const std::filesystem::path& attachment_path,
     std::string_view key)
 {
-    std::ifstream input(scene_path, std::ios::binary);
-    if (!input)
+    std::vector<std::string> lines = ReadSceneLines(scene_path);
+    if (lines.empty() && !std::filesystem::exists(scene_path))
     {
         return false;
-    }
-
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(input, line))
-    {
-        lines.push_back(line);
     }
 
     const std::string object_header = "Object: " + object_name;
@@ -155,22 +496,7 @@ bool UpdateSceneObjectAttachment(
         return false;
     }
 
-    std::ofstream output(scene_path, std::ios::binary | std::ios::trunc);
-    if (!output)
-    {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < lines.size(); ++index)
-    {
-        output << lines[index];
-        if (index + 1 < lines.size())
-        {
-            output << '\n';
-        }
-    }
-
-    return static_cast<bool>(output);
+    return WriteSceneLines(scene_path, lines);
 }
 
 bool RewriteSceneObjectLines(
@@ -178,17 +504,10 @@ bool RewriteSceneObjectLines(
     const std::string& object_name,
     const std::function<void(std::vector<std::string>&, std::size_t, std::size_t)>& mutator)
 {
-    std::ifstream input(scene_path, std::ios::binary);
-    if (!input)
+    std::vector<std::string> lines = ReadSceneLines(scene_path);
+    if (lines.empty() && !std::filesystem::exists(scene_path))
     {
         return false;
-    }
-
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(input, line))
-    {
-        lines.push_back(line);
     }
 
     const std::string object_header = "Object: " + object_name;
@@ -225,22 +544,7 @@ bool RewriteSceneObjectLines(
 
     mutator(lines, object_start, object_end);
 
-    std::ofstream output(scene_path, std::ios::binary | std::ios::trunc);
-    if (!output)
-    {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < lines.size(); ++index)
-    {
-        output << lines[index];
-        if (index + 1 < lines.size())
-        {
-            output << '\n';
-        }
-    }
-
-    return static_cast<bool>(output);
+    return WriteSceneLines(scene_path, lines);
 }
 
 bool SetSceneObjectVector3(const std::filesystem::path& scene_path, const std::string& object_name, std::string_view key, const SceneVector3& value)
@@ -263,6 +567,307 @@ bool SetSceneObjectVector3(const std::filesystem::path& scene_path, const std::s
 }
 }
 
+const char* ToDisplayName(SceneObjectAttributeKind kind)
+{
+    switch (kind)
+    {
+    case SceneObjectAttributeKind::EnvironmentLight:
+        return "Environment Light";
+    case SceneObjectAttributeKind::DirectionalLight:
+        return "Directional Light";
+    case SceneObjectAttributeKind::SpotLight:
+        return "Spot Light";
+    case SceneObjectAttributeKind::Camera:
+        return "Camera";
+    case SceneObjectAttributeKind::None:
+    default:
+        return "None";
+    }
+}
+
+const char* ToStorageName(SceneObjectAttributeKind kind)
+{
+    switch (kind)
+    {
+    case SceneObjectAttributeKind::EnvironmentLight:
+        return "EnvironmentLight";
+    case SceneObjectAttributeKind::DirectionalLight:
+        return "DirectionalLight";
+    case SceneObjectAttributeKind::SpotLight:
+        return "SpotLight";
+    case SceneObjectAttributeKind::Camera:
+        return "Camera";
+    case SceneObjectAttributeKind::None:
+    default:
+        return "None";
+    }
+}
+
+SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
+{
+    const std::string trimmed = TrimCopy(std::string(value));
+    if (trimmed == "EnvironmentLight")
+    {
+        return SceneObjectAttributeKind::EnvironmentLight;
+    }
+    if (trimmed == "DirectionalLight")
+    {
+        return SceneObjectAttributeKind::DirectionalLight;
+    }
+    if (trimmed == "SpotLight")
+    {
+        return SceneObjectAttributeKind::SpotLight;
+    }
+    if (trimmed == "Camera")
+    {
+        return SceneObjectAttributeKind::Camera;
+    }
+
+    return SceneObjectAttributeKind::None;
+}
+
+SceneObjectAttribute MakeDefaultSceneObjectAttribute(SceneObjectAttributeKind kind)
+{
+    SceneObjectAttribute attribute;
+    attribute.kind = kind;
+    return attribute;
+}
+
+bool RenameSceneObject(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& new_name)
+{
+    if (object_name.empty() || new_name.empty() || object_name == new_name)
+    {
+        return false;
+    }
+
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    if (!scene_metadata.parsed || !SceneObjectExists(scene_metadata, object_name) || SceneObjectExists(scene_metadata, new_name))
+    {
+        return false;
+    }
+
+    std::vector<std::string> lines = ReadSceneLines(scene_path);
+    if (lines.empty() && !std::filesystem::exists(scene_path))
+    {
+        return false;
+    }
+
+    for (std::string& line : lines)
+    {
+        const std::string trimmed = TrimCopy(line);
+        if (trimmed == "Object: " + object_name)
+        {
+            line = "Object: " + new_name;
+        }
+        else if (trimmed == "Parent: " + object_name)
+        {
+            line = "Parent: " + new_name;
+        }
+    }
+
+    return WriteSceneLines(scene_path, lines);
+}
+
+bool DuplicateSceneObject(const std::filesystem::path& scene_path, const std::string& object_name, std::string* duplicated_root_name)
+{
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    if (!scene_metadata.parsed || !SceneObjectExists(scene_metadata, object_name))
+    {
+        return false;
+    }
+
+    std::vector<std::string> subtree_names;
+    CollectSceneObjectSubtreeNames(scene_metadata, object_name, subtree_names);
+    if (subtree_names.empty())
+    {
+        return false;
+    }
+
+    std::vector<std::string> lines = ReadSceneLines(scene_path);
+    if (lines.empty() && !std::filesystem::exists(scene_path))
+    {
+        return false;
+    }
+
+    const std::vector<SceneObjectLineBlock> blocks = CollectSceneObjectLineBlocks(lines);
+    std::vector<std::string> reserved_names;
+    std::vector<std::pair<std::string, std::string>> name_mapping;
+    name_mapping.reserve(subtree_names.size());
+    for (const std::string& source_name : subtree_names)
+    {
+        const std::string base_name = source_name == object_name ? source_name + "_Copy" : source_name + "_Copy";
+        const std::string duplicated_name = BuildUniqueSceneObjectName(scene_metadata, base_name, reserved_names);
+        if (duplicated_name.empty())
+        {
+            return false;
+        }
+
+        reserved_names.push_back(duplicated_name);
+        name_mapping.emplace_back(source_name, duplicated_name);
+    }
+
+    auto map_name = [&](const std::string& source_name) -> std::string
+    {
+        const auto mapping_it = std::find_if(name_mapping.begin(), name_mapping.end(), [&](const auto& entry)
+        {
+            return entry.first == source_name;
+        });
+        return mapping_it != name_mapping.end() ? mapping_it->second : source_name;
+    };
+
+    for (const std::string& source_name : subtree_names)
+    {
+        const auto block_it = std::find_if(blocks.begin(), blocks.end(), [&](const SceneObjectLineBlock& block)
+        {
+            return block.name == source_name;
+        });
+        if (block_it == blocks.end())
+        {
+            return false;
+        }
+
+        if (!lines.empty() && !TrimCopy(lines.back()).empty())
+        {
+            lines.push_back(std::string());
+        }
+
+        const std::string duplicated_name = map_name(source_name);
+        for (std::size_t index = block_it->start; index < block_it->end; ++index)
+        {
+            std::string copied_line = lines[index];
+            const std::string trimmed = TrimCopy(copied_line);
+            if (trimmed == "Object: " + source_name)
+            {
+                copied_line = "Object: " + duplicated_name;
+            }
+            else if (StartsWith(trimmed, "Parent:"))
+            {
+                const std::string parent_name = ExtractValue(trimmed, "Parent:");
+                copied_line = parent_name.empty() ? copied_line : "Parent: " + map_name(parent_name);
+            }
+
+            lines.push_back(copied_line);
+        }
+    }
+
+    if (duplicated_root_name != nullptr)
+    {
+        *duplicated_root_name = map_name(object_name);
+    }
+
+    return WriteSceneLines(scene_path, lines);
+}
+
+bool DeleteSceneObject(const std::filesystem::path& scene_path, const std::string& object_name)
+{
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    if (!scene_metadata.parsed || !SceneObjectExists(scene_metadata, object_name))
+    {
+        return false;
+    }
+
+    std::vector<std::string> subtree_names;
+    CollectSceneObjectSubtreeNames(scene_metadata, object_name, subtree_names);
+    if (subtree_names.empty())
+    {
+        return false;
+    }
+
+    std::vector<std::string> lines = ReadSceneLines(scene_path);
+    if (lines.empty() && !std::filesystem::exists(scene_path))
+    {
+        return false;
+    }
+
+    const std::vector<SceneObjectLineBlock> blocks = CollectSceneObjectLineBlocks(lines);
+    std::vector<std::string> rewritten_lines;
+    std::size_t block_index = 0;
+    for (std::size_t line_index = 0; line_index < lines.size();)
+    {
+        if (block_index < blocks.size() && line_index == blocks[block_index].start)
+        {
+            const bool remove_block = std::find(subtree_names.begin(), subtree_names.end(), blocks[block_index].name) != subtree_names.end();
+            if (!remove_block)
+            {
+                for (std::size_t index = blocks[block_index].start; index < blocks[block_index].end; ++index)
+                {
+                    rewritten_lines.push_back(lines[index]);
+                }
+            }
+
+            line_index = blocks[block_index].end;
+            ++block_index;
+            continue;
+        }
+
+        rewritten_lines.push_back(lines[line_index]);
+        ++line_index;
+    }
+
+    while (!rewritten_lines.empty() && TrimCopy(rewritten_lines.back()).empty())
+    {
+        rewritten_lines.pop_back();
+    }
+
+    return WriteSceneLines(scene_path, rewritten_lines);
+}
+
+bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& parent_name)
+{
+    if (object_name.empty() || object_name == parent_name)
+    {
+        return false;
+    }
+
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    if (!scene_metadata.parsed || !SceneObjectExists(scene_metadata, object_name))
+    {
+        return false;
+    }
+    if (!parent_name.empty() && (!SceneObjectExists(scene_metadata, parent_name) || IsSceneObjectDescendant(scene_metadata, object_name, parent_name)))
+    {
+        return false;
+    }
+
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t existing_parent_index = object_end;
+        for (std::size_t index = object_start + 1; index < object_end; ++index)
+        {
+            const std::string trimmed = TrimCopy(lines[index]);
+            if (StartsWith(trimmed, "Parent:"))
+            {
+                existing_parent_index = index;
+                break;
+            }
+
+            if (StartsWith(trimmed, "Position:") || StartsWith(trimmed, "Rotation:") || StartsWith(trimmed, "Scale:") || StartsWith(trimmed, "Attributes:") || StartsWith(trimmed, "Model:") || StartsWith(trimmed, "Script:") || StartsWith(trimmed, "Graph:"))
+            {
+                existing_parent_index = index;
+                break;
+            }
+        }
+
+        if (parent_name.empty())
+        {
+            if (existing_parent_index < object_end && StartsWith(TrimCopy(lines[existing_parent_index]), "Parent:"))
+            {
+                lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(existing_parent_index));
+            }
+            return;
+        }
+
+        const std::string new_line = "Parent: " + parent_name;
+        if (existing_parent_index < object_end && StartsWith(TrimCopy(lines[existing_parent_index]), "Parent:"))
+        {
+            lines[existing_parent_index] = new_line;
+            return;
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(existing_parent_index), new_line);
+    });
+}
+
 SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
 {
     SceneMetadata metadata;
@@ -275,6 +880,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
     }
 
     SceneObjectMetadata* current_object = nullptr;
+    SceneObjectAttribute* current_attribute = nullptr;
     std::string line;
     while (std::getline(input, line))
     {
@@ -288,6 +894,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             metadata.scene_name = ExtractValue(trimmed, "Scene:");
             current_object = nullptr;
+            current_attribute = nullptr;
             continue;
         }
 
@@ -297,6 +904,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             object.name = ExtractValue(trimmed, "Object:");
             metadata.objects.push_back(std::move(object));
             current_object = &metadata.objects.back();
+            current_attribute = nullptr;
             continue;
         }
 
@@ -305,9 +913,9 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             continue;
         }
 
-        if (StartsWith(trimmed, "Type:"))
+        if (StartsWith(trimmed, "Parent:"))
         {
-            current_object->type = ExtractValue(trimmed, "Type:");
+            current_object->parent_name = ExtractValue(trimmed, "Parent:");
         }
         else if (StartsWith(trimmed, "Position:"))
         {
@@ -321,16 +929,68 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseVector3(ExtractValue(trimmed, "Scale:"), current_object->scale);
         }
+        else if (StartsWith(trimmed, "Attributes:"))
+        {
+            current_object->attributes.push_back(MakeDefaultSceneObjectAttribute(ParseSceneObjectAttributeKind(ExtractValue(trimmed, "Attributes:"))));
+            current_attribute = &current_object->attributes.back();
+        }
+        else if (StartsWith(trimmed, "AttributeColor:") && current_attribute != nullptr)
+        {
+            SceneColor3 color;
+            if (ParseColor3(ExtractValue(trimmed, "AttributeColor:"), color))
+            {
+                current_attribute->environment_light.color = color;
+                current_attribute->directional_light.color = color;
+                current_attribute->spot_light.color = color;
+            }
+        }
+        else if (StartsWith(trimmed, "AttributeIntensity:") && current_attribute != nullptr)
+        {
+            float intensity = 0.0f;
+            if (ParseScalar(ExtractValue(trimmed, "AttributeIntensity:"), intensity))
+            {
+                current_attribute->environment_light.intensity = intensity;
+                current_attribute->directional_light.intensity = intensity;
+                current_attribute->spot_light.intensity = intensity;
+            }
+        }
+        else if (StartsWith(trimmed, "AttributeRange:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeRange:"), current_attribute->spot_light.range);
+        }
+        else if (StartsWith(trimmed, "AttributeInnerCone:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeInnerCone:"), current_attribute->spot_light.inner_cone_degrees);
+        }
+        else if (StartsWith(trimmed, "AttributeOuterCone:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeOuterCone:"), current_attribute->spot_light.outer_cone_degrees);
+        }
+        else if (StartsWith(trimmed, "AttributeFov:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeFov:"), current_attribute->camera.field_of_view_degrees);
+        }
+        else if (StartsWith(trimmed, "AttributeNearClip:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeNearClip:"), current_attribute->camera.near_clip);
+        }
+        else if (StartsWith(trimmed, "AttributeFarClip:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeFarClip:"), current_attribute->camera.far_clip);
+        }
         else if (StartsWith(trimmed, "Model:"))
         {
+            current_attribute = nullptr;
             current_object->model_path = ExtractValue(trimmed, "Model:");
         }
         else if (StartsWith(trimmed, "Script:"))
         {
+            current_attribute = nullptr;
             current_object->script_paths.push_back(ExtractValue(trimmed, "Script:"));
         }
         else if (StartsWith(trimmed, "Graph:"))
         {
+            current_attribute = nullptr;
             current_object->graph_paths.push_back(ExtractValue(trimmed, "Graph:"));
         }
     }
@@ -352,6 +1012,112 @@ bool SetSceneObjectRotation(const std::filesystem::path& scene_path, const std::
 bool SetSceneObjectScale(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& scale)
 {
     return SetSceneObjectVector3(scene_path, object_name, "Scale", scale);
+}
+
+bool AddSceneObjectAttribute(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectAttributeKind kind)
+{
+    if (kind == SceneObjectAttributeKind::None)
+    {
+        return false;
+    }
+
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        const std::size_t insert_index = FindSceneObjectAttributeInsertionIndex(lines, object_start, object_end);
+        lines.insert(
+            lines.begin() + static_cast<std::ptrdiff_t>(insert_index),
+            std::string("Attributes: ") + ToStorageName(kind));
+    });
+}
+
+bool RemoveSceneObjectAttribute(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index)
+{
+    bool removed = false;
+    RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        lines.erase(
+            lines.begin() + static_cast<std::ptrdiff_t>(attribute_start),
+            lines.begin() + static_cast<std::ptrdiff_t>(attribute_end));
+        removed = true;
+    });
+
+    return removed;
+}
+
+bool SetSceneObjectAttributeKind(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectAttributeKind kind)
+{
+    if (kind == SceneObjectAttributeKind::None)
+    {
+        return RemoveSceneObjectAttribute(scene_path, object_name, attribute_index);
+    }
+
+    bool updated = false;
+    RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        lines.erase(
+            lines.begin() + static_cast<std::ptrdiff_t>(attribute_start),
+            lines.begin() + static_cast<std::ptrdiff_t>(attribute_end));
+        lines.insert(
+            lines.begin() + static_cast<std::ptrdiff_t>(attribute_start),
+            std::string("Attributes: ") + ToStorageName(kind));
+        updated = true;
+    });
+
+    return updated;
+}
+
+bool SetSceneObjectAttributeColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color)
+{
+    return SetSceneObjectAttributeColorValue("AttributeColor", scene_path, object_name, attribute_index, color);
+}
+
+bool SetSceneObjectAttributeIntensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float intensity)
+{
+    return SetSceneObjectAttributeScalar("AttributeIntensity", scene_path, object_name, attribute_index, intensity);
+}
+
+bool SetSceneObjectAttributeRange(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float range)
+{
+    return SetSceneObjectAttributeScalar("AttributeRange", scene_path, object_name, attribute_index, range);
+}
+
+bool SetSceneObjectAttributeInnerConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float inner_cone_degrees)
+{
+    return SetSceneObjectAttributeScalar("AttributeInnerCone", scene_path, object_name, attribute_index, inner_cone_degrees);
+}
+
+bool SetSceneObjectAttributeOuterConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float outer_cone_degrees)
+{
+    return SetSceneObjectAttributeScalar("AttributeOuterCone", scene_path, object_name, attribute_index, outer_cone_degrees);
+}
+
+bool SetSceneObjectAttributeFieldOfView(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float field_of_view_degrees)
+{
+    return SetSceneObjectAttributeScalar("AttributeFov", scene_path, object_name, attribute_index, field_of_view_degrees);
+}
+
+bool SetSceneObjectAttributeNearClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float near_clip)
+{
+    return SetSceneObjectAttributeScalar("AttributeNearClip", scene_path, object_name, attribute_index, near_clip);
+}
+
+bool SetSceneObjectAttributeFarClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float far_clip)
+{
+    return SetSceneObjectAttributeScalar("AttributeFarClip", scene_path, object_name, attribute_index, far_clip);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)

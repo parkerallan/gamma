@@ -20,6 +20,7 @@ struct SceneViewportCameraState
     float yaw = 0.8f;
     float pitch = 0.45f;
     float zoom = 1.0f;
+    SceneVector3 pan_offset = {0.0f, 0.0f, 0.0f};
 };
 
 struct SceneViewportResolvedModel
@@ -90,9 +91,13 @@ public:
     {
         std::filesystem::path model_path;
         std::string name;
-        SceneVector3 position = {0.0f, 0.0f, 0.0f};
-        SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
-        SceneVector3 scale = {1.0f, 1.0f, 1.0f};
+        SceneVector3 local_position = {0.0f, 0.0f, 0.0f};
+        SceneVector3 local_rotation = {0.0f, 0.0f, 0.0f};
+        SceneVector3 local_scale = {1.0f, 1.0f, 1.0f};
+        SceneVector3 world_position = {0.0f, 0.0f, 0.0f};
+        std::array<float, 16> model_matrix{};
+        std::array<float, 16> parent_matrix{};
+        bool has_parent_transform = false;
         SceneVector3 bounds_min = {0.0f, 0.0f, 0.0f};
         SceneVector3 bounds_max = {0.0f, 0.0f, 0.0f};
         bool has_bounds = false;
@@ -124,6 +129,7 @@ private:
     std::uint32_t target_width_ = 0;
     std::uint32_t target_height_ = 0;
     bool render_requested_ = false;
+    bool middle_mouse_panning_ = false;
     std::uint32_t gizmo_operation_ = 0;
     bool gizmo_local_mode_ = true;
     bool grid_enabled_ = false;
@@ -132,6 +138,13 @@ private:
     float grid_origin_z_ = 0.0f;
     float grid_extent_ = 16.0f;
     std::array<float, 16> view_projection_{};
+    std::array<float, 4> ambient_light_ = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::array<float, 4> directional_light_color_ = {1.0f, 1.0f, 1.0f, 0.0f};
+    std::array<float, 4> directional_light_direction_ = {0.0f, -1.0f, 0.0f, 1.0f};
+    std::array<float, 4> spot_light_color_ = {1.0f, 1.0f, 1.0f, 0.0f};
+    std::array<float, 4> spot_light_direction_ = {0.0f, -1.0f, 0.0f, 1.0f};
+    std::array<float, 4> spot_light_position_ = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 4> spot_light_data_ = {0.0f, 0.0f, 0.0f, 0.0f};
     std::vector<QueuedSceneObject> queued_objects_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
     GridCacheEntry grid_cache_{};

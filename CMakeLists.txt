@@ -201,6 +201,7 @@ add_executable(engine
     src/assets/SceneMetadata.cpp
     src/components/CreationMenu.cpp
     src/components/FileContextMenu.cpp
+    src/components/SceneObjectAttributesEditor.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
     src/graph/GraphDocument.cpp

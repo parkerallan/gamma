@@ -47,6 +47,7 @@ struct EngineState
     bool show_grid_overlay = true;
     bool snap_to_grid = true;
     float grid_size = 1.0f;
+    float grid_extent = 64.0f;
     bool auto_open_startup_scene = true;
     bool confirm_before_delete = true;
     bool auto_save_on_focus_loss = false;

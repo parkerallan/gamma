@@ -41,6 +41,13 @@ struct SceneUniformBlock
 {
     float model[16] = {};
     float model_view_projection[16] = {};
+    float ambient_light[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float directional_light_color[4] = {1.0f, 1.0f, 1.0f, 0.0f};
+    float directional_light_direction[4] = {0.0f, -1.0f, 0.0f, 1.0f};
+    float spot_light_color[4] = {1.0f, 1.0f, 1.0f, 0.0f};
+    float spot_light_direction[4] = {0.0f, -1.0f, 0.0f, 1.0f};
+    float spot_light_position[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float spot_light_data[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties);
@@ -134,6 +141,12 @@ float DegreesToRadians(float degrees)
     return degrees * (kPi / 180.0f);
 }
 
+float ComputeOrbitBaseDistance(float radius)
+{
+    const float safe_radius = (std::max)(radius, 0.001f);
+    return (safe_radius / std::tan(DegreesToRadians(55.0f) * 0.5f)) + safe_radius * 1.2f;
+}
+
 void SetIdentity(float* matrix)
 {
     for (int index = 0; index < 16; ++index)
@@ -181,6 +194,22 @@ void BuildTranslationMatrix(const SceneVector3& translation, float* matrix)
     matrix[14] = translation[2];
 }
 
+Vec3 TransformPoint(const float* matrix, const Vec3& point)
+{
+    return Vec3{
+        matrix[0] * point.x + matrix[4] * point.y + matrix[8] * point.z + matrix[12],
+        matrix[1] * point.x + matrix[5] * point.y + matrix[9] * point.z + matrix[13],
+        matrix[2] * point.x + matrix[6] * point.y + matrix[10] * point.z + matrix[14]};
+}
+
+Vec3 TransformDirectionByMatrix(const float* matrix, const Vec3& direction)
+{
+    return Normalize(Vec3{
+        matrix[0] * direction.x + matrix[4] * direction.y + matrix[8] * direction.z,
+        matrix[1] * direction.x + matrix[5] * direction.y + matrix[9] * direction.z,
+        matrix[2] * direction.x + matrix[6] * direction.y + matrix[10] * direction.z});
+}
+
 void BuildRotationXMatrix(float radians, float* matrix)
 {
     SetIdentity(matrix);
@@ -212,6 +241,159 @@ void BuildRotationZMatrix(float radians, float* matrix)
     matrix[1] = s;
     matrix[4] = -s;
     matrix[5] = c;
+}
+
+void BuildTransformMatrix(const SceneVector3& position, const SceneVector3& rotation, const SceneVector3& scale, float* matrix)
+{
+    float scale_matrix[16];
+    float rotation_x_matrix[16];
+    float rotation_y_matrix[16];
+    float rotation_z_matrix[16];
+    float translation_matrix[16];
+    float temp_a[16];
+    float temp_b[16];
+
+    BuildScaleMatrix(scale, scale_matrix);
+    BuildRotationXMatrix(DegreesToRadians(rotation[0]), rotation_x_matrix);
+    BuildRotationYMatrix(DegreesToRadians(rotation[1]), rotation_y_matrix);
+    BuildRotationZMatrix(DegreesToRadians(rotation[2]), rotation_z_matrix);
+    BuildTranslationMatrix(position, translation_matrix);
+
+    MultiplyMatrix(rotation_x_matrix, scale_matrix, temp_a);
+    MultiplyMatrix(rotation_y_matrix, temp_a, temp_b);
+    MultiplyMatrix(rotation_z_matrix, temp_b, temp_a);
+    MultiplyMatrix(translation_matrix, temp_a, matrix);
+}
+
+bool InvertMatrix(const float* matrix, float* inverse)
+{
+    float inv[16];
+
+    inv[0] = matrix[5] * matrix[10] * matrix[15] -
+        matrix[5] * matrix[11] * matrix[14] -
+        matrix[9] * matrix[6] * matrix[15] +
+        matrix[9] * matrix[7] * matrix[14] +
+        matrix[13] * matrix[6] * matrix[11] -
+        matrix[13] * matrix[7] * matrix[10];
+
+    inv[4] = -matrix[4] * matrix[10] * matrix[15] +
+        matrix[4] * matrix[11] * matrix[14] +
+        matrix[8] * matrix[6] * matrix[15] -
+        matrix[8] * matrix[7] * matrix[14] -
+        matrix[12] * matrix[6] * matrix[11] +
+        matrix[12] * matrix[7] * matrix[10];
+
+    inv[8] = matrix[4] * matrix[9] * matrix[15] -
+        matrix[4] * matrix[11] * matrix[13] -
+        matrix[8] * matrix[5] * matrix[15] +
+        matrix[8] * matrix[7] * matrix[13] +
+        matrix[12] * matrix[5] * matrix[11] -
+        matrix[12] * matrix[7] * matrix[9];
+
+    inv[12] = -matrix[4] * matrix[9] * matrix[14] +
+        matrix[4] * matrix[10] * matrix[13] +
+        matrix[8] * matrix[5] * matrix[14] -
+        matrix[8] * matrix[6] * matrix[13] -
+        matrix[12] * matrix[5] * matrix[10] +
+        matrix[12] * matrix[6] * matrix[9];
+
+    inv[1] = -matrix[1] * matrix[10] * matrix[15] +
+        matrix[1] * matrix[11] * matrix[14] +
+        matrix[9] * matrix[2] * matrix[15] -
+        matrix[9] * matrix[3] * matrix[14] -
+        matrix[13] * matrix[2] * matrix[11] +
+        matrix[13] * matrix[3] * matrix[10];
+
+    inv[5] = matrix[0] * matrix[10] * matrix[15] -
+        matrix[0] * matrix[11] * matrix[14] -
+        matrix[8] * matrix[2] * matrix[15] +
+        matrix[8] * matrix[3] * matrix[14] +
+        matrix[12] * matrix[2] * matrix[11] -
+        matrix[12] * matrix[3] * matrix[10];
+
+    inv[9] = -matrix[0] * matrix[9] * matrix[15] +
+        matrix[0] * matrix[11] * matrix[13] +
+        matrix[8] * matrix[1] * matrix[15] -
+        matrix[8] * matrix[3] * matrix[13] -
+        matrix[12] * matrix[1] * matrix[11] +
+        matrix[12] * matrix[3] * matrix[9];
+
+    inv[13] = matrix[0] * matrix[9] * matrix[14] -
+        matrix[0] * matrix[10] * matrix[13] -
+        matrix[8] * matrix[1] * matrix[14] +
+        matrix[8] * matrix[2] * matrix[13] +
+        matrix[12] * matrix[1] * matrix[10] -
+        matrix[12] * matrix[2] * matrix[9];
+
+    inv[2] = matrix[1] * matrix[6] * matrix[15] -
+        matrix[1] * matrix[7] * matrix[14] -
+        matrix[5] * matrix[2] * matrix[15] +
+        matrix[5] * matrix[3] * matrix[14] +
+        matrix[13] * matrix[2] * matrix[7] -
+        matrix[13] * matrix[3] * matrix[6];
+
+    inv[6] = -matrix[0] * matrix[6] * matrix[15] +
+        matrix[0] * matrix[7] * matrix[14] +
+        matrix[4] * matrix[2] * matrix[15] -
+        matrix[4] * matrix[3] * matrix[14] -
+        matrix[12] * matrix[2] * matrix[7] +
+        matrix[12] * matrix[3] * matrix[6];
+
+    inv[10] = matrix[0] * matrix[5] * matrix[15] -
+        matrix[0] * matrix[7] * matrix[13] -
+        matrix[4] * matrix[1] * matrix[15] +
+        matrix[4] * matrix[3] * matrix[13] +
+        matrix[12] * matrix[1] * matrix[7] -
+        matrix[12] * matrix[3] * matrix[5];
+
+    inv[14] = -matrix[0] * matrix[5] * matrix[14] +
+        matrix[0] * matrix[6] * matrix[13] +
+        matrix[4] * matrix[1] * matrix[14] -
+        matrix[4] * matrix[2] * matrix[13] -
+        matrix[12] * matrix[1] * matrix[6] +
+        matrix[12] * matrix[2] * matrix[5];
+
+    inv[3] = -matrix[1] * matrix[6] * matrix[11] +
+        matrix[1] * matrix[7] * matrix[10] +
+        matrix[5] * matrix[2] * matrix[11] -
+        matrix[5] * matrix[3] * matrix[10] -
+        matrix[9] * matrix[2] * matrix[7] +
+        matrix[9] * matrix[3] * matrix[6];
+
+    inv[7] = matrix[0] * matrix[6] * matrix[11] -
+        matrix[0] * matrix[7] * matrix[10] -
+        matrix[4] * matrix[2] * matrix[11] +
+        matrix[4] * matrix[3] * matrix[10] +
+        matrix[8] * matrix[2] * matrix[7] -
+        matrix[8] * matrix[3] * matrix[6];
+
+    inv[11] = -matrix[0] * matrix[5] * matrix[11] +
+        matrix[0] * matrix[7] * matrix[9] +
+        matrix[4] * matrix[1] * matrix[11] -
+        matrix[4] * matrix[3] * matrix[9] -
+        matrix[8] * matrix[1] * matrix[7] +
+        matrix[8] * matrix[3] * matrix[5];
+
+    inv[15] = matrix[0] * matrix[5] * matrix[10] -
+        matrix[0] * matrix[6] * matrix[9] -
+        matrix[4] * matrix[1] * matrix[10] +
+        matrix[4] * matrix[2] * matrix[9] +
+        matrix[8] * matrix[1] * matrix[6] -
+        matrix[8] * matrix[2] * matrix[5];
+
+    float determinant = matrix[0] * inv[0] + matrix[1] * inv[4] + matrix[2] * inv[8] + matrix[3] * inv[12];
+    if (std::abs(determinant) <= 0.000001f)
+    {
+        return false;
+    }
+
+    determinant = 1.0f / determinant;
+    for (int index = 0; index < 16; ++index)
+    {
+        inverse[index] = inv[index] * determinant;
+    }
+
+    return true;
 }
 
 void BuildPerspectiveMatrix(float fovy_degrees, float aspect, float z_near, float z_far, float* matrix)
@@ -274,31 +456,416 @@ void BuildLookAtMatrix(const Vec3& eye, const Vec3& center, const Vec3& up, floa
 
 void BuildModelMatrix(const SceneViewportRenderer::QueuedSceneObject& object, float* matrix)
 {
-    float scale_matrix[16];
+    std::memcpy(matrix, object.model_matrix.data(), sizeof(float) * 16);
+}
+
+Vec3 TransformDirectionByRotation(const SceneVector3& rotation, const Vec3& direction)
+{
     float rotation_x_matrix[16];
     float rotation_y_matrix[16];
     float rotation_z_matrix[16];
-    float translation_matrix[16];
     float temp_a[16];
-    float temp_b[16];
+    float rotation_matrix[16];
 
-    BuildScaleMatrix(object.scale, scale_matrix);
-    BuildRotationXMatrix(DegreesToRadians(object.rotation[0]), rotation_x_matrix);
-    BuildRotationYMatrix(DegreesToRadians(object.rotation[1]), rotation_y_matrix);
-    BuildRotationZMatrix(DegreesToRadians(object.rotation[2]), rotation_z_matrix);
-    BuildTranslationMatrix(object.position, translation_matrix);
+    BuildRotationXMatrix(DegreesToRadians(rotation[0]), rotation_x_matrix);
+    BuildRotationYMatrix(DegreesToRadians(rotation[1]), rotation_y_matrix);
+    BuildRotationZMatrix(DegreesToRadians(rotation[2]), rotation_z_matrix);
 
-    MultiplyMatrix(rotation_x_matrix, scale_matrix, temp_a);
-    MultiplyMatrix(rotation_y_matrix, temp_a, temp_b);
-    MultiplyMatrix(rotation_z_matrix, temp_b, temp_a);
-    MultiplyMatrix(translation_matrix, temp_a, matrix);
+    MultiplyMatrix(rotation_y_matrix, rotation_x_matrix, temp_a);
+    MultiplyMatrix(rotation_z_matrix, temp_a, rotation_matrix);
+
+    return Normalize(Vec3{
+        rotation_matrix[0] * direction.x + rotation_matrix[4] * direction.y + rotation_matrix[8] * direction.z,
+        rotation_matrix[1] * direction.x + rotation_matrix[5] * direction.y + rotation_matrix[9] * direction.z,
+        rotation_matrix[2] * direction.x + rotation_matrix[6] * direction.y + rotation_matrix[10] * direction.z});
+}
+
+void StoreVec4(const std::array<float, 4>& source, float* destination)
+{
+    std::memcpy(destination, source.data(), sizeof(float) * 4);
+}
+
+bool ProjectWorldPointToScreen(
+    const Vec3& world_point,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    ImVec2& screen_point)
+{
+    const float clip_x =
+        view_projection_matrix[0] * world_point.x +
+        view_projection_matrix[4] * world_point.y +
+        view_projection_matrix[8] * world_point.z +
+        view_projection_matrix[12];
+    const float clip_y =
+        view_projection_matrix[1] * world_point.x +
+        view_projection_matrix[5] * world_point.y +
+        view_projection_matrix[9] * world_point.z +
+        view_projection_matrix[13];
+    const float clip_z =
+        view_projection_matrix[2] * world_point.x +
+        view_projection_matrix[6] * world_point.y +
+        view_projection_matrix[10] * world_point.z +
+        view_projection_matrix[14];
+    const float clip_w =
+        view_projection_matrix[3] * world_point.x +
+        view_projection_matrix[7] * world_point.y +
+        view_projection_matrix[11] * world_point.z +
+        view_projection_matrix[15];
+
+    if (clip_w <= 0.0001f)
+    {
+        return false;
+    }
+
+    const float ndc_x = clip_x / clip_w;
+    const float ndc_y = clip_y / clip_w;
+    const float ndc_z = clip_z / clip_w;
+    if (ndc_z < -1.0f || ndc_z > 1.0f)
+    {
+        return false;
+    }
+
+    const float viewport_width = viewport_max.x - viewport_min.x;
+    const float viewport_height = viewport_max.y - viewport_min.y;
+    screen_point.x = viewport_min.x + (ndc_x * 0.5f + 0.5f) * viewport_width;
+    screen_point.y = viewport_min.y + (1.0f - (ndc_y * 0.5f + 0.5f)) * viewport_height;
+    return true;
+}
+
+Vec3 FindPerpendicularAxis(const Vec3& direction)
+{
+    const Vec3 up_reference = std::abs(direction.y) < 0.95f ? Vec3{0.0f, 1.0f, 0.0f} : Vec3{1.0f, 0.0f, 0.0f};
+    return Normalize(Cross(direction, up_reference));
+}
+
+struct SceneResolvedObjectPose
+{
+    std::array<float, 16> world_matrix = {};
+    std::array<float, 16> parent_matrix = {};
+    bool has_parent = false;
+    bool resolved = false;
+    bool resolving = false;
+};
+
+using SceneResolvedObjectPoseMap = std::unordered_map<std::string, SceneResolvedObjectPose>;
+
+SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_metadata)
+{
+    std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        objects_by_name[object.name] = &object;
+    }
+
+    SceneResolvedObjectPoseMap poses;
+    std::function<const SceneResolvedObjectPose&(const std::string&)> resolve_pose = [&](const std::string& object_name) -> const SceneResolvedObjectPose&
+    {
+        SceneResolvedObjectPose& pose = poses[object_name];
+        if (pose.resolved)
+        {
+            return pose;
+        }
+
+        SetIdentity(pose.world_matrix.data());
+        SetIdentity(pose.parent_matrix.data());
+
+        const auto object_it = objects_by_name.find(object_name);
+        if (object_it == objects_by_name.end())
+        {
+            pose.resolved = true;
+            return pose;
+        }
+
+        if (pose.resolving)
+        {
+            pose.resolved = true;
+            return pose;
+        }
+
+        pose.resolving = true;
+
+        float local_matrix[16];
+        BuildTransformMatrix(object_it->second->position, object_it->second->rotation, object_it->second->scale, local_matrix);
+
+        const std::string& parent_name = object_it->second->parent_name;
+        const auto parent_it = objects_by_name.find(parent_name);
+        if (!parent_name.empty() && parent_it != objects_by_name.end() && parent_name != object_name)
+        {
+            const SceneResolvedObjectPose& parent_pose = resolve_pose(parent_name);
+            std::memcpy(pose.parent_matrix.data(), parent_pose.world_matrix.data(), sizeof(float) * 16);
+            MultiplyMatrix(parent_pose.world_matrix.data(), local_matrix, pose.world_matrix.data());
+            pose.has_parent = true;
+        }
+        else
+        {
+            std::memcpy(pose.world_matrix.data(), local_matrix, sizeof(local_matrix));
+        }
+
+        pose.resolving = false;
+        pose.resolved = true;
+        return pose;
+    };
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        resolve_pose(object.name);
+    }
+
+    return poses;
+}
+
+void DrawSpotLightConeGizmo(
+    ImDrawList* draw_list,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const float* view_projection_matrix,
+    const SceneResolvedObjectPose& pose,
+    const SceneObjectSpotLightAttributes& spot_light)
+{
+    if (draw_list == nullptr)
+    {
+        return;
+    }
+
+    const float range = (std::max)(spot_light.range, 0.01f);
+    const float outer_radius = std::tan(DegreesToRadians(spot_light.outer_cone_degrees)) * range;
+    const float inner_radius = std::tan(DegreesToRadians(spot_light.inner_cone_degrees)) * range;
+    const Vec3 origin = TransformPoint(pose.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
+    const Vec3 direction = TransformDirectionByMatrix(pose.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
+    const Vec3 right = FindPerpendicularAxis(direction);
+    const Vec3 up = Normalize(Cross(right, direction));
+    const Vec3 outer_center = Add(origin, Multiply(direction, range));
+    const Vec3 inner_center = Add(origin, Multiply(direction, range * 0.65f));
+    const float inner_preview_radius = inner_radius * 0.65f;
+
+    constexpr int kSegmentCount = 24;
+    ImVec2 projected_origin;
+    ImVec2 projected_axis_end;
+    if (ProjectWorldPointToScreen(origin, view_projection_matrix, viewport_min, viewport_max, projected_origin))
+    {
+        const Vec3 axis_end = Add(origin, Multiply(direction, range));
+        if (ProjectWorldPointToScreen(axis_end, view_projection_matrix, viewport_min, viewport_max, projected_axis_end))
+        {
+            draw_list->AddLine(projected_origin, projected_axis_end, IM_COL32(255, 221, 87, 255), 2.0f);
+        }
+    }
+
+    std::array<ImVec2, kSegmentCount> projected_outer_ring = {};
+    std::array<bool, kSegmentCount> outer_visible = {};
+    std::array<ImVec2, kSegmentCount> projected_inner_ring = {};
+    std::array<bool, kSegmentCount> inner_visible = {};
+
+    for (int segment_index = 0; segment_index < kSegmentCount; ++segment_index)
+    {
+        const float angle = (static_cast<float>(segment_index) / static_cast<float>(kSegmentCount)) * kPi * 2.0f;
+        const float circle_cos = std::cos(angle);
+        const float circle_sin = std::sin(angle);
+
+        const Vec3 outer_point = Add(
+            outer_center,
+            Add(Multiply(right, outer_radius * circle_cos), Multiply(up, outer_radius * circle_sin)));
+        outer_visible[segment_index] = ProjectWorldPointToScreen(outer_point, view_projection_matrix, viewport_min, viewport_max, projected_outer_ring[segment_index]);
+
+        const Vec3 inner_point = Add(
+            inner_center,
+            Add(Multiply(right, inner_preview_radius * circle_cos), Multiply(up, inner_preview_radius * circle_sin)));
+        inner_visible[segment_index] = ProjectWorldPointToScreen(inner_point, view_projection_matrix, viewport_min, viewport_max, projected_inner_ring[segment_index]);
+    }
+
+    for (int segment_index = 0; segment_index < kSegmentCount; ++segment_index)
+    {
+        const int next_index = (segment_index + 1) % kSegmentCount;
+        if (outer_visible[segment_index] && outer_visible[next_index])
+        {
+            draw_list->AddLine(projected_outer_ring[segment_index], projected_outer_ring[next_index], IM_COL32(255, 221, 87, 220), 1.8f);
+        }
+        if (inner_visible[segment_index] && inner_visible[next_index])
+        {
+            draw_list->AddLine(projected_inner_ring[segment_index], projected_inner_ring[next_index], IM_COL32(255, 243, 176, 150), 1.2f);
+        }
+    }
+
+    if (ProjectWorldPointToScreen(origin, view_projection_matrix, viewport_min, viewport_max, projected_origin))
+    {
+        for (int segment_index = 0; segment_index < kSegmentCount; segment_index += 6)
+        {
+            if (outer_visible[segment_index])
+            {
+                draw_list->AddLine(projected_origin, projected_outer_ring[segment_index], IM_COL32(255, 221, 87, 200), 1.4f);
+            }
+        }
+
+        draw_list->AddCircleFilled(projected_origin, 4.0f, IM_COL32(255, 221, 87, 230), 12);
+    }
+}
+
+struct ResolvedSceneLighting
+{
+    std::array<float, 4> ambient_light = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::array<float, 4> directional_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
+    std::array<float, 4> directional_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
+    std::array<float, 4> spot_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
+    std::array<float, 4> spot_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
+    std::array<float, 4> spot_light_position = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 4> spot_light_data = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+void AccumulateEnvironmentLight(ResolvedSceneLighting& lighting, const SceneObjectAttribute& attribute, bool& found_environment_light)
+{
+    if (!found_environment_light)
+    {
+        lighting.ambient_light = {0.0f, 0.0f, 0.0f, 0.0f};
+        found_environment_light = true;
+    }
+
+    lighting.ambient_light[0] += attribute.environment_light.color[0] * attribute.environment_light.intensity;
+    lighting.ambient_light[1] += attribute.environment_light.color[1] * attribute.environment_light.intensity;
+    lighting.ambient_light[2] += attribute.environment_light.color[2] * attribute.environment_light.intensity;
+    lighting.ambient_light[3] = 1.0f;
+}
+
+void ApplyDirectionalLight(ResolvedSceneLighting& lighting, const SceneResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
+{
+    const Vec3 direction = TransformDirectionByMatrix(pose.world_matrix.data(), Vec3{0.0f, 0.0f, -1.0f});
+    lighting.directional_light_color = {
+        attribute.directional_light.color[0],
+        attribute.directional_light.color[1],
+        attribute.directional_light.color[2],
+        attribute.directional_light.intensity};
+    lighting.directional_light_direction = {direction.x, direction.y, direction.z, 1.0f};
+}
+
+void ApplySpotLight(ResolvedSceneLighting& lighting, const SceneResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
+{
+    const Vec3 direction = TransformDirectionByMatrix(pose.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
+    const Vec3 position = TransformPoint(pose.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
+    lighting.spot_light_color = {
+        attribute.spot_light.color[0],
+        attribute.spot_light.color[1],
+        attribute.spot_light.color[2],
+        attribute.spot_light.intensity};
+    lighting.spot_light_direction = {
+        direction.x,
+        direction.y,
+        direction.z,
+        std::cos(DegreesToRadians(attribute.spot_light.inner_cone_degrees))};
+    lighting.spot_light_position = {
+        position.x,
+        position.y,
+        position.z,
+        (std::max)(attribute.spot_light.range, 0.001f)};
+    lighting.spot_light_data = {
+        std::cos(DegreesToRadians(attribute.spot_light.outer_cone_degrees)),
+        0.0f,
+        0.0f,
+        0.0f};
+}
+
+void ResolvePreferredDirectLights(
+    ResolvedSceneLighting& lighting,
+    const SceneMetadata& scene_metadata,
+    const SceneResolvedObjectPoseMap& resolved_poses,
+    const std::string& selected_object_name,
+    bool& found_directional_light,
+    bool& found_spot_light)
+{
+    if (selected_object_name.empty())
+    {
+        return;
+    }
+
+    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+    {
+        return object.name == selected_object_name;
+    });
+    if (object_it == scene_metadata.objects.end())
+    {
+        return;
+    }
+
+    const auto pose_it = resolved_poses.find(object_it->name);
+    if (pose_it == resolved_poses.end())
+    {
+        return;
+    }
+
+    for (const SceneObjectAttribute& attribute : object_it->attributes)
+    {
+        if (!found_directional_light && attribute.kind == SceneObjectAttributeKind::DirectionalLight)
+        {
+            ApplyDirectionalLight(lighting, pose_it->second, attribute);
+            found_directional_light = true;
+        }
+        else if (!found_spot_light && attribute.kind == SceneObjectAttributeKind::SpotLight)
+        {
+            ApplySpotLight(lighting, pose_it->second, attribute);
+            found_spot_light = true;
+        }
+    }
+}
+
+ResolvedSceneLighting ResolveSceneLighting(
+    const SceneMetadata& scene_metadata,
+    const SceneResolvedObjectPoseMap& resolved_poses,
+    const std::string& selected_object_name)
+{
+    ResolvedSceneLighting lighting{};
+
+    bool found_environment_light = false;
+    bool found_directional_light = false;
+    bool found_spot_light = false;
+
+    ResolvePreferredDirectLights(lighting, scene_metadata, resolved_poses, selected_object_name, found_directional_light, found_spot_light);
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        const auto pose_it = resolved_poses.find(object.name);
+        if (pose_it == resolved_poses.end())
+        {
+            continue;
+        }
+
+        for (const SceneObjectAttribute& attribute : object.attributes)
+        {
+            switch (attribute.kind)
+            {
+            case SceneObjectAttributeKind::EnvironmentLight:
+                AccumulateEnvironmentLight(lighting, attribute, found_environment_light);
+                break;
+
+            case SceneObjectAttributeKind::DirectionalLight:
+                if (!found_directional_light)
+                {
+                    ApplyDirectionalLight(lighting, pose_it->second, attribute);
+                    found_directional_light = true;
+                }
+                break;
+
+            case SceneObjectAttributeKind::SpotLight:
+                if (!found_spot_light)
+                {
+                    ApplySpotLight(lighting, pose_it->second, attribute);
+                    found_spot_light = true;
+                }
+                break;
+
+            case SceneObjectAttributeKind::Camera:
+            case SceneObjectAttributeKind::None:
+            default:
+                break;
+            }
+        }
+    }
+
+    return lighting;
 }
 
 void ExpandBoundsWithObject(Vec3& minimum, Vec3& maximum, const SceneViewportRenderer::QueuedSceneObject& object, const ModelAsset& asset)
 {
     if (!asset.bounds.valid)
     {
-        const Vec3 position = ToVec3(object.position);
+        const Vec3 position = ToVec3(object.world_position);
         minimum.x = (std::min)(minimum.x, position.x);
         minimum.y = (std::min)(minimum.y, position.y);
         minimum.z = (std::min)(minimum.z, position.z);
@@ -334,7 +901,7 @@ bool ComputeObjectBounds(const SceneViewportRenderer::QueuedSceneObject& object,
 {
     if (!asset.bounds.valid)
     {
-        const Vec3 position = ToVec3(object.position);
+        const Vec3 position = ToVec3(object.world_position);
         minimum = position;
         maximum = position;
         return false;
@@ -771,10 +1338,31 @@ bool UpdateSceneObjectTransform(
         return false;
     }
 
+    float local_matrix[16];
+    BuildTransformMatrix(position, rotation, scale, local_matrix);
+    if (object.has_parent_transform)
+    {
+        float inverse_parent_matrix[16];
+        if (InvertMatrix(object.parent_matrix.data(), inverse_parent_matrix))
+        {
+            float converted_local_matrix[16];
+            MultiplyMatrix(inverse_parent_matrix, local_matrix, converted_local_matrix);
+            std::memcpy(local_matrix, converted_local_matrix, sizeof(converted_local_matrix));
+        }
+    }
+
+    float local_position_components[3] = {};
+    float local_rotation_components[3] = {};
+    float local_scale_components[3] = {};
+    ImGuizmo::DecomposeMatrixToComponents(local_matrix, local_position_components, local_rotation_components, local_scale_components);
+    const SceneVector3 local_position = {local_position_components[0], local_position_components[1], local_position_components[2]};
+    const SceneVector3 local_rotation = {local_rotation_components[0], local_rotation_components[1], local_rotation_components[2]};
+    const SceneVector3 local_scale = {local_scale_components[0], local_scale_components[1], local_scale_components[2]};
+
     bool changed = false;
-    changed = SetSceneObjectPosition(state.active_scene_path, object.name, position) || changed;
-    changed = SetSceneObjectRotation(state.active_scene_path, object.name, rotation) || changed;
-    changed = SetSceneObjectScale(state.active_scene_path, object.name, scale) || changed;
+    changed = SetSceneObjectPosition(state.active_scene_path, object.name, local_position) || changed;
+    changed = SetSceneObjectRotation(state.active_scene_path, object.name, local_rotation) || changed;
+    changed = SetSceneObjectScale(state.active_scene_path, object.name, local_scale) || changed;
     return changed;
 }
 
@@ -825,8 +1413,8 @@ void RecoverOrbitCameraFromView(
     camera_state.yaw = std::atan2(direction.x, direction.z);
     camera_state.pitch = std::asin(std::clamp(direction.y, -1.0f, 1.0f));
 
-    const float base_distance = ((scene_radius / std::tan(DegreesToRadians(55.0f) * 0.5f)) + scene_radius * 1.2f);
-    camera_state.zoom = std::clamp(base_distance / distance, 0.25f, 3.5f);
+    const float base_distance = ComputeOrbitBaseDistance(scene_radius);
+    camera_state.zoom = (std::max)(base_distance / distance, 0.001f);
 }
 
 void SetOrbitCameraDirection(const Vec3& orbit_direction, SceneViewportCameraState& camera_state)
@@ -1506,7 +2094,7 @@ bool SceneViewportRenderer::EnsurePipeline()
     if (scene_pipeline_layout_ == VK_NULL_HANDLE)
     {
         VkPushConstantRange push_constant_range = {};
-        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         push_constant_range.offset = 0;
         push_constant_range.size = sizeof(SceneUniformBlock);
 
@@ -2015,7 +2603,7 @@ void SceneViewportRenderer::RenderUi(
 {
     ImGui::TextUnformatted("Scene Viewport");
     ImGui::SameLine();
-    ImGui::TextDisabled("Right-drag orbit, wheel zoom");
+    ImGui::TextDisabled("Right-drag orbit, middle-drag pan, wheel zoom, F focus");
     ImGui::Separator();
 
     const ImVec2 available = ImGui::GetContentRegionAvail();
@@ -2025,21 +2613,32 @@ void SceneViewportRenderer::RenderUi(
     }
 
     ImGui::BeginChild("##SceneViewportCanvas", available, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    const bool viewport_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     const ImVec2 min = ImGui::GetWindowPos();
     const ImVec2 max = ImVec2(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
     const float viewport_width = max.x - min.x;
     const float viewport_height = max.y - min.y;
+    const bool mouse_over_viewport = ImGui::IsMouseHoveringRect(min, max, true);
+    const ImGuiIO& io = ImGui::GetIO();
 
-    if (viewport_hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Right))
+    if (!io.MouseDown[ImGuiMouseButton_Middle])
     {
-        const ImVec2 delta = ImGui::GetIO().MouseDelta;
+        middle_mouse_panning_ = false;
+    }
+    else if (mouse_over_viewport && ImGui::IsMouseClicked(ImGuiMouseButton_Middle))
+    {
+        middle_mouse_panning_ = true;
+    }
+
+    if (mouse_over_viewport && io.MouseDown[ImGuiMouseButton_Right])
+    {
+        const ImVec2 delta = io.MouseDelta;
         camera_state.yaw += delta.x * 0.01f;
         camera_state.pitch = std::clamp(camera_state.pitch - delta.y * 0.01f, -1.2f, 1.2f);
     }
-    if (viewport_hovered && ImGui::GetIO().MouseWheel != 0.0f)
+    if (mouse_over_viewport && io.MouseWheel != 0.0f)
     {
-        camera_state.zoom = std::clamp(camera_state.zoom + ImGui::GetIO().MouseWheel * 0.1f, 0.25f, 3.5f);
+        const float zoom_factor = std::exp(io.MouseWheel * 0.12f);
+        camera_state.zoom = (std::max)(camera_state.zoom * zoom_factor, 0.001f);
     }
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -2079,6 +2678,7 @@ void SceneViewportRenderer::RenderUi(
         std::numeric_limits<float>::lowest()};
     const bool has_selected_scene_object = state.selected_item_path == state.active_scene_path && !state.selected_scene_object_name.empty();
     const SceneObjectMetadata* selected_scene_object_metadata = nullptr;
+    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
     if (has_selected_scene_object)
     {
         const auto selected_object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
@@ -2116,10 +2716,24 @@ void SceneViewportRenderer::RenderUi(
         QueuedSceneObject queued_object;
         queued_object.model_path = model_path;
         queued_object.name = object.name;
-        queued_object.position = object.position;
-        queued_object.rotation = object.rotation;
-        queued_object.scale = object.scale;
+        queued_object.local_position = object.position;
+        queued_object.local_rotation = object.rotation;
+        queued_object.local_scale = object.scale;
         queued_object.selected = state.selected_item_path == state.active_scene_path && state.selected_scene_object_name == object.name;
+        const auto pose_it = resolved_object_poses.find(object.name);
+        if (pose_it != resolved_object_poses.end())
+        {
+            queued_object.model_matrix = pose_it->second.world_matrix;
+            queued_object.parent_matrix = pose_it->second.parent_matrix;
+            queued_object.has_parent_transform = pose_it->second.has_parent;
+            queued_object.world_position = ToSceneVector3(TransformPoint(pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f}));
+        }
+        else
+        {
+            BuildTransformMatrix(queued_object.local_position, queued_object.local_rotation, queued_object.local_scale, queued_object.model_matrix.data());
+            SetIdentity(queued_object.parent_matrix.data());
+            queued_object.world_position = queued_object.local_position;
+        }
         Vec3 object_bounds_min;
         Vec3 object_bounds_max;
         queued_object.has_bounds = ComputeObjectBounds(queued_object, *resolved_model.asset, object_bounds_min, object_bounds_max);
@@ -2135,10 +2749,24 @@ void SceneViewportRenderer::RenderUi(
     if (selected_scene_object_metadata != nullptr)
     {
         fallback_gizmo_object.name = selected_scene_object_metadata->name;
-        fallback_gizmo_object.position = selected_scene_object_metadata->position;
-        fallback_gizmo_object.rotation = selected_scene_object_metadata->rotation;
-        fallback_gizmo_object.scale = selected_scene_object_metadata->scale;
+        fallback_gizmo_object.local_position = selected_scene_object_metadata->position;
+        fallback_gizmo_object.local_rotation = selected_scene_object_metadata->rotation;
+        fallback_gizmo_object.local_scale = selected_scene_object_metadata->scale;
         fallback_gizmo_object.selected = selected_scene_object_metadata->name == state.selected_scene_object_name;
+        const auto pose_it = resolved_object_poses.find(selected_scene_object_metadata->name);
+        if (pose_it != resolved_object_poses.end())
+        {
+            fallback_gizmo_object.model_matrix = pose_it->second.world_matrix;
+            fallback_gizmo_object.parent_matrix = pose_it->second.parent_matrix;
+            fallback_gizmo_object.has_parent_transform = pose_it->second.has_parent;
+            fallback_gizmo_object.world_position = ToSceneVector3(TransformPoint(pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f}));
+        }
+        else
+        {
+            BuildTransformMatrix(fallback_gizmo_object.local_position, fallback_gizmo_object.local_rotation, fallback_gizmo_object.local_scale, fallback_gizmo_object.model_matrix.data());
+            SetIdentity(fallback_gizmo_object.parent_matrix.data());
+            fallback_gizmo_object.world_position = fallback_gizmo_object.local_position;
+        }
         has_fallback_gizmo_object = true;
     }
 
@@ -2153,20 +2781,89 @@ void SceneViewportRenderer::RenderUi(
 
     Vec3 scene_center = {};
     float scene_radius = 1.5f;
+    const Vec3 base_scene_center = !queued_objects_.empty()
+        ? Multiply(Add(world_min, world_max), 0.5f)
+        : ToVec3(fallback_gizmo_object.world_position);
     if (!queued_objects_.empty())
     {
-        scene_center = Multiply(Add(world_min, world_max), 0.5f);
+        scene_center = base_scene_center;
         scene_radius = (std::max)(0.75f, Length(Subtract(world_max, world_min)) * 0.6f);
     }
     else
     {
-        scene_center = ToVec3(fallback_gizmo_object.position);
+        scene_center = base_scene_center;
     }
+
+    const QueuedSceneObject* focused_object = nullptr;
+    if (has_selected_scene_object)
+    {
+        const auto selected_object_it = std::find_if(queued_objects_.begin(), queued_objects_.end(), [&](const QueuedSceneObject& object)
+        {
+            return object.selected;
+        });
+        if (selected_object_it != queued_objects_.end())
+        {
+            focused_object = &(*selected_object_it);
+        }
+    }
+    else if (queued_objects_.size() == 1)
+    {
+        focused_object = &queued_objects_.front();
+    }
+
+    if (mouse_over_viewport && !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F, false) && focused_object != nullptr)
+    {
+        Vec3 focus_center = ToVec3(focused_object->world_position);
+        float focus_radius = 0.75f;
+        if (focused_object->has_bounds)
+        {
+            const Vec3 bounds_center = Multiply(Add(ToVec3(focused_object->bounds_min), ToVec3(focused_object->bounds_max)), 0.5f);
+            const Vec3 bounds_extent = Multiply(Subtract(ToVec3(focused_object->bounds_max), ToVec3(focused_object->bounds_min)), 0.5f);
+            focus_center = bounds_center;
+            focus_radius = (std::max)(0.75f, Length(bounds_extent));
+        }
+
+        camera_state.pan_offset = ToSceneVector3(Subtract(focus_center, base_scene_center));
+        const float scene_base_distance = ComputeOrbitBaseDistance(scene_radius);
+        const float focus_distance = ComputeOrbitBaseDistance(focus_radius);
+        camera_state.zoom = (std::max)(scene_base_distance / focus_distance, 0.001f);
+    }
+
+    scene_center = Add(scene_center, ToVec3(camera_state.pan_offset));
+    const std::string selected_object_name = state.HasSelectedSceneObject()
+        ? state.selected_scene_object_name
+        : std::string{};
+    const ResolvedSceneLighting resolved_lighting = ResolveSceneLighting(scene_metadata, resolved_object_poses, selected_object_name);
+    ambient_light_ = resolved_lighting.ambient_light;
+    directional_light_color_ = resolved_lighting.directional_light_color;
+    directional_light_direction_ = resolved_lighting.directional_light_direction;
+    spot_light_color_ = resolved_lighting.spot_light_color;
+    spot_light_direction_ = resolved_lighting.spot_light_direction;
+    spot_light_position_ = resolved_lighting.spot_light_position;
+    spot_light_data_ = resolved_lighting.spot_light_data;
     const Vec3 orbit_direction = Normalize(Vec3{
         std::cos(camera_state.pitch) * std::sin(camera_state.yaw),
         std::sin(camera_state.pitch),
         std::cos(camera_state.pitch) * std::cos(camera_state.yaw)});
-    const float distance = ((scene_radius / std::tan(DegreesToRadians(55.0f) * 0.5f)) + scene_radius * 1.2f) / camera_state.zoom;
+    const float distance = ComputeOrbitBaseDistance(scene_radius) / (std::max)(camera_state.zoom, 0.001f);
+    if (middle_mouse_panning_ && io.MouseDown[ImGuiMouseButton_Middle])
+    {
+        const ImVec2 delta = io.MouseDelta;
+        Vec3 right = Normalize(Cross(orbit_direction, Vec3{0.0f, 1.0f, 0.0f}));
+        if (Length(right) <= 0.0001f)
+        {
+            right = Vec3{1.0f, 0.0f, 0.0f};
+        }
+        const Vec3 up = Normalize(Cross(right, orbit_direction));
+        const float vertical_world_per_pixel = (2.0f * distance * std::tan(DegreesToRadians(55.0f) * 0.5f)) /
+            (std::max)(viewport_height, 1.0f);
+        const float horizontal_world_per_pixel = vertical_world_per_pixel * (viewport_width / (std::max)(viewport_height, 1.0f));
+        const Vec3 pan_delta = Add(
+            Multiply(right, -delta.x * horizontal_world_per_pixel),
+            Multiply(up, delta.y * vertical_world_per_pixel));
+        camera_state.pan_offset = ToSceneVector3(Add(ToVec3(camera_state.pan_offset), pan_delta));
+        scene_center = Add(scene_center, pan_delta);
+    }
     const Vec3 camera_position = Add(scene_center, Multiply(orbit_direction, distance));
 
     float view_matrix[16];
@@ -2188,7 +2885,7 @@ void SceneViewportRenderer::RenderUi(
     grid_spacing_ = (std::max)(0.001f, state.grid_size);
     grid_origin_x_ = SnapScalar(scene_center.x, grid_spacing_);
     grid_origin_z_ = SnapScalar(scene_center.z, grid_spacing_);
-    grid_extent_ = (std::max)(grid_spacing_ * 24.0f, scene_radius * 4.0f);
+    grid_extent_ = (std::max)((std::max)(state.grid_extent, grid_spacing_ * 24.0f), scene_radius * 4.0f);
 
     QueuedSceneObject* gizmo_object = nullptr;
     if (has_selected_scene_object)
@@ -2258,10 +2955,33 @@ void SceneViewportRenderer::RenderUi(
                 SnapVector(new_position, state.grid_size);
             }
 
-            gizmo_object->position = new_position;
-            gizmo_object->rotation = new_rotation;
-            gizmo_object->scale = new_scale;
+            gizmo_object->world_position = new_position;
             UpdateSceneObjectTransform(state, *gizmo_object, new_position, new_rotation, new_scale);
+        }
+    }
+
+    if (selected_scene_object_metadata != nullptr)
+    {
+        const auto selected_pose_it = resolved_object_poses.find(selected_scene_object_metadata->name);
+        for (const SceneObjectAttribute& attribute : selected_scene_object_metadata->attributes)
+        {
+            if (attribute.kind != SceneObjectAttributeKind::SpotLight)
+            {
+                continue;
+            }
+
+            if (selected_pose_it == resolved_object_poses.end())
+            {
+                continue;
+            }
+
+            DrawSpotLightConeGizmo(
+                draw_list,
+                min,
+                max,
+                view_projection_.data(),
+                selected_pose_it->second,
+                attribute.spot_light);
         }
     }
 
@@ -2274,7 +2994,7 @@ void SceneViewportRenderer::RenderUi(
         MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
     }
 
-    if (viewport_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !transform_toolbar_hovered && !axis_view_result.hovered && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
+    if (mouse_over_viewport && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !transform_toolbar_hovered && !axis_view_result.hovered && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
     {
         const int picked_object_index = PickSceneObject(
             queued_objects_,
@@ -2396,11 +3116,18 @@ void SceneViewportRenderer::RenderGpu()
         SceneUniformBlock grid_uniforms = {};
         SetIdentity(grid_uniforms.model);
         std::memcpy(grid_uniforms.model_view_projection, view_projection_.data(), sizeof(grid_uniforms.model_view_projection));
+        StoreVec4(ambient_light_, grid_uniforms.ambient_light);
+        StoreVec4(directional_light_color_, grid_uniforms.directional_light_color);
+        StoreVec4(directional_light_direction_, grid_uniforms.directional_light_direction);
+        StoreVec4(spot_light_color_, grid_uniforms.spot_light_color);
+        StoreVec4(spot_light_direction_, grid_uniforms.spot_light_direction);
+        StoreVec4(spot_light_position_, grid_uniforms.spot_light_position);
+        StoreVec4(spot_light_data_, grid_uniforms.spot_light_data);
 
         vkCmdPushConstants(
             offscreen_command_buffer_,
             scene_pipeline_layout_,
-            VK_SHADER_STAGE_VERTEX_BIT,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0,
             sizeof(SceneUniformBlock),
             &grid_uniforms);
@@ -2435,10 +3162,17 @@ void SceneViewportRenderer::RenderGpu()
         SceneUniformBlock scene_uniforms = {};
         BuildModelMatrix(object, scene_uniforms.model);
         MultiplyMatrix(view_projection_.data(), scene_uniforms.model, scene_uniforms.model_view_projection);
+        StoreVec4(ambient_light_, scene_uniforms.ambient_light);
+        StoreVec4(directional_light_color_, scene_uniforms.directional_light_color);
+        StoreVec4(directional_light_direction_, scene_uniforms.directional_light_direction);
+        StoreVec4(spot_light_color_, scene_uniforms.spot_light_color);
+        StoreVec4(spot_light_direction_, scene_uniforms.spot_light_direction);
+        StoreVec4(spot_light_position_, scene_uniforms.spot_light_position);
+        StoreVec4(spot_light_data_, scene_uniforms.spot_light_data);
         vkCmdPushConstants(
             offscreen_command_buffer_,
             scene_pipeline_layout_,
-            VK_SHADER_STAGE_VERTEX_BIT,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0,
             sizeof(SceneUniformBlock),
             &scene_uniforms);

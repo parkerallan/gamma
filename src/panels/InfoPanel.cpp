@@ -1,5 +1,6 @@
 #include "panels/InfoPanel.h"
 
+#include "components/SceneObjectAttributesEditor.h"
 #include "imgui.h"
 
 #include <algorithm>
@@ -354,7 +355,6 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
 
     ImGui::SeparatorText("Object");
     ImGui::Text("Name: %s", object_it->name.c_str());
-    ImGui::Text("Type: %s", object_it->type.empty() ? "Empty" : object_it->type.c_str());
 
     ImGui::Spacing();
     ImGui::SeparatorText("Transform");
@@ -385,6 +385,12 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         {
             has_cached_scene_metadata_ = false;
         }
+    }
+
+    if (RenderSceneObjectAttributesEditor(state, *object_it))
+    {
+        has_cached_scene_metadata_ = false;
+        return;
     }
 
     ImGui::Spacing();

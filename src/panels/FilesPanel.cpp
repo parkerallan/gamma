@@ -2,6 +2,8 @@
 
 #include "imgui.h"
 
+#include "assets/SceneMetadata.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -71,6 +73,11 @@ std::string TrimCopy(std::string value)
         return !is_space(character);
     }).base(), value.end());
     return value;
+}
+
+bool CanMutateSceneObject(const EngineState& state, const std::filesystem::path& scene_path)
+{
+    return !(state.HasOpenFile() && state.open_file_path == scene_path && state.open_file_dirty);
 }
 }
 
@@ -160,6 +167,7 @@ void FilesPanel::Render(EngineState& state)
     RenderProjectRootDropTarget(state);
 
     file_tree_changed = file_context_menu_.Render(state) || file_tree_changed;
+    file_tree_changed = RenderSceneObjectPopups(state) || file_tree_changed;
     file_tree_changed = creation_menu_.Render(state) || file_tree_changed;
     if (file_tree_changed || refresh_requested_)
     {
@@ -253,38 +261,45 @@ FileTreeNode FilesPanel::BuildNode(const std::filesystem::path& path) const
 
 std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesystem::path& scene_path) const
 {
-    std::vector<FileTreeNode> object_nodes;
-
-    std::ifstream input(scene_path, std::ios::binary);
-    if (!input)
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    if (!scene_metadata.parsed)
     {
-        return object_nodes;
+        return {};
     }
 
-    std::string line;
-    while (std::getline(input, line))
+    auto build_child_nodes = [&](const auto& self, const std::string& parent_name) -> std::vector<FileTreeNode>
     {
-        const std::string trimmed = TrimCopy(line);
-        constexpr std::string_view object_prefix = "Object:";
-        if (trimmed.rfind(object_prefix, 0) != 0)
+        std::vector<FileTreeNode> child_nodes;
+        for (const SceneObjectMetadata& object : scene_metadata.objects)
         {
-            continue;
+            const bool has_valid_parent = std::any_of(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& candidate)
+            {
+                return candidate.name == object.parent_name;
+            });
+            const bool belongs_to_parent = parent_name.empty()
+                ? object.parent_name.empty() || !has_valid_parent
+                : object.parent_name == parent_name;
+            if (!belongs_to_parent)
+            {
+                continue;
+            }
+
+            FileTreeNode object_node;
+            object_node.path = scene_path;
+            object_node.label = object.name;
+            object_node.is_scene_object = true;
+            object_node.children = self(self, object.name);
+            child_nodes.push_back(std::move(object_node));
         }
 
-        const std::string object_name = TrimCopy(trimmed.substr(object_prefix.size()));
-        if (object_name.empty())
+        std::sort(child_nodes.begin(), child_nodes.end(), [](const FileTreeNode& left, const FileTreeNode& right)
         {
-            continue;
-        }
+            return left.label < right.label;
+        });
+        return child_nodes;
+    };
 
-        FileTreeNode object_node;
-        object_node.path = scene_path;
-        object_node.label = object_name;
-        object_node.is_scene_object = true;
-        object_nodes.push_back(std::move(object_node));
-    }
-
-    return object_nodes;
+    return build_child_nodes(build_child_nodes, std::string{});
 }
 
 void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::string_view filter)
@@ -346,10 +361,18 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
         const float mouse_x = ImGui::GetIO().MousePos.x;
         released_on_arrow = mouse_x >= arrow_hit_x1 && mouse_x < arrow_hit_x2;
     }
-    const bool moved_from_source = !node.is_scene_object && RenderMoveSource(node, state);
+    const bool moved_from_source = node.is_scene_object ? RenderSceneObjectMoveSource(node, state) : RenderMoveSource(node, state);
     bool moved_to_directory = false;
+    bool scene_object_parent_changed = false;
 
-    if (!node.is_scene_object && file_context_menu_.RenderItemMenu(node.path, node.is_directory, state))
+    if (node.is_scene_object)
+    {
+        if (RenderSceneObjectMenu(node, state))
+        {
+            refresh_requested_ = true;
+        }
+    }
+    else if (file_context_menu_.RenderItemMenu(node.path, node.is_directory, state))
     {
         refresh_requested_ = true;
     }
@@ -358,8 +381,43 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
     {
         moved_to_directory = RenderMoveTarget(node.path, state);
     }
+    else if (node.is_scene_object)
+    {
+        scene_object_parent_changed = RenderSceneObjectMoveTarget(node, state);
+        if (scene_object_parent_changed)
+        {
+            refresh_requested_ = true;
+        }
+    }
+    else if (is_scene_file)
+    {
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kSceneObjectDragDropPayload))
+            {
+                std::filesystem::path source_scene_path;
+                std::string source_object_name;
+                if (DecodeSceneObjectPayload(static_cast<const char*>(payload->Data), source_scene_path, source_object_name) && source_scene_path == node.path)
+                {
+                    if (!CanMutateSceneObject(state, node.path))
+                    {
+                        state.AddLog("Save the open scene before reparenting scene objects");
+                    }
+                    else if (SetSceneObjectParent(node.path, source_object_name, std::string{}))
+                    {
+                        state.OpenTextFile(node.path);
+                        state.SetSelectedSceneObject(node.path, source_object_name);
+                        refresh_requested_ = true;
+                        scene_object_parent_changed = true;
+                        state.AddLog("Moved scene object to root: " + source_object_name);
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
 
-    if (tree_item_released && !tree_item_toggled && !released_on_arrow && !moved_from_source && !moved_to_directory)
+    if (tree_item_released && !tree_item_toggled && !released_on_arrow && !moved_from_source && !moved_to_directory && !scene_object_parent_changed)
     {
         if (node.is_scene_object)
         {
@@ -399,6 +457,314 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
         }
         ImGui::TreePop();
     }
+}
+
+bool FilesPanel::RenderSceneObjectMenu(const FileTreeNode& node, EngineState& state)
+{
+    bool changed = false;
+    ImGui::PushID((std::string("SceneObjectMenu") + node.label).c_str());
+    if (ImGui::BeginPopupContextItem("SceneObjectContextMenu"))
+    {
+        const SceneMetadata scene_metadata = LoadSceneMetadata(node.path);
+        if (ImGui::MenuItem("Rename"))
+        {
+            QueueSceneObjectRename(node.path, node.label);
+        }
+
+        if (ImGui::MenuItem("Copy"))
+        {
+            scene_object_clipboard_scene_path_ = node.path;
+            scene_object_clipboard_name_ = node.label;
+            state.AddLog("Copied scene object: " + node.label);
+        }
+
+        const bool can_paste = !scene_object_clipboard_name_.empty() && scene_object_clipboard_scene_path_ == node.path;
+        if (ImGui::MenuItem("Paste", nullptr, false, can_paste))
+        {
+            changed = HandleSceneObjectPaste(node.path, node.label, state);
+        }
+
+        ImGui::Separator();
+        if (ImGui::MenuItem("Delete"))
+        {
+            QueueSceneObjectDelete(node.path, node.label);
+        }
+
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+bool FilesPanel::RenderSceneObjectPopups(EngineState& state)
+{
+    bool changed = false;
+
+    if (open_scene_object_rename_popup_)
+    {
+        ImGui::OpenPopup("Rename Scene Object");
+        open_scene_object_rename_popup_ = false;
+    }
+
+    if (ImGui::BeginPopupModal("Rename Scene Object", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        if (focus_scene_object_name_input_)
+        {
+            ImGui::SetKeyboardFocusHere();
+            focus_scene_object_name_input_ = false;
+        }
+
+        ImGui::TextUnformatted("Rename Object");
+        ImGui::Separator();
+        ImGui::PushItemWidth(260.0f);
+        const bool submitted = ImGui::InputText("Name", scene_object_name_buffer_.data(), scene_object_name_buffer_.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopItemWidth();
+        if (submitted || ImGui::Button("Rename"))
+        {
+            changed = RenameSceneObjectFromUi(state);
+            if (changed)
+            {
+                ResetSceneObjectRename();
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+        {
+            ResetSceneObjectRename();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (open_scene_object_delete_popup_)
+    {
+        ImGui::OpenPopup("Delete Scene Object");
+        open_scene_object_delete_popup_ = false;
+    }
+
+    if (ImGui::BeginPopupModal("Delete Scene Object", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextUnformatted("Delete Object");
+        ImGui::TextWrapped("Delete %s and its children? This cannot be undone.", scene_object_action_name_.c_str());
+        ImGui::Separator();
+        if (ImGui::Button("Delete"))
+        {
+            changed = DeleteSceneObjectFromUi(state);
+            if (changed)
+            {
+                ResetSceneObjectDelete();
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+        {
+            ResetSceneObjectDelete();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    return changed;
+}
+
+bool FilesPanel::RenderSceneObjectMoveSource(const FileTreeNode& node, EngineState&)
+{
+    if (!ImGui::BeginDragDropSource())
+    {
+        return false;
+    }
+
+    const std::string payload = EncodeSceneObjectPayload(node.path, node.label);
+    ImGui::SetDragDropPayload(kSceneObjectDragDropPayload, payload.c_str(), payload.size() + 1);
+    ImGui::Text("Move object %s", node.label.c_str());
+    ImGui::EndDragDropSource();
+    return true;
+}
+
+bool FilesPanel::RenderSceneObjectMoveTarget(const FileTreeNode& node, EngineState& state)
+{
+    if (!ImGui::BeginDragDropTarget())
+    {
+        return false;
+    }
+
+    bool changed = false;
+    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kSceneObjectDragDropPayload))
+    {
+        std::filesystem::path source_scene_path;
+        std::string source_object_name;
+        if (DecodeSceneObjectPayload(static_cast<const char*>(payload->Data), source_scene_path, source_object_name) && source_scene_path == node.path && source_object_name != node.label)
+        {
+            if (!CanMutateSceneObject(state, node.path))
+            {
+                state.AddLog("Save the open scene before reparenting scene objects");
+            }
+            else if (SetSceneObjectParent(node.path, source_object_name, node.label))
+            {
+                state.OpenTextFile(node.path);
+                state.SetSelectedSceneObject(node.path, source_object_name);
+                state.AddLog("Parented scene object " + source_object_name + " to " + node.label);
+                changed = true;
+            }
+        }
+    }
+
+    ImGui::EndDragDropTarget();
+    return changed;
+}
+
+bool FilesPanel::HandleSceneObjectPaste(const std::filesystem::path& scene_path, const std::string& sibling_object_name, EngineState& state)
+{
+    if (scene_object_clipboard_name_.empty() || scene_object_clipboard_scene_path_ != scene_path)
+    {
+        return false;
+    }
+    if (!CanMutateSceneObject(state, scene_path))
+    {
+        state.AddLog("Save the open scene before duplicating scene objects");
+        return false;
+    }
+
+    std::string duplicated_name;
+    if (!DuplicateSceneObject(scene_path, scene_object_clipboard_name_, &duplicated_name))
+    {
+        state.AddLog("Failed to copy scene object: " + scene_object_clipboard_name_);
+        return false;
+    }
+
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    const auto sibling_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+    {
+        return object.name == sibling_object_name;
+    });
+    const std::string parent_name = sibling_it != scene_metadata.objects.end() ? sibling_it->parent_name : std::string{};
+    if (!parent_name.empty())
+    {
+        if (!SetSceneObjectParent(scene_path, duplicated_name, parent_name))
+        {
+            state.AddLog("Failed to parent copied scene object: " + duplicated_name);
+            return false;
+        }
+    }
+
+    state.OpenTextFile(scene_path);
+    state.SetSelectedSceneObject(scene_path, duplicated_name);
+    state.AddLog("Copied scene object: " + duplicated_name);
+    return true;
+}
+
+bool FilesPanel::RenameSceneObjectFromUi(EngineState& state)
+{
+    if (!CanMutateSceneObject(state, scene_object_action_scene_path_))
+    {
+        state.AddLog("Save the open scene before renaming scene objects");
+        return false;
+    }
+
+    const std::string new_name = SanitizeSceneObjectName(scene_object_name_buffer_.data());
+    if (new_name.empty())
+    {
+        state.AddLog("Cannot rename object: enter a valid name");
+        return false;
+    }
+
+    if (!RenameSceneObject(scene_object_action_scene_path_, scene_object_action_name_, new_name))
+    {
+        state.AddLog("Failed to rename scene object: " + scene_object_action_name_);
+        return false;
+    }
+
+    state.OpenTextFile(scene_object_action_scene_path_);
+    state.SetSelectedSceneObject(scene_object_action_scene_path_, new_name);
+    state.AddLog("Renamed scene object: " + new_name);
+    return true;
+}
+
+bool FilesPanel::DeleteSceneObjectFromUi(EngineState& state)
+{
+    if (!CanMutateSceneObject(state, scene_object_action_scene_path_))
+    {
+        state.AddLog("Save the open scene before deleting scene objects");
+        return false;
+    }
+
+    if (!DeleteSceneObject(scene_object_action_scene_path_, scene_object_action_name_))
+    {
+        state.AddLog("Failed to delete scene object: " + scene_object_action_name_);
+        return false;
+    }
+
+    state.OpenTextFile(scene_object_action_scene_path_);
+    if (state.selected_item_path == scene_object_action_scene_path_ && state.selected_scene_object_name == scene_object_action_name_)
+    {
+        state.SetSelectedItem(scene_object_action_scene_path_);
+    }
+    state.AddLog("Deleted scene object: " + scene_object_action_name_);
+    return true;
+}
+
+void FilesPanel::QueueSceneObjectRename(const std::filesystem::path& scene_path, const std::string& object_name)
+{
+    scene_object_action_scene_path_ = scene_path;
+    scene_object_action_name_ = object_name;
+    focus_scene_object_name_input_ = true;
+    open_scene_object_rename_popup_ = true;
+    std::fill(scene_object_name_buffer_.begin(), scene_object_name_buffer_.end(), '\0');
+    const std::size_t copy_length = (std::min)(object_name.size(), scene_object_name_buffer_.size() - 1);
+    std::copy_n(object_name.begin(), static_cast<std::ptrdiff_t>(copy_length), scene_object_name_buffer_.begin());
+}
+
+void FilesPanel::QueueSceneObjectDelete(const std::filesystem::path& scene_path, const std::string& object_name)
+{
+    scene_object_action_scene_path_ = scene_path;
+    scene_object_action_name_ = object_name;
+    open_scene_object_delete_popup_ = true;
+}
+
+void FilesPanel::ResetSceneObjectRename()
+{
+    scene_object_action_scene_path_.clear();
+    scene_object_action_name_.clear();
+    focus_scene_object_name_input_ = false;
+}
+
+void FilesPanel::ResetSceneObjectDelete()
+{
+    scene_object_action_scene_path_.clear();
+    scene_object_action_name_.clear();
+}
+
+std::string FilesPanel::SanitizeSceneObjectName(std::string value)
+{
+    value = TrimCopy(std::move(value));
+    std::replace(value.begin(), value.end(), ' ', '_');
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char character)
+    {
+        return character == ':' || character == '/' || character == '\\';
+    }), value.end());
+    return value;
+}
+
+std::string FilesPanel::EncodeSceneObjectPayload(const std::filesystem::path& scene_path, const std::string& object_name)
+{
+    return scene_path.generic_string() + "\n" + object_name;
+}
+
+bool FilesPanel::DecodeSceneObjectPayload(std::string_view payload, std::filesystem::path& scene_path, std::string& object_name)
+{
+    const std::size_t separator_index = payload.find('\n');
+    if (separator_index == std::string_view::npos)
+    {
+        return false;
+    }
+
+    scene_path = std::filesystem::path(std::string(payload.substr(0, separator_index)));
+    object_name = std::string(payload.substr(separator_index + 1));
+    return !scene_path.empty() && !object_name.empty();
 }
 
 bool FilesPanel::NodeMatchesFilter(const FileTreeNode& node, std::string_view filter) const
