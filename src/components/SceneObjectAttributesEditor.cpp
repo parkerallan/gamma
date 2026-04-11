@@ -168,7 +168,12 @@ bool RenderCommonLightControls(EngineState& state, const SceneObjectMetadata& ob
     return changed;
 }
 
-bool RenderAttributeSection(EngineState& state, const SceneObjectMetadata& object, const SceneObjectAttribute& attribute, std::size_t attribute_index)
+bool RenderAttributeSection(
+    EngineState& state,
+    const SceneObjectMetadata& object,
+    const SceneObjectAttribute& attribute,
+    std::size_t attribute_index,
+    const SceneObjectCameraPreviewCallback& render_camera_preview)
 {
     ImGui::PushID(static_cast<int>(attribute_index));
     bool keep_attribute = true;
@@ -263,6 +268,11 @@ bool RenderAttributeSection(EngineState& state, const SceneObjectMetadata& objec
                     return SetSceneObjectAttributeFarClip(state.selected_item_path, object.name, attribute_index, far_clip);
                 }) || changed;
             }
+
+            if (render_camera_preview)
+            {
+                render_camera_preview(state, object, attribute_index, attribute);
+            }
             break;
         }
 
@@ -290,7 +300,10 @@ bool RenderAttributeSection(EngineState& state, const SceneObjectMetadata& objec
 }
 }
 
-bool RenderSceneObjectAttributesEditor(EngineState& state, const SceneObjectMetadata& object)
+bool RenderSceneObjectAttributesEditor(
+    EngineState& state,
+    const SceneObjectMetadata& object,
+    const SceneObjectCameraPreviewCallback& render_camera_preview)
 {
     ImGui::Spacing();
     ImGui::SeparatorText("Attributes");
@@ -302,7 +315,7 @@ bool RenderSceneObjectAttributesEditor(EngineState& state, const SceneObjectMeta
 
     for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
     {
-        if (RenderAttributeSection(state, object, object.attributes[attribute_index], attribute_index))
+        if (RenderAttributeSection(state, object, object.attributes[attribute_index], attribute_index, render_camera_preview))
         {
             return true;
         }

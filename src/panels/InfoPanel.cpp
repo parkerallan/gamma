@@ -137,8 +137,29 @@ InfoPanel::~InfoPanel()
     Shutdown();
 }
 
+bool InfoPanel::InitializeSceneRenderer(VulkanContext* context)
+{
+    preview_vulkan_context_ = context;
+    return preview_vulkan_context_ != nullptr;
+}
+
+void InfoPanel::BeginFrame()
+{
+    for (auto& renderer_entry : camera_preview_renderers_)
+    {
+        if (renderer_entry.second)
+        {
+            renderer_entry.second->BeginFrame();
+        }
+    }
+}
+
 void InfoPanel::Shutdown()
 {
+    ClearCameraPreviewRenderers();
+    model_asset_cache_.clear();
+    active_camera_preview_scope_.clear();
+    preview_vulkan_context_ = nullptr;
     texture_info_renderer_.Shutdown();
 }
 
@@ -157,6 +178,20 @@ const ModelMetadata& InfoPanel::GetModelMetadata(const std::filesystem::path& pa
     cached_model_metadata_ = LoadModelMetadata(path);
     has_cached_model_metadata_ = true;
     return cached_model_metadata_;
+}
+
+const InfoPanel::CachedModelAssetEntry& InfoPanel::GetModelAssetEntry(const std::filesystem::path& path)
+{
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
+    CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
+    if (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded)
+    {
+        cache_entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
+        cache_entry.asset = LoadModelAsset(path);
+    }
+
+    return cache_entry;
 }
 
 const ParsedMaterialMetadata& InfoPanel::GetMaterialMetadata(const std::filesystem::path& path)
@@ -208,6 +243,85 @@ const TextureMetadata& InfoPanel::GetTextureMetadata(const std::filesystem::path
     cached_texture_metadata_ = LoadTextureMetadata(path);
     has_cached_texture_metadata_ = true;
     return cached_texture_metadata_;
+}
+
+SceneViewportRenderer* InfoPanel::GetCameraPreviewRenderer(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index)
+{
+    if (preview_vulkan_context_ == nullptr)
+    {
+        return nullptr;
+    }
+
+    const std::string renderer_key = scene_path.generic_string() + "::" + object_name + "#" + std::to_string(attribute_index);
+    std::unique_ptr<SceneViewportRenderer>& renderer = camera_preview_renderers_[renderer_key];
+    if (!renderer)
+    {
+        renderer = std::make_unique<SceneViewportRenderer>();
+        if (!renderer->Initialize(preview_vulkan_context_))
+        {
+            renderer.reset();
+            return nullptr;
+        }
+    }
+
+    return renderer.get();
+}
+
+void InfoPanel::ClearCameraPreviewRenderers()
+{
+    if (!camera_preview_renderers_.empty() && preview_vulkan_context_ != nullptr)
+    {
+        preview_vulkan_context_->WaitIdle();
+    }
+
+    for (auto& renderer_entry : camera_preview_renderers_)
+    {
+        if (renderer_entry.second)
+        {
+            renderer_entry.second->Shutdown();
+        }
+    }
+
+    camera_preview_renderers_.clear();
+}
+
+void InfoPanel::RenderCameraAttributePreview(
+    const SceneMetadata& scene_metadata,
+    EngineState& state,
+    const SceneObjectMetadata& object,
+    std::size_t attribute_index,
+    const SceneObjectAttribute& attribute)
+{
+    if (attribute.kind != SceneObjectAttributeKind::Camera)
+    {
+        return;
+    }
+
+    if (!scene_metadata.parsed)
+    {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Preview unavailable.");
+        return;
+    }
+
+    SceneViewportRenderer* renderer = GetCameraPreviewRenderer(state.selected_item_path, object.name, attribute_index);
+    if (renderer == nullptr)
+    {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Preview renderer unavailable.");
+        return;
+    }
+
+    renderer->RenderCameraPreview(
+        state,
+        scene_metadata,
+        [this](const std::filesystem::path& path) -> SceneViewportResolvedModel
+        {
+            const CachedModelAssetEntry& entry = GetModelAssetEntry(path);
+            return SceneViewportResolvedModel{&entry.asset, entry.write_time};
+        },
+        object,
+        attribute.camera);
 }
 
 void InfoPanel::RenderMaterialMetadata(const ParsedMaterialMetadata& metadata) const
@@ -353,6 +467,13 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         return;
     }
 
+    const std::string preview_scope = state.selected_item_path.generic_string() + "::" + object_it->name;
+    if (active_camera_preview_scope_ != preview_scope)
+    {
+        ClearCameraPreviewRenderers();
+        active_camera_preview_scope_ = preview_scope;
+    }
+
     ImGui::SeparatorText("Object");
     ImGui::Text("Name: %s", object_it->name.c_str());
 
@@ -366,6 +487,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         if (SaveSceneObjectVector3Edit(state, *object_it, "position", snapped_position, SetSceneObjectPosition))
         {
             has_cached_scene_metadata_ = false;
+            return;
         }
     }
 
@@ -375,6 +497,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         if (SaveSceneObjectVector3Edit(state, *object_it, "rotation", {rotation[0], rotation[1], rotation[2]}, SetSceneObjectRotation))
         {
             has_cached_scene_metadata_ = false;
+            return;
         }
     }
 
@@ -384,10 +507,17 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         if (SaveSceneObjectVector3Edit(state, *object_it, "scale", {scale[0], scale[1], scale[2]}, SetSceneObjectScale))
         {
             has_cached_scene_metadata_ = false;
+            return;
         }
     }
 
-    if (RenderSceneObjectAttributesEditor(state, *object_it))
+    if (RenderSceneObjectAttributesEditor(
+            state,
+            *object_it,
+            [this, &scene_metadata](EngineState& callback_state, const SceneObjectMetadata& callback_object, std::size_t attribute_index, const SceneObjectAttribute& attribute)
+            {
+                RenderCameraAttributePreview(scene_metadata, callback_state, callback_object, attribute_index, attribute);
+            }))
     {
         has_cached_scene_metadata_ = false;
         return;
@@ -668,6 +798,12 @@ void InfoPanel::Render(EngineState& state, VulkanContext* vulkan_context)
 
     const bool is_directory = std::filesystem::is_directory(selected_path);
 
+    if (!state.HasSelectedSceneObject() && !active_camera_preview_scope_.empty())
+    {
+        ClearCameraPreviewRenderers();
+        active_camera_preview_scope_.clear();
+    }
+
     if (state.HasSelectedSceneObject())
     {
         RenderSelectedSceneObject(state);
@@ -714,4 +850,15 @@ void InfoPanel::Render(EngineState& state, VulkanContext* vulkan_context)
     }
 
     ImGui::End();
+}
+
+void InfoPanel::RenderSceneGpuPass()
+{
+    for (auto& renderer_entry : camera_preview_renderers_)
+    {
+        if (renderer_entry.second)
+        {
+            renderer_entry.second->RenderGpu();
+        }
+    }
 }

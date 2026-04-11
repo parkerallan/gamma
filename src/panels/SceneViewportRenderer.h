@@ -42,6 +42,12 @@ public:
         const SceneMetadata& scene_metadata,
         const SceneViewportModelResolver& resolve_model_asset,
         SceneViewportCameraState& camera_state);
+    void RenderCameraPreview(
+        const EngineState& state,
+        const SceneMetadata& scene_metadata,
+        const SceneViewportModelResolver& resolve_model_asset,
+        const SceneObjectMetadata& camera_object,
+        const SceneObjectCameraAttributes& camera_attributes);
     void RenderGpu();
 
 public:

@@ -3021,6 +3021,175 @@ void SceneViewportRenderer::RenderUi(
     ImGui::EndChild();
 }
 
+void SceneViewportRenderer::RenderCameraPreview(
+    const EngineState& state,
+    const SceneMetadata& scene_metadata,
+    const SceneViewportModelResolver& resolve_model_asset,
+    const SceneObjectMetadata& camera_object,
+    const SceneObjectCameraAttributes& camera_attributes)
+{
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Preview");
+
+    const float available_width = ImGui::GetContentRegionAvail().x;
+    if (available_width <= 4.0f)
+    {
+        ImGui::TextDisabled("Preview unavailable in this layout.");
+        return;
+    }
+
+    const float preview_height = (std::min)(available_width * (9.0f / 16.0f), 220.0f);
+    if (preview_height <= 4.0f)
+    {
+        return;
+    }
+
+    ImGui::BeginChild("##SceneCameraPreviewCanvas", ImVec2(0.0f, preview_height), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    const ImVec2 min = ImGui::GetWindowPos();
+    const ImVec2 max = ImVec2(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(min, max, IM_COL32(24, 28, 32, 255), 8.0f);
+
+    auto draw_message = [&](const char* message)
+    {
+        const ImVec2 message_size = ImGui::CalcTextSize(message);
+        draw_list->AddText(
+            ImVec2((min.x + max.x - message_size.x) * 0.5f, (min.y + max.y - message_size.y) * 0.5f),
+            IM_COL32(235, 238, 242, 255),
+            message);
+    };
+
+    if (!scene_metadata.parsed)
+    {
+        draw_message("Scene preview unavailable");
+        ImGui::EndChild();
+        return;
+    }
+
+    const ImVec2 framebuffer_scale = ImGui::GetIO().DisplayFramebufferScale;
+    const std::uint32_t target_width = static_cast<std::uint32_t>((std::max)(1.0f, std::round(ImGui::GetWindowSize().x * framebuffer_scale.x)));
+    const std::uint32_t target_height = static_cast<std::uint32_t>((std::max)(1.0f, std::round(ImGui::GetWindowSize().y * framebuffer_scale.y)));
+
+    if (!EnsurePipeline() || !EnsureMaterialResources() || !EnsureRenderTargets(target_width, target_height))
+    {
+        draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
+        draw_message("Scene GPU renderer unavailable");
+        ImGui::EndChild();
+        return;
+    }
+
+    if (offscreen_color_descriptor_set_ != VK_NULL_HANDLE)
+    {
+        draw_list->AddImage(
+            reinterpret_cast<ImTextureID>(offscreen_color_descriptor_set_),
+            min,
+            max,
+            ImVec2(0.0f, 1.0f),
+            ImVec2(1.0f, 0.0f));
+    }
+
+    draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
+
+    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
+    const auto camera_pose_it = resolved_object_poses.find(camera_object.name);
+    if (camera_pose_it == resolved_object_poses.end())
+    {
+        draw_message("Camera transform unavailable");
+        ImGui::EndChild();
+        return;
+    }
+
+    queued_objects_.clear();
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        if (object.model_path.empty())
+        {
+            continue;
+        }
+
+        const std::filesystem::path model_path = state.project_root / object.model_path;
+        const SceneViewportResolvedModel resolved_model = resolve_model_asset(model_path);
+        if (resolved_model.asset == nullptr || !resolved_model.asset->loaded)
+        {
+            continue;
+        }
+        if (!EnsureMeshCacheEntry(model_path, resolved_model))
+        {
+            continue;
+        }
+
+        QueuedSceneObject queued_object;
+        queued_object.model_path = model_path;
+        queued_object.name = object.name;
+        queued_object.local_position = object.position;
+        queued_object.local_rotation = object.rotation;
+        queued_object.local_scale = object.scale;
+
+        const auto pose_it = resolved_object_poses.find(object.name);
+        if (pose_it != resolved_object_poses.end())
+        {
+            queued_object.model_matrix = pose_it->second.world_matrix;
+            queued_object.parent_matrix = pose_it->second.parent_matrix;
+            queued_object.has_parent_transform = pose_it->second.has_parent;
+            queued_object.world_position = ToSceneVector3(TransformPoint(pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f}));
+        }
+        else
+        {
+            BuildTransformMatrix(queued_object.local_position, queued_object.local_rotation, queued_object.local_scale, queued_object.model_matrix.data());
+            SetIdentity(queued_object.parent_matrix.data());
+            queued_object.world_position = queued_object.local_position;
+        }
+
+        queued_objects_.push_back(queued_object);
+    }
+
+    if (queued_objects_.empty())
+    {
+        draw_message("No renderable models found in scene");
+        ImGui::EndChild();
+        return;
+    }
+
+    const ResolvedSceneLighting resolved_lighting = ResolveSceneLighting(scene_metadata, resolved_object_poses, camera_object.name);
+    ambient_light_ = resolved_lighting.ambient_light;
+    directional_light_color_ = resolved_lighting.directional_light_color;
+    directional_light_direction_ = resolved_lighting.directional_light_direction;
+    spot_light_color_ = resolved_lighting.spot_light_color;
+    spot_light_direction_ = resolved_lighting.spot_light_direction;
+    spot_light_position_ = resolved_lighting.spot_light_position;
+    spot_light_data_ = resolved_lighting.spot_light_data;
+    grid_enabled_ = false;
+
+    const Vec3 camera_position = TransformPoint(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
+    Vec3 camera_forward = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, -1.0f});
+    Vec3 camera_up = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
+    if (Length(camera_forward) <= 0.0001f)
+    {
+        camera_forward = Vec3{0.0f, 0.0f, -1.0f};
+    }
+    if (Length(camera_up) <= 0.0001f || std::abs(Dot(camera_forward, camera_up)) >= 0.999f)
+    {
+        camera_up = Vec3{0.0f, 1.0f, 0.0f};
+    }
+
+    float view_matrix[16];
+    float projection_matrix[16];
+    BuildLookAtMatrix(camera_position, Add(camera_position, camera_forward), camera_up, view_matrix);
+
+    const float aspect = static_cast<float>(target_width) / static_cast<float>(target_height);
+    const float field_of_view = std::clamp(camera_attributes.field_of_view_degrees, 1.0f, 179.0f);
+    const float near_clip = (std::max)(camera_attributes.near_clip, 0.001f);
+    const float far_clip = (std::max)(camera_attributes.far_clip, near_clip + 0.001f);
+    BuildPerspectiveMatrix(field_of_view, aspect, near_clip, far_clip, projection_matrix);
+    MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
+
+    render_requested_ = true;
+
+    draw_list->AddText(ImVec2(min.x + 12.0f, max.y - 24.0f), IM_COL32(145, 152, 163, 255), "Camera Preview");
+    ImGui::EndChild();
+}
+
 void SceneViewportRenderer::RenderGpu()
 {
     if (!render_requested_ ||

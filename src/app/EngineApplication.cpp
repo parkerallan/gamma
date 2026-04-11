@@ -114,6 +114,10 @@ bool EngineApplication::Init()
     {
         SDL_Log("Scene viewport renderer initialization failed");
     }
+    if (!info_panel_.InitializeSceneRenderer(&vulkan_context_))
+    {
+        SDL_Log("Info panel scene preview renderer initialization failed");
+    }
 
     state_.SetWorkspaceRoot(ResolveWorkspaceRoot());
     state_.AddLog("Workspace root: " + state_.workspace_root.generic_string());
@@ -136,6 +140,7 @@ void EngineApplication::RunLoop()
         }
 
         workspace_panel_.BeginFrame();
+    info_panel_.BeginFrame();
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -145,6 +150,7 @@ void EngineApplication::RunLoop()
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();
         workspace_panel_.RenderSceneGpuPass();
+        info_panel_.RenderSceneGpuPass();
         vulkan_context_.RenderFrame(window_, draw_data, ImVec4(0.08f, 0.09f, 0.11f, 1.0f));
     }
 }
