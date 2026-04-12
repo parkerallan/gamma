@@ -52,7 +52,13 @@ private:
     void RebuildTree(const std::filesystem::path& root);
     FileTreeNode BuildNode(const std::filesystem::path& path) const;
     std::vector<FileTreeNode> BuildSceneObjectNodes(const std::filesystem::path& scene_path) const;
-    void RenderNode(const FileTreeNode& node, EngineState& state, std::string_view filter);
+    void RenderNode(
+        const FileTreeNode& node,
+        EngineState& state,
+        std::string_view filter,
+        int depth,
+        const std::vector<bool>& ancestor_has_next,
+        bool is_last_sibling);
     bool RenderSceneObjectMenu(const FileTreeNode& node, EngineState& state);
     bool RenderSceneObjectPopups(EngineState& state);
     bool RenderProjectRootDropTarget(EngineState& state);

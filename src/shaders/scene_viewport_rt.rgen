@@ -1,0 +1,61 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+struct PrimaryPayload
+{
+    vec4 color;
+    float hit_distance;
+    uint depth;
+};
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
+layout(set = 0, binding = 1, rgba8) uniform image2D output_image;
+
+layout(set = 0, binding = 2, std140) uniform SceneUniforms
+{
+    mat4 view_inverse;
+    mat4 projection_inverse;
+    vec4 ambient_light;
+    vec4 directional_light_color;
+    vec4 directional_light_direction;
+    vec4 spot_light_color;
+    vec4 spot_light_direction;
+    vec4 spot_light_position;
+    vec4 spot_light_data;
+    vec4 grid_data;
+    vec4 grid_origin_extent;
+    uvec4 counts;
+} scene_uniforms;
+
+layout(location = 0) rayPayloadEXT PrimaryPayload primary_payload;
+
+void main()
+{
+    vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
+    vec2 pixel_center = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    vec2 ndc = (pixel_center / launch_size) * 2.0 - 1.0;
+
+    vec4 clip_target = vec4(ndc.x, ndc.y, 1.0, 1.0);
+    vec4 view_target = scene_uniforms.projection_inverse * clip_target;
+    vec3 view_direction = normalize(view_target.xyz / max(view_target.w, 0.0001));
+    vec3 world_origin = (scene_uniforms.view_inverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 world_direction = normalize((scene_uniforms.view_inverse * vec4(view_direction, 0.0)).xyz);
+
+    primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);
+    primary_payload.hit_distance = 1e30;
+    primary_payload.depth = 0;
+    traceRayEXT(
+        top_level_as,
+        gl_RayFlagsNoneEXT,
+        0xFF,
+        0,
+        1,
+        0,
+        world_origin,
+        0.001,
+        world_direction,
+        10000.0,
+        0);
+
+    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(primary_payload.color.rgb, 1.0));
+}

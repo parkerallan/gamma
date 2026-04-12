@@ -42,6 +42,30 @@ std::array<float, 4> ReadMaterialBaseColor(const aiMaterial* material)
     return {color.r, color.g, color.b, color.a};
 }
 
+void FinalizeTextureAlphaMetadata(ModelTextureAsset& texture_asset)
+{
+    if (!texture_asset.valid || texture_asset.pixels.empty())
+    {
+        texture_asset.has_transparency = false;
+        texture_asset.alpha_min = 1.0f;
+        texture_asset.alpha_max = 1.0f;
+        return;
+    }
+
+    std::uint8_t min_alpha = 255;
+    std::uint8_t max_alpha = 0;
+    for (std::size_t pixel_offset = 3; pixel_offset < texture_asset.pixels.size(); pixel_offset += 4)
+    {
+        const std::uint8_t alpha = texture_asset.pixels[pixel_offset];
+        min_alpha = (std::min)(min_alpha, alpha);
+        max_alpha = (std::max)(max_alpha, alpha);
+    }
+
+    texture_asset.alpha_min = static_cast<float>(min_alpha) / 255.0f;
+    texture_asset.alpha_max = static_cast<float>(max_alpha) / 255.0f;
+    texture_asset.has_transparency = min_alpha < 255;
+}
+
 std::filesystem::path ResolveTexturePath(const std::filesystem::path& model_path, const std::string& texture_reference)
 {
     std::filesystem::path texture_path(texture_reference);
@@ -73,6 +97,7 @@ bool LoadTextureFromFile(const std::filesystem::path& texture_path, ModelTexture
     texture_asset.height = height;
     texture_asset.pixels.assign(pixels, pixels + (width * height * 4));
     stbi_image_free(pixels);
+    FinalizeTextureAlphaMetadata(texture_asset);
     return true;
 }
 
@@ -104,6 +129,7 @@ bool LoadEmbeddedTexture(const aiTexture* embedded_texture, ModelTextureAsset& t
         texture_asset.height = height;
         texture_asset.pixels.assign(pixels, pixels + (width * height * 4));
         stbi_image_free(pixels);
+        FinalizeTextureAlphaMetadata(texture_asset);
         return true;
     }
 
@@ -125,6 +151,7 @@ bool LoadEmbeddedTexture(const aiTexture* embedded_texture, ModelTextureAsset& t
         }
     }
 
+    FinalizeTextureAlphaMetadata(texture_asset);
     return true;
 }
 
@@ -245,6 +272,9 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
 
         material_asset.base_color = ReadMaterialBaseColor(source_material);
         LoadMaterialBaseColorTexture(scene, source_material, path, material_asset);
+        material_asset.uses_alpha_transparency =
+            material_asset.base_color[3] < 0.999f ||
+            material_asset.base_color_texture.has_transparency;
         asset.materials.push_back(std::move(material_asset));
     }
 

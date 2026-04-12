@@ -1,0 +1,139 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_scalar_block_layout : require
+
+hitAttributeEXT vec2 hit_attributes;
+
+layout(set = 0, binding = 2, std140) uniform SceneUniforms
+{
+    mat4 view_inverse;
+    mat4 projection_inverse;
+    vec4 ambient_light;
+    vec4 directional_light_color;
+    vec4 directional_light_direction;
+    vec4 spot_light_color;
+    vec4 spot_light_direction;
+    vec4 spot_light_position;
+    vec4 spot_light_data;
+    vec4 grid_data;
+    vec4 grid_origin_extent;
+    uvec4 counts;
+} scene_uniforms;
+
+struct SceneVertex
+{
+    vec3 position;
+    vec3 normal;
+    vec2 uv;
+    vec4 color;
+};
+
+layout(buffer_reference, scalar) readonly buffer VertexBuffer
+{
+    SceneVertex vertices[];
+};
+
+layout(buffer_reference, scalar) readonly buffer IndexBuffer
+{
+    uint indices[];
+};
+
+struct MeshRecord
+{
+    VertexBuffer vertex_buffer;
+    IndexBuffer index_buffer;
+    uint vertex_count;
+    uint vertex_stride;
+    uint index_count;
+    uint section_offset;
+    uint section_count;
+    uint material_offset;
+};
+
+struct SectionRecord
+{
+    uint first_index;
+    uint index_count;
+    uint material_index;
+    uint uses_alpha_transparency;
+};
+
+struct MaterialRecord
+{
+    vec4 base_color;
+    uint texture_index;
+    uint uses_alpha_transparency;
+    uint pad0;
+    uint pad1;
+};
+
+layout(set = 0, binding = 3, scalar) readonly buffer MeshRecordBuffer
+{
+    MeshRecord meshes[];
+};
+
+layout(set = 0, binding = 4, scalar) readonly buffer SectionRecordBuffer
+{
+    SectionRecord sections[];
+};
+
+layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
+{
+    MaterialRecord materials[];
+};
+
+layout(set = 0, binding = 6) uniform sampler2D base_color_textures[256];
+
+uint find_section_index(MeshRecord mesh, uint first_index)
+{
+    for (uint section_offset = 0; section_offset < mesh.section_count; ++section_offset)
+    {
+        uint section_index = mesh.section_offset + section_offset;
+        SectionRecord section = sections[section_index];
+        if (first_index >= section.first_index && first_index < section.first_index + section.index_count)
+        {
+            return section_index;
+        }
+    }
+
+    return mesh.section_offset;
+}
+
+float sample_alpha(MaterialRecord material, vec2 uv, vec4 vertex_color)
+{
+    float alpha = vertex_color.a;
+    if (material.texture_index != 0xFFFFFFFFu && material.texture_index < scene_uniforms.counts.w)
+    {
+        alpha *= texture(base_color_textures[nonuniformEXT(int(material.texture_index))], uv).a;
+    }
+
+    return clamp(alpha, 0.0, 1.0);
+}
+
+void main()
+{
+    MeshRecord mesh = meshes[gl_InstanceCustomIndexEXT];
+    uint primitive_first_index = gl_PrimitiveID * 3u;
+    uint section_index = find_section_index(mesh, primitive_first_index);
+    MaterialRecord material = materials[sections[section_index].material_index];
+
+    uint index0 = mesh.index_buffer.indices[primitive_first_index + 0u];
+    uint index1 = mesh.index_buffer.indices[primitive_first_index + 1u];
+    uint index2 = mesh.index_buffer.indices[primitive_first_index + 2u];
+
+    SceneVertex vertex0 = mesh.vertex_buffer.vertices[index0];
+    SceneVertex vertex1 = mesh.vertex_buffer.vertices[index1];
+    SceneVertex vertex2 = mesh.vertex_buffer.vertices[index2];
+
+    vec3 barycentrics = vec3(1.0 - hit_attributes.x - hit_attributes.y, hit_attributes.x, hit_attributes.y);
+    vec2 uv = vertex0.uv * barycentrics.x + vertex1.uv * barycentrics.y + vertex2.uv * barycentrics.z;
+    vec4 vertex_color = vertex0.color * barycentrics.x + vertex1.color * barycentrics.y + vertex2.color * barycentrics.z;
+
+    float alpha = sample_alpha(material, uv, vertex_color);
+    if (alpha <= 0.001)
+    {
+        ignoreIntersectionEXT;
+    }
+}

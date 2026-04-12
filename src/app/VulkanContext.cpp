@@ -8,12 +8,33 @@
 
 namespace
 {
+constexpr const char* kRequiredRayTracingDeviceExtensions[] = {
+    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+    VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+    VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+    VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+};
+
 bool HasExtension(const std::vector<VkExtensionProperties>& properties, const char* extension_name)
 {
     return std::any_of(properties.begin(), properties.end(), [&](const VkExtensionProperties& property)
     {
         return std::strcmp(property.extensionName, extension_name) == 0;
     });
+}
+
+bool HasRequiredRayTracingExtensions(const std::vector<VkExtensionProperties>& properties)
+{
+    for (const char* extension_name : kRequiredRayTracingDeviceExtensions)
+    {
+        if (!HasExtension(properties, extension_name))
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 }
 
@@ -173,6 +194,71 @@ bool VulkanContext::CreateDevice()
     }
 #endif
 
+    ray_tracing_support_ = {};
+    ray_tracing_dispatch_ = {};
+
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+    VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR ray_tracing_pipeline_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
+
+    descriptor_indexing_features.pNext = &buffer_device_address_features;
+    buffer_device_address_features.pNext = &acceleration_structure_features;
+    acceleration_structure_features.pNext = &ray_tracing_pipeline_features;
+
+    VkPhysicalDeviceFeatures2 available_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    available_features.pNext = &descriptor_indexing_features;
+
+    const bool has_ray_tracing_extensions = HasRequiredRayTracingExtensions(available_extensions);
+    if (has_ray_tracing_extensions)
+    {
+        vkGetPhysicalDeviceFeatures2(physical_device_, &available_features);
+
+        if (descriptor_indexing_features.runtimeDescriptorArray == VK_TRUE &&
+            descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
+            buffer_device_address_features.bufferDeviceAddress == VK_TRUE &&
+            acceleration_structure_features.accelerationStructure == VK_TRUE &&
+            ray_tracing_pipeline_features.rayTracingPipeline == VK_TRUE)
+        {
+            for (const char* extension_name : kRequiredRayTracingDeviceExtensions)
+            {
+                device_extensions.push_back(extension_name);
+            }
+
+            ray_tracing_support_.supported = true;
+
+            VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_structure_properties = {
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+            VkPhysicalDeviceRayTracingPipelinePropertiesKHR ray_tracing_pipeline_properties = {
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+            acceleration_structure_properties.pNext = &ray_tracing_pipeline_properties;
+
+            VkPhysicalDeviceProperties2 properties = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            properties.pNext = &acceleration_structure_properties;
+            vkGetPhysicalDeviceProperties2(physical_device_, &properties);
+            ray_tracing_support_.acceleration_structure_properties = acceleration_structure_properties;
+            ray_tracing_support_.ray_tracing_pipeline_properties = ray_tracing_pipeline_properties;
+
+            descriptor_indexing_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+            descriptor_indexing_features.runtimeDescriptorArray = VK_TRUE;
+            descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+            buffer_device_address_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+            buffer_device_address_features.bufferDeviceAddress = VK_TRUE;
+            acceleration_structure_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+            acceleration_structure_features.accelerationStructure = VK_TRUE;
+            ray_tracing_pipeline_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
+            ray_tracing_pipeline_features.rayTracingPipeline = VK_TRUE;
+
+            descriptor_indexing_features.pNext = &buffer_device_address_features;
+            buffer_device_address_features.pNext = &acceleration_structure_features;
+            acceleration_structure_features.pNext = &ray_tracing_pipeline_features;
+        }
+    }
+
     const float queue_priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {};
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -186,6 +272,10 @@ bool VulkanContext::CreateDevice()
     create_info.pQueueCreateInfos = &queue_info;
     create_info.enabledExtensionCount = static_cast<std::uint32_t>(device_extensions.size());
     create_info.ppEnabledExtensionNames = device_extensions.data();
+    if (ray_tracing_support_.supported)
+    {
+        create_info.pNext = &descriptor_indexing_features;
+    }
 
     result = vkCreateDevice(physical_device_, &create_info, allocator_, &device_);
     CheckVkResult(result);
@@ -195,6 +285,28 @@ bool VulkanContext::CreateDevice()
     }
 
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+    if (ray_tracing_support_.supported)
+    {
+        ray_tracing_support_.enabled = true;
+        ray_tracing_dispatch_.get_buffer_device_address =
+            reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(vkGetDeviceProcAddr(device_, "vkGetBufferDeviceAddressKHR"));
+        ray_tracing_dispatch_.create_acceleration_structure =
+            reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(vkGetDeviceProcAddr(device_, "vkCreateAccelerationStructureKHR"));
+        ray_tracing_dispatch_.destroy_acceleration_structure =
+            reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(vkGetDeviceProcAddr(device_, "vkDestroyAccelerationStructureKHR"));
+        ray_tracing_dispatch_.get_acceleration_structure_build_sizes =
+            reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(vkGetDeviceProcAddr(device_, "vkGetAccelerationStructureBuildSizesKHR"));
+        ray_tracing_dispatch_.get_acceleration_structure_device_address =
+            reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(vkGetDeviceProcAddr(device_, "vkGetAccelerationStructureDeviceAddressKHR"));
+        ray_tracing_dispatch_.cmd_build_acceleration_structures =
+            reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(vkGetDeviceProcAddr(device_, "vkCmdBuildAccelerationStructuresKHR"));
+        ray_tracing_dispatch_.create_ray_tracing_pipelines =
+            reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(vkGetDeviceProcAddr(device_, "vkCreateRayTracingPipelinesKHR"));
+        ray_tracing_dispatch_.get_ray_tracing_shader_group_handles =
+            reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(vkGetDeviceProcAddr(device_, "vkGetRayTracingShaderGroupHandlesKHR"));
+        ray_tracing_dispatch_.cmd_trace_rays =
+            reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(device_, "vkCmdTraceRaysKHR"));
+    }
     return queue_ != VK_NULL_HANDLE;
 }
 
@@ -203,6 +315,10 @@ bool VulkanContext::CreateDescriptorPool()
     constexpr std::uint32_t descriptor_capacity = 4096;
     constexpr VkDescriptorPoolSize pool_sizes[] = {
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptor_capacity},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, descriptor_capacity},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptor_capacity},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptor_capacity},
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, descriptor_capacity},
     };
 
     VkDescriptorPoolCreateInfo pool_info = {};

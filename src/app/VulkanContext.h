@@ -11,6 +11,29 @@
 #include <cstdint>
 #include <vector>
 
+struct VulkanRayTracingDispatch
+{
+    PFN_vkGetBufferDeviceAddressKHR get_buffer_device_address = nullptr;
+    PFN_vkCreateAccelerationStructureKHR create_acceleration_structure = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR destroy_acceleration_structure = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR get_acceleration_structure_build_sizes = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR get_acceleration_structure_device_address = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_acceleration_structures = nullptr;
+    PFN_vkCreateRayTracingPipelinesKHR create_ray_tracing_pipelines = nullptr;
+    PFN_vkGetRayTracingShaderGroupHandlesKHR get_ray_tracing_shader_group_handles = nullptr;
+    PFN_vkCmdTraceRaysKHR cmd_trace_rays = nullptr;
+};
+
+struct VulkanRayTracingSupport
+{
+    bool supported = false;
+    bool enabled = false;
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_structure_properties = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR ray_tracing_pipeline_properties = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+};
+
 class VulkanContext
 {
 public:
@@ -30,6 +53,8 @@ public:
     std::uint32_t GetMinImageCount() const { return min_image_count_; }
     std::uint32_t GetImageCount() const { return main_window_data_.ImageCount; }
     VkRenderPass GetRenderPass() const { return main_window_data_.RenderPass; }
+    const VulkanRayTracingSupport& GetRayTracingSupport() const { return ray_tracing_support_; }
+    const VulkanRayTracingDispatch& GetRayTracingDispatch() const { return ray_tracing_dispatch_; }
 
     static void CheckVkResult(VkResult err);
 
@@ -51,6 +76,8 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    VulkanRayTracingSupport ray_tracing_support_{};
+    VulkanRayTracingDispatch ray_tracing_dispatch_{};
     ImGui_ImplVulkanH_Window main_window_data_{};
     std::uint32_t min_image_count_ = 2;
     bool swapchain_rebuild_ = false;

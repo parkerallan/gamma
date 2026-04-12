@@ -34,6 +34,9 @@ struct ModelTextureAsset
     bool valid = false;
     int width = 0;
     int height = 0;
+    bool has_transparency = false;
+    float alpha_min = 1.0f;
+    float alpha_max = 1.0f;
     std::vector<std::uint8_t> pixels;
 };
 
@@ -43,6 +46,7 @@ struct ModelMaterialAsset
     std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
     std::string base_color_texture_source;
     ModelTextureAsset base_color_texture;
+    bool uses_alpha_transparency = false;
 };
 
 struct ModelAsset

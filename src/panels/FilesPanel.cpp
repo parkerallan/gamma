@@ -79,6 +79,45 @@ bool CanMutateSceneObject(const EngineState& state, const std::filesystem::path&
 {
     return !(state.HasOpenFile() && state.open_file_path == scene_path && state.open_file_dirty);
 }
+
+void DrawHierarchyGuides(float node_origin_x, int depth, const std::vector<bool>& ancestor_has_next, bool is_last_sibling)
+{
+    if (depth <= 0)
+    {
+        return;
+    }
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImVec2 item_min = ImGui::GetItemRectMin();
+    const ImVec2 item_max = ImGui::GetItemRectMax();
+    const float indent_spacing = style.IndentSpacing;
+    const float half_indent = indent_spacing * 0.5f;
+    const float line_top = item_min.y - style.ItemSpacing.y * 0.5f;
+    const float line_bottom = item_max.y + style.ItemSpacing.y * 0.5f;
+    const float center_y = (item_min.y + item_max.y) * 0.5f;
+    const float current_column_x = node_origin_x - half_indent;
+    const float elbow_end_x = node_origin_x - style.FramePadding.x;
+    const ImU32 color = ImGui::GetColorU32(ImVec4(0.31f, 0.35f, 0.39f, 0.85f));
+
+    for (std::size_t ancestor_index = 0; ancestor_index + 1 < ancestor_has_next.size(); ++ancestor_index)
+    {
+        if (!ancestor_has_next[ancestor_index])
+        {
+            continue;
+        }
+
+        const float column_x = node_origin_x - indent_spacing * static_cast<float>(depth - static_cast<int>(ancestor_index)) + half_indent;
+        draw_list->AddLine(ImVec2(column_x, line_top), ImVec2(column_x, line_bottom), color, 1.0f);
+    }
+
+    draw_list->AddLine(
+        ImVec2(current_column_x, line_top),
+        ImVec2(current_column_x, is_last_sibling ? center_y : line_bottom),
+        color,
+        1.0f);
+    draw_list->AddLine(ImVec2(current_column_x, center_y), ImVec2(elbow_end_x, center_y), color, 1.0f);
+}
 }
 
 FilesPanel::FilesPanel() = default;
@@ -159,9 +198,10 @@ void FilesPanel::Render(EngineState& state)
 
     const std::string filter = ToLowerCopy(search_buffer_.data());
 
-    for (const FileTreeNode& node : roots_)
+    const std::vector<bool> root_ancestors;
+    for (std::size_t root_index = 0; root_index < roots_.size(); ++root_index)
     {
-        RenderNode(node, state, filter);
+        RenderNode(roots_[root_index], state, filter, 0, root_ancestors, root_index + 1 == roots_.size());
     }
 
     RenderProjectRootDropTarget(state);
@@ -302,7 +342,13 @@ std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesyste
     return build_child_nodes(build_child_nodes, std::string{});
 }
 
-void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::string_view filter)
+void FilesPanel::RenderNode(
+    const FileTreeNode& node,
+    EngineState& state,
+    std::string_view filter,
+    int depth,
+    const std::vector<bool>& ancestor_has_next,
+    bool is_last_sibling)
 {
     if (!NodeMatchesFilter(node, filter))
     {
@@ -344,6 +390,7 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
 
     const ImVec2 node_pos = ImGui::GetCursorScreenPos();
     const bool opened = ImGui::TreeNodeEx(tree_id.c_str(), flags, "%s", node.label.c_str());
+    DrawHierarchyGuides(node_pos.x, depth, ancestor_has_next, is_last_sibling);
 
     if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
     {
@@ -451,9 +498,17 @@ void FilesPanel::RenderNode(const FileTreeNode& node, EngineState& state, std::s
 
     if (opened && (!node.is_directory ? !node.children.empty() : true))
     {
-        for (const FileTreeNode& child : node.children)
+        std::vector<bool> child_ancestors = ancestor_has_next;
+        child_ancestors.push_back(!is_last_sibling);
+        for (std::size_t child_index = 0; child_index < node.children.size(); ++child_index)
         {
-            RenderNode(child, state, filter);
+            RenderNode(
+                node.children[child_index],
+                state,
+                filter,
+                depth + 1,
+                child_ancestors,
+                child_index + 1 == node.children.size());
         }
         ImGui::TreePop();
     }

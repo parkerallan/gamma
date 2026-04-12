@@ -3,6 +3,8 @@
 #include "app/VulkanContext.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
+#include "render/SceneViewportLighting.h"
+#include "render/SceneViewportRayTracing.h"
 #include "state/EngineState.h"
 
 #include <vulkan/vulkan.h>
@@ -56,6 +58,7 @@ public:
         std::uint32_t first_index = 0;
         std::uint32_t index_count = 0;
         std::uint32_t material_index = 0;
+        bool uses_alpha_transparency = false;
     };
 
     struct GpuBuffer
@@ -63,6 +66,7 @@ public:
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkDeviceSize size = 0;
+        VkDeviceAddress device_address = 0;
     };
 
     struct GpuTexture
@@ -78,7 +82,10 @@ public:
         std::filesystem::file_time_type write_time{};
         GpuBuffer vertex_buffer{};
         GpuBuffer index_buffer{};
+        std::uint32_t vertex_count = 0;
+        std::uint32_t index_count = 0;
         std::vector<GpuMeshSection> sections;
+        std::vector<SceneViewportRayTracing::MaterialRecord> materials;
         std::vector<GpuTexture> material_textures;
     };
 
@@ -112,6 +119,7 @@ public:
 
 private:
     VulkanContext* vulkan_context_ = nullptr;
+    SceneViewportRayTracing ray_tracing_{};
     VkPipelineLayout scene_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline scene_pipeline_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout material_descriptor_set_layout_ = VK_NULL_HANDLE;
@@ -119,18 +127,9 @@ private:
     GpuTexture fallback_texture_{};
     VkRenderPass offscreen_render_pass_ = VK_NULL_HANDLE;
     VkFramebuffer offscreen_framebuffer_ = VK_NULL_HANDLE;
-    VkImage offscreen_color_image_ = VK_NULL_HANDLE;
-    VkDeviceMemory offscreen_color_memory_ = VK_NULL_HANDLE;
-    VkImageView offscreen_color_view_ = VK_NULL_HANDLE;
-    VkSampler offscreen_color_sampler_ = VK_NULL_HANDLE;
-    VkDescriptorSet offscreen_color_descriptor_set_ = VK_NULL_HANDLE;
     VkImage offscreen_depth_image_ = VK_NULL_HANDLE;
     VkDeviceMemory offscreen_depth_memory_ = VK_NULL_HANDLE;
     VkImageView offscreen_depth_view_ = VK_NULL_HANDLE;
-    VkCommandPool offscreen_command_pool_ = VK_NULL_HANDLE;
-    VkCommandBuffer offscreen_command_buffer_ = VK_NULL_HANDLE;
-    VkFence offscreen_render_fence_ = VK_NULL_HANDLE;
-    VkImageLayout offscreen_color_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint32_t target_width_ = 0;
     std::uint32_t target_height_ = 0;
@@ -143,14 +142,10 @@ private:
     float grid_origin_x_ = 0.0f;
     float grid_origin_z_ = 0.0f;
     float grid_extent_ = 16.0f;
+    std::array<float, 16> view_inverse_{};
+    std::array<float, 16> projection_inverse_{};
     std::array<float, 16> view_projection_{};
-    std::array<float, 4> ambient_light_ = {1.0f, 1.0f, 1.0f, 1.0f};
-    std::array<float, 4> directional_light_color_ = {1.0f, 1.0f, 1.0f, 0.0f};
-    std::array<float, 4> directional_light_direction_ = {0.0f, -1.0f, 0.0f, 1.0f};
-    std::array<float, 4> spot_light_color_ = {1.0f, 1.0f, 1.0f, 0.0f};
-    std::array<float, 4> spot_light_direction_ = {0.0f, -1.0f, 0.0f, 1.0f};
-    std::array<float, 4> spot_light_position_ = {0.0f, 0.0f, 0.0f, 1.0f};
-    std::array<float, 4> spot_light_data_ = {0.0f, 0.0f, 0.0f, 0.0f};
+    ResolvedSceneLighting resolved_lighting_{};
     std::vector<QueuedSceneObject> queued_objects_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
     GridCacheEntry grid_cache_{};
@@ -165,4 +160,5 @@ private:
     bool EnsureMaterialResources();
     bool EnsureGridCacheEntry();
     bool EnsureMeshCacheEntry(const std::filesystem::path& model_path, const SceneViewportResolvedModel& resolved_model);
+    void SyncRayTracingScene();
 };

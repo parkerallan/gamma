@@ -1,4 +1,4 @@
-#include "panels/SceneViewportRenderer.h"
+﻿#include "panels/SceneViewportRenderer.h"
 
 #include <SDL3/SDL.h>
 
@@ -550,6 +550,18 @@ struct SceneResolvedObjectPose
 
 using SceneResolvedObjectPoseMap = std::unordered_map<std::string, SceneResolvedObjectPose>;
 
+SceneLightingResolvedObjectPoseMap BuildLightingPoseMap(const SceneResolvedObjectPoseMap& resolved_poses)
+{
+    SceneLightingResolvedObjectPoseMap lighting_poses;
+    lighting_poses.reserve(resolved_poses.size());
+    for (const auto& [name, pose] : resolved_poses)
+    {
+        lighting_poses.emplace(name, SceneLightingResolvedObjectPose{pose.world_matrix});
+    }
+
+    return lighting_poses;
+}
+
 SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_metadata)
 {
     std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
@@ -700,167 +712,6 @@ void DrawSpotLightConeGizmo(
     }
 }
 
-struct ResolvedSceneLighting
-{
-    std::array<float, 4> ambient_light = {1.0f, 1.0f, 1.0f, 1.0f};
-    std::array<float, 4> directional_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
-    std::array<float, 4> directional_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
-    std::array<float, 4> spot_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
-    std::array<float, 4> spot_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
-    std::array<float, 4> spot_light_position = {0.0f, 0.0f, 0.0f, 1.0f};
-    std::array<float, 4> spot_light_data = {0.0f, 0.0f, 0.0f, 0.0f};
-};
-
-void AccumulateEnvironmentLight(ResolvedSceneLighting& lighting, const SceneObjectAttribute& attribute, bool& found_environment_light)
-{
-    if (!found_environment_light)
-    {
-        lighting.ambient_light = {0.0f, 0.0f, 0.0f, 0.0f};
-        found_environment_light = true;
-    }
-
-    lighting.ambient_light[0] += attribute.environment_light.color[0] * attribute.environment_light.intensity;
-    lighting.ambient_light[1] += attribute.environment_light.color[1] * attribute.environment_light.intensity;
-    lighting.ambient_light[2] += attribute.environment_light.color[2] * attribute.environment_light.intensity;
-    lighting.ambient_light[3] = 1.0f;
-}
-
-void ApplyDirectionalLight(ResolvedSceneLighting& lighting, const SceneResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
-{
-    const Vec3 direction = TransformDirectionByMatrix(pose.world_matrix.data(), Vec3{0.0f, 0.0f, -1.0f});
-    lighting.directional_light_color = {
-        attribute.directional_light.color[0],
-        attribute.directional_light.color[1],
-        attribute.directional_light.color[2],
-        attribute.directional_light.intensity};
-    lighting.directional_light_direction = {direction.x, direction.y, direction.z, 1.0f};
-}
-
-void ApplySpotLight(ResolvedSceneLighting& lighting, const SceneResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
-{
-    const Vec3 direction = TransformDirectionByMatrix(pose.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
-    const Vec3 position = TransformPoint(pose.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
-    lighting.spot_light_color = {
-        attribute.spot_light.color[0],
-        attribute.spot_light.color[1],
-        attribute.spot_light.color[2],
-        attribute.spot_light.intensity};
-    lighting.spot_light_direction = {
-        direction.x,
-        direction.y,
-        direction.z,
-        std::cos(DegreesToRadians(attribute.spot_light.inner_cone_degrees))};
-    lighting.spot_light_position = {
-        position.x,
-        position.y,
-        position.z,
-        (std::max)(attribute.spot_light.range, 0.001f)};
-    lighting.spot_light_data = {
-        std::cos(DegreesToRadians(attribute.spot_light.outer_cone_degrees)),
-        0.0f,
-        0.0f,
-        0.0f};
-}
-
-void ResolvePreferredDirectLights(
-    ResolvedSceneLighting& lighting,
-    const SceneMetadata& scene_metadata,
-    const SceneResolvedObjectPoseMap& resolved_poses,
-    const std::string& selected_object_name,
-    bool& found_directional_light,
-    bool& found_spot_light)
-{
-    if (selected_object_name.empty())
-    {
-        return;
-    }
-
-    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
-    {
-        return object.name == selected_object_name;
-    });
-    if (object_it == scene_metadata.objects.end())
-    {
-        return;
-    }
-
-    const auto pose_it = resolved_poses.find(object_it->name);
-    if (pose_it == resolved_poses.end())
-    {
-        return;
-    }
-
-    for (const SceneObjectAttribute& attribute : object_it->attributes)
-    {
-        if (!found_directional_light && attribute.kind == SceneObjectAttributeKind::DirectionalLight)
-        {
-            ApplyDirectionalLight(lighting, pose_it->second, attribute);
-            found_directional_light = true;
-        }
-        else if (!found_spot_light && attribute.kind == SceneObjectAttributeKind::SpotLight)
-        {
-            ApplySpotLight(lighting, pose_it->second, attribute);
-            found_spot_light = true;
-        }
-    }
-}
-
-ResolvedSceneLighting ResolveSceneLighting(
-    const SceneMetadata& scene_metadata,
-    const SceneResolvedObjectPoseMap& resolved_poses,
-    const std::string& selected_object_name)
-{
-    ResolvedSceneLighting lighting{};
-
-    bool found_environment_light = false;
-    bool found_directional_light = false;
-    bool found_spot_light = false;
-
-    ResolvePreferredDirectLights(lighting, scene_metadata, resolved_poses, selected_object_name, found_directional_light, found_spot_light);
-
-    for (const SceneObjectMetadata& object : scene_metadata.objects)
-    {
-        const auto pose_it = resolved_poses.find(object.name);
-        if (pose_it == resolved_poses.end())
-        {
-            continue;
-        }
-
-        for (const SceneObjectAttribute& attribute : object.attributes)
-        {
-            switch (attribute.kind)
-            {
-            case SceneObjectAttributeKind::EnvironmentLight:
-                AccumulateEnvironmentLight(lighting, attribute, found_environment_light);
-                break;
-
-            case SceneObjectAttributeKind::DirectionalLight:
-                if (!found_directional_light)
-                {
-                    ApplyDirectionalLight(lighting, pose_it->second, attribute);
-                    found_directional_light = true;
-                }
-                break;
-
-            case SceneObjectAttributeKind::SpotLight:
-                if (!found_spot_light)
-                {
-                    ApplySpotLight(lighting, pose_it->second, attribute);
-                    found_spot_light = true;
-                }
-                break;
-
-            case SceneObjectAttributeKind::Camera:
-            case SceneObjectAttributeKind::None:
-            default:
-                break;
-            }
-        }
-    }
-
-    return lighting;
-}
-
 void ExpandBoundsWithObject(Vec3& minimum, Vec3& maximum, const SceneViewportRenderer::QueuedSceneObject& object, const ModelAsset& asset)
 {
     if (!asset.bounds.valid)
@@ -999,13 +850,14 @@ VkShaderModule LoadShaderModule(VkDevice device, const std::filesystem::path& pa
 }
 
 bool CreateVulkanBuffer(
-    VkPhysicalDevice physical_device,
-    VkDevice device,
+    const VulkanContext& context,
     VkDeviceSize size,
     VkBufferUsageFlags usage,
     VkMemoryPropertyFlags properties,
     SceneViewportRenderer::GpuBuffer& buffer)
 {
+    const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
+    const VkDevice device = context.GetDevice();
     VkBufferCreateInfo buffer_info = {};
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size = size;
@@ -1026,6 +878,14 @@ bool CreateVulkanBuffer(
     allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocate_info.allocationSize = requirements.size;
     allocate_info.memoryTypeIndex = FindMemoryType(physical_device, requirements.memoryTypeBits, properties);
+
+    VkMemoryAllocateFlagsInfo allocate_flags = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    if ((usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0)
+    {
+        allocate_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        allocate_info.pNext = &allocate_flags;
+    }
+
     if (allocate_info.memoryTypeIndex == UINT32_MAX)
     {
         vkDestroyBuffer(device, buffer.buffer, nullptr);
@@ -1054,6 +914,17 @@ bool CreateVulkanBuffer(
     }
 
     buffer.size = size;
+    if ((usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0)
+    {
+        const VulkanRayTracingDispatch& dispatch = context.GetRayTracingDispatch();
+        if (dispatch.get_buffer_device_address != nullptr)
+        {
+            VkBufferDeviceAddressInfo address_info = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+            address_info.buffer = buffer.buffer;
+            buffer.device_address = dispatch.get_buffer_device_address(device, &address_info);
+        }
+    }
+
     return true;
 }
 
@@ -1229,8 +1100,7 @@ bool CreateTextureFromAsset(
 
     SceneViewportRenderer::GpuBuffer staging_buffer{};
     if (!CreateVulkanBuffer(
-            physical_device,
-            device,
+            context,
             upload_size,
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1740,6 +1610,7 @@ AxisViewFlipResult DrawAxisViewFlipControl(const ImVec2& viewport_min, const ImV
 bool SceneViewportRenderer::Initialize(VulkanContext* context)
 {
     vulkan_context_ = context;
+    ray_tracing_.Initialize(context);
     return EnsurePipeline();
 }
 
@@ -1805,7 +1676,10 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
         ReleaseTexture(material_texture);
     }
 
+    entry.vertex_count = 0;
+    entry.index_count = 0;
     entry.sections.clear();
+    entry.materials.clear();
     entry.material_textures.clear();
 }
 
@@ -1825,14 +1699,7 @@ void SceneViewportRenderer::DestroyRenderTargets()
 {
     target_width_ = 0;
     target_height_ = 0;
-    offscreen_color_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (offscreen_color_descriptor_set_ != VK_NULL_HANDLE)
-    {
-        ImGui_ImplVulkan_RemoveTexture(offscreen_color_descriptor_set_);
-        offscreen_color_descriptor_set_ = VK_NULL_HANDLE;
-    }
 
     if (vulkan_context_ != nullptr)
     {
@@ -1857,26 +1724,12 @@ void SceneViewportRenderer::DestroyRenderTargets()
             vkFreeMemory(vk_device, offscreen_depth_memory_, vulkan_context_->GetAllocator());
             offscreen_depth_memory_ = VK_NULL_HANDLE;
         }
-        if (offscreen_color_view_ != VK_NULL_HANDLE)
-        {
-            vkDestroyImageView(vk_device, offscreen_color_view_, vulkan_context_->GetAllocator());
-            offscreen_color_view_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_color_image_ != VK_NULL_HANDLE)
-        {
-            vkDestroyImage(vk_device, offscreen_color_image_, vulkan_context_->GetAllocator());
-            offscreen_color_image_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_color_memory_ != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(vk_device, offscreen_color_memory_, vulkan_context_->GetAllocator());
-            offscreen_color_memory_ = VK_NULL_HANDLE;
-        }
     }
 }
 
 void SceneViewportRenderer::Shutdown()
 {
+    ray_tracing_.Shutdown();
     DestroyRenderTargets();
 
     for (auto& mesh_entry : mesh_cache_)
@@ -1911,26 +1764,10 @@ void SceneViewportRenderer::Shutdown()
             vkDestroySampler(vk_device, material_sampler_, vulkan_context_->GetAllocator());
             material_sampler_ = VK_NULL_HANDLE;
         }
-        if (offscreen_color_sampler_ != VK_NULL_HANDLE)
-        {
-            vkDestroySampler(vk_device, offscreen_color_sampler_, vulkan_context_->GetAllocator());
-            offscreen_color_sampler_ = VK_NULL_HANDLE;
-        }
         if (offscreen_render_pass_ != VK_NULL_HANDLE)
         {
             vkDestroyRenderPass(vk_device, offscreen_render_pass_, vulkan_context_->GetAllocator());
             offscreen_render_pass_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_render_fence_ != VK_NULL_HANDLE)
-        {
-            vkDestroyFence(vk_device, offscreen_render_fence_, vulkan_context_->GetAllocator());
-            offscreen_render_fence_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_command_pool_ != VK_NULL_HANDLE)
-        {
-            vkDestroyCommandPool(vk_device, offscreen_command_pool_, vulkan_context_->GetAllocator());
-            offscreen_command_pool_ = VK_NULL_HANDLE;
-            offscreen_command_buffer_ = VK_NULL_HANDLE;
         }
     }
 
@@ -1947,7 +1784,7 @@ void SceneViewportRenderer::BeginFrame()
 
 bool SceneViewportRenderer::EnsureMaterialResources()
 {
-    if (vulkan_context_ == nullptr || offscreen_command_pool_ == VK_NULL_HANDLE || material_descriptor_set_layout_ == VK_NULL_HANDLE)
+    if (vulkan_context_ == nullptr || ray_tracing_.GetCommandPool() == VK_NULL_HANDLE || material_descriptor_set_layout_ == VK_NULL_HANDLE)
     {
         return false;
     }
@@ -1980,7 +1817,7 @@ bool SceneViewportRenderer::EnsureMaterialResources()
         fallback_texture_asset.pixels = {255, 255, 255, 255};
         if (!CreateTextureFromAsset(
                 *vulkan_context_,
-                offscreen_command_pool_,
+            ray_tracing_.GetCommandPool(),
                 material_descriptor_set_layout_,
                 material_sampler_,
                 fallback_texture_asset,
@@ -2001,9 +1838,6 @@ bool SceneViewportRenderer::EnsurePipeline()
     }
 
     if (offscreen_render_pass_ != VK_NULL_HANDLE &&
-        offscreen_command_pool_ != VK_NULL_HANDLE &&
-        offscreen_render_fence_ != VK_NULL_HANDLE &&
-        offscreen_color_sampler_ != VK_NULL_HANDLE &&
         material_descriptor_set_layout_ != VK_NULL_HANDLE &&
         scene_pipeline_layout_ != VK_NULL_HANDLE &&
         scene_pipeline_ != VK_NULL_HANDLE)
@@ -2231,64 +2065,6 @@ bool SceneViewportRenderer::EnsurePipeline()
         }
     }
 
-    if (offscreen_color_sampler_ == VK_NULL_HANDLE)
-    {
-        VkSamplerCreateInfo sampler_info = {};
-        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sampler_info.magFilter = VK_FILTER_LINEAR;
-        sampler_info.minFilter = VK_FILTER_LINEAR;
-        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.maxLod = 1.0f;
-        const VkResult result = vkCreateSampler(vk_device, &sampler_info, allocator, &offscreen_color_sampler_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    if (offscreen_command_pool_ == VK_NULL_HANDLE)
-    {
-        VkCommandPoolCreateInfo pool_info = {};
-        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        pool_info.queueFamilyIndex = vulkan_context_->GetQueueFamily();
-        VkResult result = vkCreateCommandPool(vk_device, &pool_info, allocator, &offscreen_command_pool_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-
-        VkCommandBufferAllocateInfo allocate_info = {};
-        allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocate_info.commandPool = offscreen_command_pool_;
-        allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocate_info.commandBufferCount = 1;
-        result = vkAllocateCommandBuffers(vk_device, &allocate_info, &offscreen_command_buffer_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    if (offscreen_render_fence_ == VK_NULL_HANDLE)
-    {
-        VkFenceCreateInfo fence_info = {};
-        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        const VkResult result = vkCreateFence(vk_device, &fence_info, allocator, &offscreen_render_fence_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -2366,14 +2142,11 @@ bool SceneViewportRenderer::EnsureGridCacheEntry()
         return false;
     }
 
-    const VkDevice device = vulkan_context_->GetDevice();
-    const VkPhysicalDevice physical_device = vulkan_context_->GetPhysicalDevice();
     const VkDeviceSize vertex_buffer_size = static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex));
     const VkDeviceSize index_buffer_size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
 
     if (!CreateVulkanBuffer(
-            physical_device,
-            device,
+            *vulkan_context_,
             vertex_buffer_size,
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -2384,8 +2157,7 @@ bool SceneViewportRenderer::EnsureGridCacheEntry()
     }
 
     if (!CreateVulkanBuffer(
-            physical_device,
-            device,
+            *vulkan_context_,
             index_buffer_size,
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -2395,8 +2167,8 @@ bool SceneViewportRenderer::EnsureGridCacheEntry()
         return false;
     }
 
-    if (!UploadBufferData(device, grid_cache_.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
-        !UploadBufferData(device, grid_cache_.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
+    if (!UploadBufferData(vulkan_context_->GetDevice(), grid_cache_.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
+        !UploadBufferData(vulkan_context_->GetDevice(), grid_cache_.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
     {
         ReleaseGridCacheEntry();
         return false;
@@ -2412,35 +2184,20 @@ bool SceneViewportRenderer::EnsureGridCacheEntry()
 
 bool SceneViewportRenderer::EnsureRenderTargets(std::uint32_t width, std::uint32_t height)
 {
-    if (offscreen_color_image_ != VK_NULL_HANDLE && offscreen_depth_image_ != VK_NULL_HANDLE && offscreen_framebuffer_ != VK_NULL_HANDLE && target_width_ == width && target_height_ == height)
+    if (ray_tracing_.GetOutputImage() != VK_NULL_HANDLE && offscreen_depth_image_ != VK_NULL_HANDLE && offscreen_framebuffer_ != VK_NULL_HANDLE && target_width_ == width && target_height_ == height)
     {
         return true;
     }
 
     DestroyRenderTargets();
 
-    if (vulkan_context_ == nullptr)
+    if (vulkan_context_ == nullptr || !ray_tracing_.EnsureViewportOutput(width, height))
     {
         return false;
     }
 
     const VkDevice vk_device = vulkan_context_->GetDevice();
     const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
-
-    if (!CreateVulkanImage(
-            vulkan_context_->GetPhysicalDevice(),
-            vk_device,
-            width,
-            height,
-            VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            offscreen_color_image_,
-            offscreen_color_memory_,
-            offscreen_color_view_))
-    {
-        return false;
-    }
 
     if (!CreateVulkanImage(
             vulkan_context_->GetPhysicalDevice(),
@@ -2458,7 +2215,7 @@ bool SceneViewportRenderer::EnsureRenderTargets(std::uint32_t width, std::uint32
         return false;
     }
 
-    std::array<VkImageView, 2> attachments = {offscreen_color_view_, offscreen_depth_view_};
+    std::array<VkImageView, 2> attachments = {ray_tracing_.GetOutputView(), offscreen_depth_view_};
     VkFramebufferCreateInfo framebuffer_info = {};
     framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     framebuffer_info.renderPass = offscreen_render_pass_;
@@ -2475,16 +2232,8 @@ bool SceneViewportRenderer::EnsureRenderTargets(std::uint32_t width, std::uint32
         return false;
     }
 
-    offscreen_color_descriptor_set_ = ImGui_ImplVulkan_AddTexture(offscreen_color_sampler_, offscreen_color_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (offscreen_color_descriptor_set_ == VK_NULL_HANDLE)
-    {
-        DestroyRenderTargets();
-        return false;
-    }
-
     target_width_ = width;
     target_height_ = height;
-    offscreen_color_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     return true;
 }
@@ -2510,19 +2259,23 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     indices.reserve(8192);
 
     cache_entry.material_textures.resize(resolved_model.asset->materials.size());
+    cache_entry.materials.resize(resolved_model.asset->materials.size());
     for (std::size_t material_index = 0; material_index < resolved_model.asset->materials.size(); ++material_index)
     {
         const ModelMaterialAsset& material = resolved_model.asset->materials[material_index];
+        cache_entry.materials[material_index].base_color = material.base_color;
+        cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
         if (material.base_color_texture.valid)
         {
             CreateTextureFromAsset(
                 *vulkan_context_,
-                offscreen_command_pool_,
+                ray_tracing_.GetCommandPool(),
                 material_descriptor_set_layout_,
                 material_sampler_,
                 material.base_color_texture,
                 cache_entry.material_textures[material_index]);
         }
+            cache_entry.materials[material_index].base_color_view = cache_entry.material_textures[material_index].view;
     }
 
     for (const ModelMeshAsset& mesh : resolved_model.asset->meshes)
@@ -2532,6 +2285,7 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         section.material_index = mesh.material_index;
         const std::uint32_t base_vertex = static_cast<std::uint32_t>(vertices.size());
         const ModelMaterialAsset* material = mesh.material_index < resolved_model.asset->materials.size() ? &resolved_model.asset->materials[mesh.material_index] : nullptr;
+        section.uses_alpha_transparency = material != nullptr && material->uses_alpha_transparency;
 
         for (const ModelVertex& vertex : mesh.vertices)
         {
@@ -2555,16 +2309,24 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         return false;
     }
 
-    const VkDevice device = vulkan_context_->GetDevice();
-    const VkPhysicalDevice physical_device = vulkan_context_->GetPhysicalDevice();
     const VkDeviceSize vertex_buffer_size = static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex));
     const VkDeviceSize index_buffer_size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+    VkBufferUsageFlags vertex_usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    VkBufferUsageFlags index_usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (ray_tracing_.IsAvailable())
+    {
+        vertex_usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        index_usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
 
     if (!CreateVulkanBuffer(
-            physical_device,
-            device,
+            *vulkan_context_,
             vertex_buffer_size,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            vertex_usage,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
             cache_entry.vertex_buffer))
     {
@@ -2573,10 +2335,9 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     }
 
     if (!CreateVulkanBuffer(
-            physical_device,
-            device,
+            *vulkan_context_,
             index_buffer_size,
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            index_usage,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
             cache_entry.index_buffer))
     {
@@ -2584,15 +2345,87 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         return false;
     }
 
-    if (!UploadBufferData(device, cache_entry.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
-        !UploadBufferData(device, cache_entry.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
+    if (!UploadBufferData(vulkan_context_->GetDevice(), cache_entry.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
+        !UploadBufferData(vulkan_context_->GetDevice(), cache_entry.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
     {
         ReleaseMeshCacheEntry(cache_entry);
         return false;
     }
 
+    cache_entry.vertex_count = static_cast<std::uint32_t>(vertices.size());
+    cache_entry.index_count = static_cast<std::uint32_t>(indices.size());
     cache_entry.write_time = resolved_model.write_time;
     return true;
+}
+
+void SceneViewportRenderer::SyncRayTracingScene()
+{
+    if (!ray_tracing_.IsAvailable())
+    {
+        return;
+    }
+
+    std::vector<SceneViewportRayTracing::MeshInput> mesh_inputs;
+    std::vector<SceneViewportRayTracing::InstanceInput> instance_inputs;
+    std::unordered_map<std::string, std::size_t> mesh_index_by_key;
+
+    mesh_inputs.reserve(queued_objects_.size());
+    instance_inputs.reserve(queued_objects_.size());
+    mesh_index_by_key.reserve(queued_objects_.size());
+
+    for (const QueuedSceneObject& object : queued_objects_)
+    {
+        const auto mesh_entry_it = mesh_cache_.find(object.model_path);
+        if (mesh_entry_it == mesh_cache_.end())
+        {
+            continue;
+        }
+
+        const GpuMeshCacheEntry& mesh_entry = mesh_entry_it->second;
+        if (mesh_entry.vertex_buffer.device_address == 0 ||
+            mesh_entry.index_buffer.device_address == 0 ||
+            mesh_entry.vertex_count == 0 ||
+            mesh_entry.index_count < 3)
+        {
+            continue;
+        }
+
+        const std::string mesh_key = object.model_path.string();
+        if (mesh_index_by_key.find(mesh_key) == mesh_index_by_key.end())
+        {
+            SceneViewportRayTracing::MeshInput mesh_input;
+            mesh_input.key = mesh_key;
+            mesh_input.vertex_device_address = mesh_entry.vertex_buffer.device_address;
+            mesh_input.index_device_address = mesh_entry.index_buffer.device_address;
+            mesh_input.vertex_count = mesh_entry.vertex_count;
+            mesh_input.vertex_stride = static_cast<std::uint32_t>(sizeof(SceneGpuVertex));
+            mesh_input.index_count = mesh_entry.index_count;
+            mesh_input.sections.reserve(mesh_entry.sections.size());
+            for (const GpuMeshSection& section : mesh_entry.sections)
+            {
+                mesh_input.sections.push_back(SceneViewportRayTracing::MeshSectionRecord{
+                    section.first_index,
+                    section.index_count,
+                    section.material_index,
+                    section.uses_alpha_transparency});
+            }
+            mesh_input.materials = mesh_entry.materials;
+
+            mesh_index_by_key.emplace(mesh_key, mesh_inputs.size());
+            mesh_inputs.push_back(std::move(mesh_input));
+        }
+
+        SceneViewportRayTracing::InstanceInput instance_input;
+        instance_input.key = object.name;
+        instance_input.mesh_key = mesh_key;
+        instance_input.transform = object.model_matrix;
+        instance_inputs.push_back(std::move(instance_input));
+    }
+
+    if (!ray_tracing_.UpdateScene(mesh_inputs, instance_inputs))
+    {
+        SDL_Log("SceneViewportRayTracing::UpdateScene failed: %s", ray_tracing_.GetStatusMessage().c_str());
+    }
 }
 
 void SceneViewportRenderer::RenderUi(
@@ -2656,10 +2489,10 @@ void SceneViewportRenderer::RenderUi(
         return;
     }
 
-    if (offscreen_color_descriptor_set_ != VK_NULL_HANDLE)
+    if (ray_tracing_.GetOutputDescriptorSet() != VK_NULL_HANDLE)
     {
         draw_list->AddImage(
-            reinterpret_cast<ImTextureID>(offscreen_color_descriptor_set_),
+            reinterpret_cast<ImTextureID>(ray_tracing_.GetOutputDescriptorSet()),
             min,
             max,
             ImVec2(0.0f, 1.0f),
@@ -2772,6 +2605,7 @@ void SceneViewportRenderer::RenderUi(
 
     if (queued_objects_.empty() && !has_fallback_gizmo_object)
     {
+        SyncRayTracingScene();
         const char* message = "No attached models found in the active scene";
         const ImVec2 message_size = ImGui::CalcTextSize(message);
         draw_list->AddText(ImVec2((min.x + max.x - message_size.x) * 0.5f, (min.y + max.y - message_size.y) * 0.5f), IM_COL32(235, 238, 242, 255), message);
@@ -2833,14 +2667,7 @@ void SceneViewportRenderer::RenderUi(
     const std::string selected_object_name = state.HasSelectedSceneObject()
         ? state.selected_scene_object_name
         : std::string{};
-    const ResolvedSceneLighting resolved_lighting = ResolveSceneLighting(scene_metadata, resolved_object_poses, selected_object_name);
-    ambient_light_ = resolved_lighting.ambient_light;
-    directional_light_color_ = resolved_lighting.directional_light_color;
-    directional_light_direction_ = resolved_lighting.directional_light_direction;
-    spot_light_color_ = resolved_lighting.spot_light_color;
-    spot_light_direction_ = resolved_lighting.spot_light_direction;
-    spot_light_position_ = resolved_lighting.spot_light_position;
-    spot_light_data_ = resolved_lighting.spot_light_data;
+    resolved_lighting_ = ResolveSceneLighting(scene_metadata, BuildLightingPoseMap(resolved_object_poses), selected_object_name);
     const Vec3 orbit_direction = Normalize(Vec3{
         std::cos(camera_state.pitch) * std::sin(camera_state.yaw),
         std::sin(camera_state.pitch),
@@ -2866,10 +2693,14 @@ void SceneViewportRenderer::RenderUi(
     }
     const Vec3 camera_position = Add(scene_center, Multiply(orbit_direction, distance));
 
+    SyncRayTracingScene();
+
     float view_matrix[16];
     float projection_matrix[16];
     BuildLookAtMatrix(camera_position, scene_center, Vec3{0.0f, 1.0f, 0.0f}, view_matrix);
     BuildPerspectiveMatrix(55.0f, static_cast<float>(target_width) / static_cast<float>(target_height), 0.01f, 250.0f, projection_matrix);
+    InvertMatrix(view_matrix, view_inverse_.data());
+    InvertMatrix(projection_matrix, projection_inverse_.data());
     MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
 
     ImGuizmo::BeginFrame();
@@ -2991,6 +2822,7 @@ void SceneViewportRenderer::RenderUi(
         const Vec3 flipped_orbit_direction = GetOrbitCameraDirection(camera_state);
         const Vec3 flipped_camera_position = Add(scene_center, Multiply(flipped_orbit_direction, distance));
         BuildLookAtMatrix(flipped_camera_position, scene_center, Vec3{0.0f, 1.0f, 0.0f}, view_matrix);
+        InvertMatrix(view_matrix, view_inverse_.data());
         MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
     }
 
@@ -3079,10 +2911,10 @@ void SceneViewportRenderer::RenderCameraPreview(
         return;
     }
 
-    if (offscreen_color_descriptor_set_ != VK_NULL_HANDLE)
+    if (ray_tracing_.GetOutputDescriptorSet() != VK_NULL_HANDLE)
     {
         draw_list->AddImage(
-            reinterpret_cast<ImTextureID>(offscreen_color_descriptor_set_),
+            reinterpret_cast<ImTextureID>(ray_tracing_.GetOutputDescriptorSet()),
             min,
             max,
             ImVec2(0.0f, 1.0f),
@@ -3146,19 +2978,13 @@ void SceneViewportRenderer::RenderCameraPreview(
 
     if (queued_objects_.empty())
     {
+        SyncRayTracingScene();
         draw_message("No renderable models found in scene");
         ImGui::EndChild();
         return;
     }
 
-    const ResolvedSceneLighting resolved_lighting = ResolveSceneLighting(scene_metadata, resolved_object_poses, camera_object.name);
-    ambient_light_ = resolved_lighting.ambient_light;
-    directional_light_color_ = resolved_lighting.directional_light_color;
-    directional_light_direction_ = resolved_lighting.directional_light_direction;
-    spot_light_color_ = resolved_lighting.spot_light_color;
-    spot_light_direction_ = resolved_lighting.spot_light_direction;
-    spot_light_position_ = resolved_lighting.spot_light_position;
-    spot_light_data_ = resolved_lighting.spot_light_data;
+    resolved_lighting_ = ResolveSceneLighting(scene_metadata, BuildLightingPoseMap(resolved_object_poses), camera_object.name);
     grid_enabled_ = false;
 
     const Vec3 camera_position = TransformPoint(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
@@ -3173,6 +2999,8 @@ void SceneViewportRenderer::RenderCameraPreview(
         camera_up = Vec3{0.0f, 1.0f, 0.0f};
     }
 
+    SyncRayTracingScene();
+
     float view_matrix[16];
     float projection_matrix[16];
     BuildLookAtMatrix(camera_position, Add(camera_position, camera_forward), camera_up, view_matrix);
@@ -3182,6 +3010,8 @@ void SceneViewportRenderer::RenderCameraPreview(
     const float near_clip = (std::max)(camera_attributes.near_clip, 0.001f);
     const float far_clip = (std::max)(camera_attributes.far_clip, near_clip + 0.001f);
     BuildPerspectiveMatrix(field_of_view, aspect, near_clip, far_clip, projection_matrix);
+    InvertMatrix(view_matrix, view_inverse_.data());
+    InvertMatrix(projection_matrix, projection_inverse_.data());
     MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
 
     render_requested_ = true;
@@ -3192,211 +3022,21 @@ void SceneViewportRenderer::RenderCameraPreview(
 
 void SceneViewportRenderer::RenderGpu()
 {
-    if (!render_requested_ ||
-        vulkan_context_ == nullptr ||
-        offscreen_command_buffer_ == VK_NULL_HANDLE ||
-        offscreen_render_pass_ == VK_NULL_HANDLE ||
-        offscreen_framebuffer_ == VK_NULL_HANDLE ||
-        scene_pipeline_ == VK_NULL_HANDLE ||
-        scene_pipeline_layout_ == VK_NULL_HANDLE ||
-        fallback_texture_.descriptor_set == VK_NULL_HANDLE)
+    if (!render_requested_ || vulkan_context_ == nullptr)
     {
         return;
     }
 
-    EnsureGridCacheEntry();
-
-    VkDevice vk_device = vulkan_context_->GetDevice();
-    VkResult result = vkWaitForFences(vk_device, 1, &offscreen_render_fence_, VK_TRUE, UINT64_MAX);
-    VulkanContext::CheckVkResult(result);
-    result = vkResetFences(vk_device, 1, &offscreen_render_fence_);
-    VulkanContext::CheckVkResult(result);
-    result = vkResetCommandPool(vk_device, offscreen_command_pool_, 0);
-    VulkanContext::CheckVkResult(result);
-
-    VkCommandBufferBeginInfo begin_info = {};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    result = vkBeginCommandBuffer(offscreen_command_buffer_, &begin_info);
-    VulkanContext::CheckVkResult(result);
-
-    TransitionImageLayout(
-        offscreen_command_buffer_,
-        offscreen_color_image_,
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        offscreen_color_layout_,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        offscreen_color_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        offscreen_color_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-    offscreen_color_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    TransitionImageLayout(
-        offscreen_command_buffer_,
-        offscreen_depth_image_,
-        VK_IMAGE_ASPECT_DEPTH_BIT,
-        offscreen_depth_layout_,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        offscreen_depth_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        0,
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-    offscreen_depth_layout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    std::array<VkClearValue, 2> clear_values = {};
-    clear_values[0].color.float32[0] = 0.08f;
-    clear_values[0].color.float32[1] = 0.09f;
-    clear_values[0].color.float32[2] = 0.11f;
-    clear_values[0].color.float32[3] = 1.0f;
-    clear_values[1].depthStencil.depth = 1.0f;
-
-    VkRenderPassBeginInfo render_pass_info = {};
-    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    render_pass_info.renderPass = offscreen_render_pass_;
-    render_pass_info.framebuffer = offscreen_framebuffer_;
-    render_pass_info.renderArea.extent.width = target_width_;
-    render_pass_info.renderArea.extent.height = target_height_;
-    render_pass_info.clearValueCount = static_cast<std::uint32_t>(clear_values.size());
-    render_pass_info.pClearValues = clear_values.data();
-
-    vkCmdBeginRenderPass(offscreen_command_buffer_, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(offscreen_command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, scene_pipeline_);
-
-    VkViewport viewport = {};
-    viewport.width = static_cast<float>(target_width_);
-    viewport.height = static_cast<float>(target_height_);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(offscreen_command_buffer_, 0, 1, &viewport);
-
-    VkRect2D scissor = {};
-    scissor.extent.width = target_width_;
-    scissor.extent.height = target_height_;
-    vkCmdSetScissor(offscreen_command_buffer_, 0, 1, &scissor);
-
-    const VkDeviceSize vertex_offset = 0;
-
-    if (grid_enabled_ &&
-        grid_cache_.index_count > 0 &&
-        grid_cache_.vertex_buffer.buffer != VK_NULL_HANDLE &&
-        grid_cache_.index_buffer.buffer != VK_NULL_HANDLE)
+    if (!ray_tracing_.RenderFrame(
+            resolved_lighting_,
+            view_inverse_,
+            projection_inverse_,
+            grid_enabled_,
+            grid_spacing_,
+            grid_origin_x_,
+            grid_origin_z_,
+            grid_extent_))
     {
-        SceneUniformBlock grid_uniforms = {};
-        SetIdentity(grid_uniforms.model);
-        std::memcpy(grid_uniforms.model_view_projection, view_projection_.data(), sizeof(grid_uniforms.model_view_projection));
-        StoreVec4(ambient_light_, grid_uniforms.ambient_light);
-        StoreVec4(directional_light_color_, grid_uniforms.directional_light_color);
-        StoreVec4(directional_light_direction_, grid_uniforms.directional_light_direction);
-        StoreVec4(spot_light_color_, grid_uniforms.spot_light_color);
-        StoreVec4(spot_light_direction_, grid_uniforms.spot_light_direction);
-        StoreVec4(spot_light_position_, grid_uniforms.spot_light_position);
-        StoreVec4(spot_light_data_, grid_uniforms.spot_light_data);
-
-        vkCmdPushConstants(
-            offscreen_command_buffer_,
-            scene_pipeline_layout_,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(SceneUniformBlock),
-            &grid_uniforms);
-        vkCmdBindDescriptorSets(
-            offscreen_command_buffer_,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            scene_pipeline_layout_,
-            0,
-            1,
-            &fallback_texture_.descriptor_set,
-            0,
-            nullptr);
-        vkCmdBindVertexBuffers(offscreen_command_buffer_, 0, 1, &grid_cache_.vertex_buffer.buffer, &vertex_offset);
-        vkCmdBindIndexBuffer(offscreen_command_buffer_, grid_cache_.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(offscreen_command_buffer_, grid_cache_.index_count, 1, 0, 0, 0);
+        SDL_Log("SceneViewportRayTracing::RenderFrame failed: %s", ray_tracing_.GetStatusMessage().c_str());
     }
-
-    for (const QueuedSceneObject& object : queued_objects_)
-    {
-        const auto mesh_entry_it = mesh_cache_.find(object.model_path);
-        if (mesh_entry_it == mesh_cache_.end())
-        {
-            continue;
-        }
-
-        const GpuMeshCacheEntry& mesh_entry = mesh_entry_it->second;
-        if (mesh_entry.vertex_buffer.buffer == VK_NULL_HANDLE || mesh_entry.index_buffer.buffer == VK_NULL_HANDLE)
-        {
-            continue;
-        }
-
-        SceneUniformBlock scene_uniforms = {};
-        BuildModelMatrix(object, scene_uniforms.model);
-        MultiplyMatrix(view_projection_.data(), scene_uniforms.model, scene_uniforms.model_view_projection);
-        StoreVec4(ambient_light_, scene_uniforms.ambient_light);
-        StoreVec4(directional_light_color_, scene_uniforms.directional_light_color);
-        StoreVec4(directional_light_direction_, scene_uniforms.directional_light_direction);
-        StoreVec4(spot_light_color_, scene_uniforms.spot_light_color);
-        StoreVec4(spot_light_direction_, scene_uniforms.spot_light_direction);
-        StoreVec4(spot_light_position_, scene_uniforms.spot_light_position);
-        StoreVec4(spot_light_data_, scene_uniforms.spot_light_data);
-        vkCmdPushConstants(
-            offscreen_command_buffer_,
-            scene_pipeline_layout_,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(SceneUniformBlock),
-            &scene_uniforms);
-
-        vkCmdBindVertexBuffers(offscreen_command_buffer_, 0, 1, &mesh_entry.vertex_buffer.buffer, &vertex_offset);
-        vkCmdBindIndexBuffer(offscreen_command_buffer_, mesh_entry.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-
-        for (const GpuMeshSection& section : mesh_entry.sections)
-        {
-            VkDescriptorSet descriptor_set = fallback_texture_.descriptor_set;
-            if (section.material_index < mesh_entry.material_textures.size())
-            {
-                const GpuTexture& material_texture = mesh_entry.material_textures[section.material_index];
-                if (material_texture.descriptor_set != VK_NULL_HANDLE)
-                {
-                    descriptor_set = material_texture.descriptor_set;
-                }
-            }
-
-            vkCmdBindDescriptorSets(
-                offscreen_command_buffer_,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                scene_pipeline_layout_,
-                0,
-                1,
-                &descriptor_set,
-                0,
-                nullptr);
-            vkCmdDrawIndexed(offscreen_command_buffer_, section.index_count, 1, section.first_index, 0, 0);
-        }
-    }
-
-    vkCmdEndRenderPass(offscreen_command_buffer_);
-
-    TransitionImageLayout(
-        offscreen_command_buffer_,
-        offscreen_color_image_,
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT);
-    offscreen_color_layout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    result = vkEndCommandBuffer(offscreen_command_buffer_);
-    VulkanContext::CheckVkResult(result);
-
-    VkSubmitInfo submit_info = {};
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &offscreen_command_buffer_;
-    result = vkQueueSubmit(vulkan_context_->GetQueue(), 1, &submit_info, offscreen_render_fence_);
-    VulkanContext::CheckVkResult(result);
-    result = vkWaitForFences(vk_device, 1, &offscreen_render_fence_, VK_TRUE, UINT64_MAX);
-    VulkanContext::CheckVkResult(result);
 }

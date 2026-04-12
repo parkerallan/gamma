@@ -118,27 +118,34 @@ set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
 set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
 set(ENGINE_SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/shaders)
 set(ENGINE_SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
+set(ENGINE_SHADER_FLAGS --target-env=vulkan1.2 --target-spv=spv1.4)
 
-add_custom_command(
-    OUTPUT ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=vert -o ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.vert
-    DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.vert
-    VERBATIM
-)
+function(add_engine_shader source_name shader_stage)
+    add_custom_command(
+        OUTPUT ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
+        COMMAND ${GLSLC_EXECUTABLE} ${ENGINE_SHADER_FLAGS} -fshader-stage=${shader_stage} -o ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
+        DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
+        VERBATIM
+    )
 
-add_custom_command(
-    OUTPUT ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=frag -o ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.frag
-    DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/scene_viewport.frag
-    VERBATIM
-)
+    list(APPEND ENGINE_SHADER_OUTPUTS ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv)
+    set(ENGINE_SHADER_OUTPUTS ${ENGINE_SHADER_OUTPUTS} PARENT_SCOPE)
+endfunction()
+
+set(ENGINE_SHADER_OUTPUTS)
+add_engine_shader(scene_viewport.vert vert)
+add_engine_shader(scene_viewport.frag frag)
+add_engine_shader(scene_viewport_rt.rgen rgen)
+add_engine_shader(scene_viewport_rt.rmiss rmiss)
+add_engine_shader(scene_viewport_rt_shadow.rmiss rmiss)
+add_engine_shader(scene_viewport_rt.rchit rchit)
+add_engine_shader(scene_viewport_rt_shadow.rchit rchit)
+add_engine_shader(scene_viewport_rt_primary.rahit rahit)
+add_engine_shader(scene_viewport_rt_shadow.rahit rahit)
 
 add_custom_target(engine_scene_shaders
-    DEPENDS
-        ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv
-        ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv
+    DEPENDS ${ENGINE_SHADER_OUTPUTS}
 )
 
 add_library(imgui STATIC
@@ -209,6 +216,8 @@ add_executable(engine
     src/panels/FilesPanel.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
+    src/render/SceneViewportLighting.cpp
+    src/render/SceneViewportRayTracing.cpp
     src/panels/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/panels/TextureInfoRenderer.cpp
@@ -247,8 +256,7 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E make_directory
             $<TARGET_FILE_DIR:engine>/shaders
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.vert.spv
-            ${ENGINE_SHADER_BINARY_DIR}/scene_viewport.frag.spv
+            ${ENGINE_SHADER_OUTPUTS}
             $<TARGET_FILE_DIR:engine>/shaders
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_RUNTIME_DLLS:engine>
