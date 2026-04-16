@@ -4,7 +4,7 @@
 #include "assets/ModelAsset.h"
 #include "assets/ModelMetadata.h"
 #include "assets/SceneMetadata.h"
-#include "panels/SceneViewportRenderer.h"
+#include "render/SceneViewportRenderer.h"
 #include "panels/TextureInfoRenderer.h"
 #include "state/EngineState.h"
 

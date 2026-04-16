@@ -1,4 +1,4 @@
-﻿#include "panels/SceneViewportRenderer.h"
+﻿#include "render/SceneViewportRenderer.h"
 
 #include <SDL3/SDL.h>
 

@@ -5,7 +5,7 @@
 #include "assets/SceneMetadata.h"
 #include "graph/GraphDocument.h"
 #include "graph/NodeLibrary.h"
-#include "panels/SceneViewportRenderer.h"
+#include "render/SceneViewportRenderer.h"
 #include "state/EngineState.h"
 
 #include <filesystem>

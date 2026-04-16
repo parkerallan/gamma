@@ -1,7 +1,7 @@
 #pragma once
 
 #include "app/VulkanContext.h"
-#include "render/SceneViewportLighting.h"
+#include "render/Lighting.h"
 
 #include <array>
 #include <cstdint>

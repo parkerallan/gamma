@@ -1,4 +1,4 @@
-#include "render/SceneViewportLighting.h"
+#include "render/Lighting.h"
 
 #include <algorithm>
 #include <cmath>

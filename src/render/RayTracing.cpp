@@ -1,4 +1,4 @@
-#include "render/SceneViewportRayTracing.h"
+#include "render/Raytracing.h"
 
 #include <SDL3/SDL.h>
 

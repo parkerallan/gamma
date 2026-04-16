@@ -3,8 +3,8 @@
 #include "app/VulkanContext.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
-#include "render/SceneViewportLighting.h"
-#include "render/SceneViewportRayTracing.h"
+#include "render/Lighting.h"
+#include "render/Raytracing.h"
 #include "state/EngineState.h"
 
 #include <vulkan/vulkan.h>

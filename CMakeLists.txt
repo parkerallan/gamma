@@ -216,9 +216,9 @@ add_executable(engine
     src/panels/FilesPanel.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
-    src/render/SceneViewportLighting.cpp
-    src/render/SceneViewportRayTracing.cpp
-    src/panels/SceneViewportRenderer.cpp
+    src/render/Lighting.cpp
+    src/render/Raytracing.cpp
+    src/render/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/panels/TextureInfoRenderer.cpp
     src/panels/WorkspacePanel.cpp
