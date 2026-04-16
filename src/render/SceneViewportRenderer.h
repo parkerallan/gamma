@@ -74,7 +74,15 @@ public:
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    };
+
+    struct GpuMaterialTextures
+    {
+        GpuTexture base_color{};
+        GpuTexture metallic_roughness{};
+        GpuTexture normal{};
+        GpuTexture occlusion{};
+        GpuTexture emissive{};
     };
 
     struct GpuMeshCacheEntry
@@ -86,18 +94,7 @@ public:
         std::uint32_t index_count = 0;
         std::vector<GpuMeshSection> sections;
         std::vector<SceneViewportRayTracing::MaterialRecord> materials;
-        std::vector<GpuTexture> material_textures;
-    };
-
-    struct GridCacheEntry
-    {
-        GpuBuffer vertex_buffer{};
-        GpuBuffer index_buffer{};
-        std::uint32_t index_count = 0;
-        float spacing = 0.0f;
-        float extent = 0.0f;
-        float origin_x = 0.0f;
-        float origin_z = 0.0f;
+        std::vector<GpuMaterialTextures> material_textures;
     };
 
     struct QueuedSceneObject
@@ -120,19 +117,6 @@ public:
 private:
     VulkanContext* vulkan_context_ = nullptr;
     SceneViewportRayTracing ray_tracing_{};
-    VkPipelineLayout scene_pipeline_layout_ = VK_NULL_HANDLE;
-    VkPipeline scene_pipeline_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout material_descriptor_set_layout_ = VK_NULL_HANDLE;
-    VkSampler material_sampler_ = VK_NULL_HANDLE;
-    GpuTexture fallback_texture_{};
-    VkRenderPass offscreen_render_pass_ = VK_NULL_HANDLE;
-    VkFramebuffer offscreen_framebuffer_ = VK_NULL_HANDLE;
-    VkImage offscreen_depth_image_ = VK_NULL_HANDLE;
-    VkDeviceMemory offscreen_depth_memory_ = VK_NULL_HANDLE;
-    VkImageView offscreen_depth_view_ = VK_NULL_HANDLE;
-    VkImageLayout offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-    std::uint32_t target_width_ = 0;
-    std::uint32_t target_height_ = 0;
     bool render_requested_ = false;
     bool middle_mouse_panning_ = false;
     std::uint32_t gizmo_operation_ = 0;
@@ -148,17 +132,10 @@ private:
     ResolvedSceneLighting resolved_lighting_{};
     std::vector<QueuedSceneObject> queued_objects_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
-    GridCacheEntry grid_cache_{};
 
     void ReleaseBuffer(GpuBuffer& buffer);
     void ReleaseTexture(GpuTexture& texture);
     void ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry);
-    void ReleaseGridCacheEntry();
-    void DestroyRenderTargets();
-    bool EnsurePipeline();
-    bool EnsureRenderTargets(std::uint32_t width, std::uint32_t height);
-    bool EnsureMaterialResources();
-    bool EnsureGridCacheEntry();
     bool EnsureMeshCacheEntry(const std::filesystem::path& model_path, const SceneViewportResolvedModel& resolved_model);
     void SyncRayTracingScene();
 };

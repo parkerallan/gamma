@@ -28,6 +28,7 @@ struct SceneVertex
     vec3 normal;
     vec2 uv;
     vec4 color;
+    vec4 tangent;
 };
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer
@@ -63,7 +64,13 @@ struct SectionRecord
 struct MaterialRecord
 {
     vec4 base_color;
-    uint texture_index;
+    vec4 emissive_data;
+    vec4 surface_data;
+    uint base_color_texture_index;
+    uint metallic_roughness_texture_index;
+    uint normal_texture_index;
+    uint occlusion_texture_index;
+    uint emissive_texture_index;
     uint uses_alpha_transparency;
     uint pad0;
     uint pad1;
@@ -84,7 +91,7 @@ layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
     MaterialRecord materials[];
 };
 
-layout(set = 0, binding = 6) uniform sampler2D base_color_textures[256];
+layout(set = 0, binding = 6) uniform sampler2D material_textures[256];
 
 uint find_section_index(MeshRecord mesh, uint first_index)
 {
@@ -104,9 +111,9 @@ uint find_section_index(MeshRecord mesh, uint first_index)
 float sample_alpha(MaterialRecord material, vec2 uv, vec4 vertex_color)
 {
     float alpha = vertex_color.a;
-    if (material.texture_index != 0xFFFFFFFFu && material.texture_index < scene_uniforms.counts.w)
+    if (material.base_color_texture_index != 0xFFFFFFFFu && material.base_color_texture_index < scene_uniforms.counts.w)
     {
-        alpha *= texture(base_color_textures[nonuniformEXT(int(material.texture_index))], uv).a;
+        alpha *= texture(material_textures[nonuniformEXT(int(material.base_color_texture_index))], uv).a;
     }
 
     return clamp(alpha, 0.0, 1.0);

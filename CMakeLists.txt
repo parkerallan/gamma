@@ -134,8 +134,6 @@ function(add_engine_shader source_name shader_stage)
 endfunction()
 
 set(ENGINE_SHADER_OUTPUTS)
-add_engine_shader(scene_viewport.vert vert)
-add_engine_shader(scene_viewport.frag frag)
 add_engine_shader(scene_viewport_rt.rgen rgen)
 add_engine_shader(scene_viewport_rt.rmiss rmiss)
 add_engine_shader(scene_viewport_rt_shadow.rmiss rmiss)

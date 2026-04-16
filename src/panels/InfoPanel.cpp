@@ -706,6 +706,27 @@ void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
                     {
                         ImGui::Text("Opacity: %.2f", material.opacity);
                     }
+                    ImGui::Text("Alpha Mode: %s", material.alpha_mode.c_str());
+                    if (material.has_alpha_cutoff)
+                    {
+                        ImGui::Text("Alpha Cutoff: %.2f", material.alpha_cutoff);
+                    }
+                    if (material.double_sided)
+                    {
+                        ImGui::TextUnformatted("Double-sided");
+                    }
+                    if (material.unlit)
+                    {
+                        ImGui::TextUnformatted("Unlit");
+                    }
+                    if (material.has_normal_scale)
+                    {
+                        ImGui::Text("Normal Scale: %.2f", material.normal_scale);
+                    }
+                    if (material.has_occlusion_strength)
+                    {
+                        ImGui::Text("Occlusion Strength: %.2f", material.occlusion_strength);
+                    }
                     if (material.has_roughness)
                     {
                         ImGui::Text("Roughness: %.2f", material.roughness);

@@ -952,10 +952,23 @@ bool SceneViewportRayTracing::UpdateScene(const std::vector<MeshInput>& meshes, 
         {
             MaterialRecordGpu material_record{};
             material_record.base_color = material.base_color;
+            material_record.emissive_data[0] = material.emissive_color[0];
+            material_record.emissive_data[1] = material.emissive_color[1];
+            material_record.emissive_data[2] = material.emissive_color[2];
+            material_record.emissive_data[3] = material.normal_scale;
+            material_record.surface_data[0] = material.metallic_factor;
+            material_record.surface_data[1] = material.roughness_factor;
+            material_record.surface_data[2] = material.occlusion_strength;
             material_record.uses_alpha_transparency = material.uses_alpha_transparency ? 1u : 0u;
-            if (material.base_color_view != VK_NULL_HANDLE && texture_descriptors_cpu_.size() < kMaxTextures)
+
+            auto resolve_texture_index = [&](VkImageView image_view) -> std::uint32_t
             {
-                const std::uintptr_t view_key = reinterpret_cast<std::uintptr_t>(material.base_color_view);
+                if (image_view == VK_NULL_HANDLE || texture_descriptors_cpu_.size() >= kMaxTextures)
+                {
+                    return 0xFFFFFFFFu;
+                }
+
+                const std::uintptr_t view_key = reinterpret_cast<std::uintptr_t>(image_view);
                 auto texture_it = texture_index_by_view.find(view_key);
                 if (texture_it == texture_index_by_view.end())
                 {
@@ -964,15 +977,19 @@ bool SceneViewportRayTracing::UpdateScene(const std::vector<MeshInput>& meshes, 
 
                     VkDescriptorImageInfo image_info = {};
                     image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    image_info.imageView = material.base_color_view;
+                    image_info.imageView = image_view;
                     texture_descriptors_cpu_.push_back(image_info);
-                    material_record.texture_index = texture_index;
+                    return texture_index;
                 }
-                else
-                {
-                    material_record.texture_index = texture_it->second;
-                }
-            }
+
+                return texture_it->second;
+            };
+
+            material_record.base_color_texture_index = resolve_texture_index(material.base_color_view);
+            material_record.metallic_roughness_texture_index = resolve_texture_index(material.metallic_roughness_view);
+            material_record.normal_texture_index = resolve_texture_index(material.normal_view);
+            material_record.occlusion_texture_index = resolve_texture_index(material.occlusion_view);
+            material_record.emissive_texture_index = resolve_texture_index(material.emissive_view);
 
             material_records_cpu_.push_back(material_record);
         }

@@ -2,10 +2,13 @@
 
 #include "imgui.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #ifdef _WIN32
@@ -19,6 +22,8 @@
 
 namespace
 {
+using json = nlohmann::json;
+
 std::string TrimName(std::string value)
 {
     const auto is_space = [](unsigned char character)
@@ -150,6 +155,265 @@ std::filesystem::path GetAvailablePath(const std::filesystem::path& destination_
     return {};
 }
 
+std::filesystem::path GetAvailableDirectoryPath(const std::filesystem::path& destination_directory, const std::string& directory_name)
+{
+    std::filesystem::path candidate_path = destination_directory / directory_name;
+    if (!std::filesystem::exists(candidate_path))
+    {
+        return candidate_path;
+    }
+
+    for (int index = 1; index < 1000; ++index)
+    {
+        candidate_path = destination_directory / (directory_name + " (" + std::to_string(index) + ")");
+        if (!std::filesystem::exists(candidate_path))
+        {
+            return candidate_path;
+        }
+    }
+
+    return {};
+}
+
+int DecodeHexNibble(char character)
+{
+    if (character >= '0' && character <= '9')
+    {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f')
+    {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F')
+    {
+        return character - 'A' + 10;
+    }
+    return -1;
+}
+
+std::string PercentDecode(std::string_view value)
+{
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index)
+    {
+        if (value[index] == '%' && index + 2 < value.size())
+        {
+            const int high = DecodeHexNibble(value[index + 1]);
+            const int low = DecodeHexNibble(value[index + 2]);
+            if (high >= 0 && low >= 0)
+            {
+                decoded.push_back(static_cast<char>((high << 4) | low));
+                index += 2;
+                continue;
+            }
+        }
+
+        decoded.push_back(value[index]);
+    }
+
+    return decoded;
+}
+
+bool IsPortableRelativeSubpath(const std::filesystem::path& path)
+{
+    if (path.empty() || path.is_absolute())
+    {
+        return false;
+    }
+
+    const std::string normalized = path.generic_string();
+    return normalized != ".." && normalized.rfind("../", 0) != 0;
+}
+
+std::vector<std::filesystem::path> CollectGltfExternalDependencies(const std::filesystem::path& source_path)
+{
+    std::ifstream input(source_path, std::ios::binary);
+    if (!input)
+    {
+        return {};
+    }
+
+    json document;
+    try
+    {
+        input >> document;
+    }
+    catch (...)
+    {
+        return {};
+    }
+
+    std::vector<std::filesystem::path> dependencies;
+    const auto append_dependencies = [&](const char* key)
+    {
+        const auto it = document.find(key);
+        if (it == document.end() || !it->is_array())
+        {
+            return;
+        }
+
+        for (const json& entry : *it)
+        {
+            if (!entry.is_object())
+            {
+                continue;
+            }
+
+            const auto uri_it = entry.find("uri");
+            if (uri_it == entry.end() || !uri_it->is_string())
+            {
+                continue;
+            }
+
+            const std::string uri = uri_it->get<std::string>();
+            if (uri.empty() || uri.rfind("data:", 0) == 0 || uri.find("://") != std::string::npos)
+            {
+                continue;
+            }
+
+            const std::filesystem::path decoded_path = std::filesystem::path(PercentDecode(uri)).lexically_normal();
+            if (!IsPortableRelativeSubpath(decoded_path))
+            {
+                continue;
+            }
+
+            dependencies.push_back(decoded_path);
+        }
+    };
+
+    append_dependencies("buffers");
+    append_dependencies("images");
+
+    std::sort(dependencies.begin(), dependencies.end());
+    dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+    return dependencies;
+}
+
+bool CopyFileWithParentDirectories(
+    const std::filesystem::path& source_path,
+    const std::filesystem::path& destination_path,
+    std::string& failure_reason)
+{
+    std::error_code error;
+    std::filesystem::create_directories(destination_path.parent_path(), error);
+    if (error)
+    {
+        failure_reason = "Failed to prepare import directory: " + destination_path.parent_path().string();
+        return false;
+    }
+
+    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, error);
+    if (error)
+    {
+        failure_reason = "Failed to copy import dependency: " + source_path.string();
+        return false;
+    }
+
+    return true;
+}
+
+bool CopyImportedModel(
+    const std::filesystem::path& source_path,
+    const std::filesystem::path& destination_directory,
+    std::filesystem::path& imported_model_path,
+    std::string& failure_reason)
+{
+    const std::string extension = source_path.extension().string();
+    std::string lowered_extension = extension;
+    std::transform(lowered_extension.begin(), lowered_extension.end(), lowered_extension.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+
+    if (lowered_extension != ".gltf")
+    {
+        imported_model_path = GetAvailablePath(destination_directory, source_path);
+        if (imported_model_path.empty())
+        {
+            failure_reason = "Cannot import model: failed to choose a destination name";
+            return false;
+        }
+
+        std::error_code copy_error;
+        std::filesystem::copy_file(source_path, imported_model_path, std::filesystem::copy_options::none, copy_error);
+        if (copy_error)
+        {
+            failure_reason = "Failed to import model into: " + destination_directory.string();
+            return false;
+        }
+
+        return true;
+    }
+
+    const std::vector<std::filesystem::path> dependencies = CollectGltfExternalDependencies(source_path);
+    if (dependencies.empty())
+    {
+        imported_model_path = GetAvailablePath(destination_directory, source_path);
+        if (imported_model_path.empty())
+        {
+            failure_reason = "Cannot import model: failed to choose a destination name";
+            return false;
+        }
+
+        std::error_code copy_error;
+        std::filesystem::copy_file(source_path, imported_model_path, std::filesystem::copy_options::none, copy_error);
+        if (copy_error)
+        {
+            failure_reason = "Failed to import model into: " + destination_directory.string();
+            return false;
+        }
+
+        return true;
+    }
+
+    const std::filesystem::path package_directory = GetAvailableDirectoryPath(destination_directory, source_path.stem().string());
+    if (package_directory.empty())
+    {
+        failure_reason = "Cannot import model: failed to choose a destination folder";
+        return false;
+    }
+
+    std::error_code directory_error;
+    std::filesystem::create_directories(package_directory, directory_error);
+    if (directory_error)
+    {
+        failure_reason = "Failed to prepare model import folder: " + package_directory.string();
+        return false;
+    }
+
+    imported_model_path = package_directory / source_path.filename();
+    if (!CopyFileWithParentDirectories(source_path, imported_model_path, failure_reason))
+    {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(package_directory, cleanup_error);
+        return false;
+    }
+
+    for (const std::filesystem::path& dependency : dependencies)
+    {
+        const std::filesystem::path source_dependency_path = (source_path.parent_path() / dependency).lexically_normal();
+        if (!std::filesystem::exists(source_dependency_path))
+        {
+            failure_reason = "Cannot import glTF: missing referenced file " + dependency.generic_string();
+            std::error_code cleanup_error;
+            std::filesystem::remove_all(package_directory, cleanup_error);
+            return false;
+        }
+
+        const std::filesystem::path destination_dependency_path = package_directory / dependency;
+        if (!CopyFileWithParentDirectories(source_dependency_path, destination_dependency_path, failure_reason))
+        {
+            std::error_code cleanup_error;
+            std::filesystem::remove_all(package_directory, cleanup_error);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 std::filesystem::path ResolveSceneTarget(const EngineState& state)
 {
     if (state.HasSelectedItem() && HasExtension(state.selected_item_path, {".scene"}))
@@ -264,12 +528,13 @@ std::filesystem::path ShowNativeImportDialog(const wchar_t* title, const COMDLG_
 std::filesystem::path ShowNativeModelImportDialog()
 {
     const COMDLG_FILTERSPEC filters[] = {
-        {L"Supported Models", L"*.fbx;*.glb"},
+        {L"Supported Models", L"*.fbx;*.glb;*.gltf"},
         {L"FBX", L"*.fbx"},
         {L"Binary glTF", L"*.glb"},
+        {L"glTF", L"*.gltf"},
         {L"All Files", L"*.*"},
     };
-    return ShowNativeImportDialog(L"Import Model (.fbx/.glb)", filters, std::size(filters));
+    return ShowNativeImportDialog(L"Import Model (.fbx/.glb/.gltf)", filters, std::size(filters));
 }
 
 std::filesystem::path ShowNativeMaterialImportDialog()
@@ -347,7 +612,7 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
 
         ImGui::Separator();
 
-        if (ImGui::MenuItem("Import Model (.fbx/.glb)..."))
+        if (ImGui::MenuItem("Import Model (.fbx/.glb/.gltf)..."))
         {
             changed = ImportModel(state, directory_path) || changed;
         }
@@ -609,24 +874,17 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
         return false;
     }
 
-    if (!HasExtension(source_path, {".fbx", ".glb"}))
+    if (!HasExtension(source_path, {".fbx", ".glb", ".gltf"}))
     {
-        state.AddLog("Cannot import model: only .fbx and .glb are supported");
+        state.AddLog("Cannot import model: only .fbx, .glb, and .gltf are supported");
         return false;
     }
 
-    const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
-    if (destination_path.empty())
+    std::filesystem::path destination_path;
+    std::string import_failure_reason;
+    if (!CopyImportedModel(source_path, destination_directory, destination_path, import_failure_reason))
     {
-        state.AddLog("Cannot import model: failed to choose a destination name");
-        return false;
-    }
-
-    std::error_code copy_error;
-    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
-    if (copy_error)
-    {
-        state.AddLog("Failed to import model into: " + state.GetDisplayPath(destination_directory));
+        state.AddLog(import_failure_reason.empty() ? "Failed to import model" : import_failure_reason);
         return false;
     }
 

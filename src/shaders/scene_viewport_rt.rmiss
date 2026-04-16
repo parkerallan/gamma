@@ -26,6 +26,24 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;
 
+vec3 evaluate_sky(vec3 ray_direction)
+{
+    vec3 ambient = scene_uniforms.ambient_light.rgb * max(scene_uniforms.ambient_light.a, 0.35);
+    vec3 horizon = max(vec3(0.10, 0.11, 0.13), ambient * 0.7 + vec3(0.05, 0.05, 0.06));
+    vec3 zenith = max(vec3(0.18, 0.22, 0.30), ambient * 1.3 + vec3(0.08, 0.10, 0.14));
+    float t = clamp(ray_direction.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 color = mix(horizon, zenith, smoothstep(0.0, 1.0, t));
+
+    if (scene_uniforms.directional_light_color.a > 0.0)
+    {
+        vec3 sun_direction = normalize(-scene_uniforms.directional_light_direction.xyz);
+        float sun = pow(max(dot(ray_direction, sun_direction), 0.0), 256.0);
+        color += scene_uniforms.directional_light_color.rgb * scene_uniforms.directional_light_color.a * sun;
+    }
+
+    return color;
+}
+
 vec3 evaluate_grid(vec3 world_position)
 {
     if (scene_uniforms.grid_data.x < 0.5)
@@ -62,7 +80,7 @@ vec3 evaluate_grid(vec3 world_position)
 
 void main()
 {
-    vec3 color = vec3(0.08, 0.09, 0.11);
+    vec3 color = evaluate_sky(normalize(gl_WorldRayDirectionEXT));
     if (abs(gl_WorldRayDirectionEXT.y) > 0.0001)
     {
         float plane_t = -gl_WorldRayOriginEXT.y / gl_WorldRayDirectionEXT.y;

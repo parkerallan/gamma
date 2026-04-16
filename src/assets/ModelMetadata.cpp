@@ -1,5 +1,6 @@
 #include "assets/ModelMetadata.h"
 
+#include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
@@ -40,6 +41,15 @@ std::string ToLowerExtension(const std::filesystem::path& path)
 std::string ToDisplayString(const aiString& value)
 {
     return value.length > 0 ? std::string(value.C_Str()) : std::string();
+}
+
+std::string ToUpper(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::toupper(character));
+    });
+    return value;
 }
 
 std::string NormalizeMaterialName(const aiMaterial* material, unsigned int index)
@@ -90,9 +100,44 @@ bool ReadFloat(const aiMaterial* material, const char* pKey, unsigned int type, 
     return material->Get(pKey, type, index, value) == AI_SUCCESS;
 }
 
-const std::array<std::pair<aiTextureType, const char*>, 8> kTextureSlots = {{
+bool ReadBool(const aiMaterial* material, const char* pKey, unsigned int type, unsigned int index, bool& value)
+{
+    if (material == nullptr)
+    {
+        return false;
+    }
+
+    int raw_value = value ? 1 : 0;
+    if (material->Get(pKey, type, index, raw_value) != AI_SUCCESS)
+    {
+        return false;
+    }
+
+    value = raw_value != 0;
+    return true;
+}
+
+bool ReadString(const aiMaterial* material, const char* pKey, unsigned int type, unsigned int index, std::string& value)
+{
+    if (material == nullptr)
+    {
+        return false;
+    }
+
+    aiString string_value;
+    if (material->Get(pKey, type, index, string_value) != AI_SUCCESS)
+    {
+        return false;
+    }
+
+    value = ToDisplayString(string_value);
+    return !value.empty();
+}
+
+const std::array<std::pair<aiTextureType, const char*>, 9> kTextureSlots = {{
     {aiTextureType_BASE_COLOR, "Base Color"},
     {aiTextureType_DIFFUSE, "Diffuse"},
+    {aiTextureType_UNKNOWN, "Metallic-Roughness"},
     {aiTextureType_NORMALS, "Normal"},
     {aiTextureType_METALNESS, "Metalness"},
     {aiTextureType_DIFFUSE_ROUGHNESS, "Roughness"},
@@ -105,7 +150,7 @@ const std::array<std::pair<aiTextureType, const char*>, 8> kTextureSlots = {{
 bool ModelMetadata::IsSupportedModelPath(const std::filesystem::path& path)
 {
     const std::string extension = ToLowerExtension(path);
-    return extension == ".fbx" || extension == ".glb";
+    return extension == ".fbx" || extension == ".glb" || extension == ".gltf";
 }
 
 ModelMetadata LoadModelMetadata(const std::filesystem::path& path)
@@ -155,9 +200,20 @@ ModelMetadata LoadModelMetadata(const std::filesystem::path& path)
             material_metadata.base_color = ReadColor(material, AI_MATKEY_COLOR_DIFFUSE);
         }
         material_metadata.emissive_color = ReadColor(material, AI_MATKEY_COLOR_EMISSIVE);
+        ReadString(material, AI_MATKEY_GLTF_ALPHAMODE, material_metadata.alpha_mode);
+        material_metadata.alpha_mode = ToUpper(material_metadata.alpha_mode);
+        material_metadata.has_alpha_cutoff = ReadFloat(material, AI_MATKEY_GLTF_ALPHACUTOFF, material_metadata.alpha_cutoff);
+        ReadBool(material, AI_MATKEY_TWOSIDED, material_metadata.double_sided);
         material_metadata.has_opacity = ReadFloat(material, AI_MATKEY_OPACITY, material_metadata.opacity);
+        material_metadata.has_normal_scale = material != nullptr && material->Get(AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_NORMALS, 0), material_metadata.normal_scale) == AI_SUCCESS;
+        material_metadata.has_occlusion_strength = material != nullptr && material->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_AMBIENT_OCCLUSION, 0), material_metadata.occlusion_strength) == AI_SUCCESS;
         material_metadata.has_roughness = ReadFloat(material, AI_MATKEY_ROUGHNESS_FACTOR, material_metadata.roughness);
         material_metadata.has_metalness = ReadFloat(material, AI_MATKEY_METALLIC_FACTOR, material_metadata.metalness);
+
+        int shading_model = 0;
+        material_metadata.unlit = material != nullptr &&
+            material->Get(AI_MATKEY_SHADING_MODEL, shading_model) == AI_SUCCESS &&
+            (shading_model == aiShadingMode_NoShading || shading_model == aiShadingMode_Unlit);
 
         for (const auto& slot : kTextureSlots)
         {

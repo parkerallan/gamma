@@ -15,8 +15,17 @@ public:
     struct MaterialRecord
     {
         std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::array<float, 3> emissive_color = {0.0f, 0.0f, 0.0f};
+        float metallic_factor = 1.0f;
+        float roughness_factor = 1.0f;
+        float normal_scale = 1.0f;
+        float occlusion_strength = 1.0f;
         bool uses_alpha_transparency = false;
         VkImageView base_color_view = VK_NULL_HANDLE;
+        VkImageView metallic_roughness_view = VK_NULL_HANDLE;
+        VkImageView normal_view = VK_NULL_HANDLE;
+        VkImageView occlusion_view = VK_NULL_HANDLE;
+        VkImageView emissive_view = VK_NULL_HANDLE;
     };
 
     struct MeshSectionRecord
@@ -93,8 +102,6 @@ public:
 
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
-    VkImage GetOutputImage() const { return output_image_; }
-    VkImageView GetOutputView() const { return output_view_; }
     VkDescriptorSet GetOutputDescriptorSet() const { return output_descriptor_set_; }
     VkCommandPool GetCommandPool() const { return command_pool_; }
     VkCommandBuffer GetCommandBuffer() const { return command_buffer_; }
@@ -129,7 +136,13 @@ private:
     struct MaterialRecordGpu
     {
         std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
-        std::uint32_t texture_index = 0xFFFFFFFFu;
+        std::array<float, 4> emissive_data = {0.0f, 0.0f, 0.0f, 1.0f};
+        std::array<float, 4> surface_data = {1.0f, 1.0f, 1.0f, 0.0f};
+        std::uint32_t base_color_texture_index = 0xFFFFFFFFu;
+        std::uint32_t metallic_roughness_texture_index = 0xFFFFFFFFu;
+        std::uint32_t normal_texture_index = 0xFFFFFFFFu;
+        std::uint32_t occlusion_texture_index = 0xFFFFFFFFu;
+        std::uint32_t emissive_texture_index = 0xFFFFFFFFu;
         std::uint32_t uses_alpha_transparency = 0;
         std::uint32_t pad0 = 0;
         std::uint32_t pad1 = 0;

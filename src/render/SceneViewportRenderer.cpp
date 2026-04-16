@@ -4,7 +4,6 @@
 
 #include <ImGuizmo.h>
 
-#include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
 
 #include <algorithm>
@@ -13,8 +12,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
-#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -35,19 +32,7 @@ struct SceneGpuVertex
     float normal[3] = {0.0f, 1.0f, 0.0f};
     float uv[2] = {0.0f, 0.0f};
     float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-};
-
-struct SceneUniformBlock
-{
-    float model[16] = {};
-    float model_view_projection[16] = {};
-    float ambient_light[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float directional_light_color[4] = {1.0f, 1.0f, 1.0f, 0.0f};
-    float directional_light_direction[4] = {0.0f, -1.0f, 0.0f, 1.0f};
-    float spot_light_color[4] = {1.0f, 1.0f, 1.0f, 0.0f};
-    float spot_light_direction[4] = {0.0f, -1.0f, 0.0f, 1.0f};
-    float spot_light_position[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    float spot_light_data[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float tangent[4] = {1.0f, 0.0f, 0.0f, 1.0f};
 };
 
 std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties);
@@ -62,24 +47,6 @@ bool CreateVulkanImage(
     VkImage& image,
     VkDeviceMemory& memory,
     VkImageView& image_view);
-
-SceneGpuVertex BuildColoredVertex(float x, float y, float z, float nx, float ny, float nz, float r, float g, float b, float a)
-{
-    SceneGpuVertex vertex;
-    vertex.position[0] = x;
-    vertex.position[1] = y;
-    vertex.position[2] = z;
-    vertex.normal[0] = nx;
-    vertex.normal[1] = ny;
-    vertex.normal[2] = nz;
-    vertex.uv[0] = 0.0f;
-    vertex.uv[1] = 0.0f;
-    vertex.color[0] = r;
-    vertex.color[1] = g;
-    vertex.color[2] = b;
-    vertex.color[3] = a;
-    return vertex;
-}
 
 Vec3 ToVec3(const SceneVector3& value)
 {
@@ -791,24 +758,6 @@ bool ComputeObjectBounds(const SceneViewportRenderer::QueuedSceneObject& object,
     return true;
 }
 
-std::filesystem::path ResolveShaderPath(const char* file_name)
-{
-    const char* base_path_raw = SDL_GetBasePath();
-    const std::filesystem::path base_path = base_path_raw != nullptr ? std::filesystem::path(base_path_raw) : std::filesystem::current_path();
-    return base_path / "shaders" / file_name;
-}
-
-std::vector<std::uint8_t> ReadBinaryFile(const std::filesystem::path& path)
-{
-    std::ifstream input(path, std::ios::binary);
-    if (!input)
-    {
-        return {};
-    }
-
-    return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-}
-
 SceneGpuVertex BuildSceneGpuVertex(const ModelVertex& vertex, const ModelMaterialAsset* material)
 {
     SceneGpuVertex gpu_vertex;
@@ -826,27 +775,11 @@ SceneGpuVertex BuildSceneGpuVertex(const ModelVertex& vertex, const ModelMateria
     gpu_vertex.color[1] = tint[1];
     gpu_vertex.color[2] = tint[2];
     gpu_vertex.color[3] = tint[3];
+    gpu_vertex.tangent[0] = vertex.tangent[0];
+    gpu_vertex.tangent[1] = vertex.tangent[1];
+    gpu_vertex.tangent[2] = vertex.tangent[2];
+    gpu_vertex.tangent[3] = vertex.tangent[3];
     return gpu_vertex;
-}
-
-VkShaderModule LoadShaderModule(VkDevice device, const std::filesystem::path& path)
-{
-    const std::vector<std::uint8_t> shader_bytes = ReadBinaryFile(path);
-    if (shader_bytes.empty())
-    {
-        SDL_Log("Failed to read shader file: %s", path.string().c_str());
-        return VK_NULL_HANDLE;
-    }
-
-    VkShaderModuleCreateInfo create_info = {};
-    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    create_info.codeSize = shader_bytes.size();
-    create_info.pCode = reinterpret_cast<const std::uint32_t*>(shader_bytes.data());
-
-    VkShaderModule shader_module = VK_NULL_HANDLE;
-    const VkResult result = vkCreateShaderModule(device, &create_info, nullptr, &shader_module);
-    VulkanContext::CheckVkResult(result);
-    return result == VK_SUCCESS ? shader_module : VK_NULL_HANDLE;
 }
 
 bool CreateVulkanBuffer(
@@ -1044,52 +977,17 @@ void TransitionImageLayout(
         &barrier);
 }
 
-bool AllocateMaterialDescriptorSet(
-    VkDevice device,
-    VkDescriptorPool descriptor_pool,
-    VkDescriptorSetLayout descriptor_set_layout,
-    VkSampler sampler,
-    VkImageView image_view,
-    VkDescriptorSet& descriptor_set)
-{
-    VkDescriptorSetAllocateInfo allocate_info = {};
-    allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocate_info.descriptorPool = descriptor_pool;
-    allocate_info.descriptorSetCount = 1;
-    allocate_info.pSetLayouts = &descriptor_set_layout;
-
-    VkResult result = vkAllocateDescriptorSets(device, &allocate_info, &descriptor_set);
-    VulkanContext::CheckVkResult(result);
-    if (result != VK_SUCCESS)
-    {
-        return false;
-    }
-
-    VkDescriptorImageInfo image_info = {};
-    image_info.sampler = sampler;
-    image_info.imageView = image_view;
-    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkWriteDescriptorSet write = {};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptor_set;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &image_info;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-    return true;
-}
-
 bool CreateTextureFromAsset(
     VulkanContext& context,
     VkCommandPool command_pool,
-    VkDescriptorSetLayout descriptor_set_layout,
-    VkSampler sampler,
     const ModelTextureAsset& texture_asset,
     SceneViewportRenderer::GpuTexture& texture)
 {
-    if (!texture_asset.valid || texture_asset.width <= 0 || texture_asset.height <= 0 || texture_asset.pixels.empty())
+    if (command_pool == VK_NULL_HANDLE ||
+        !texture_asset.valid ||
+        texture_asset.width <= 0 ||
+        texture_asset.height <= 0 ||
+        texture_asset.pixels.empty())
     {
         return false;
     }
@@ -1097,6 +995,7 @@ bool CreateTextureFromAsset(
     const VkDevice device = context.GetDevice();
     const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
     const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) * static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 
     SceneViewportRenderer::GpuBuffer staging_buffer{};
     if (!CreateVulkanBuffer(
@@ -1121,7 +1020,7 @@ bool CreateTextureFromAsset(
             device,
             static_cast<std::uint32_t>(texture_asset.width),
             static_cast<std::uint32_t>(texture_asset.height),
-            VK_FORMAT_R8G8B8A8_UNORM,
+            texture_format,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
             texture.image,
@@ -1168,7 +1067,7 @@ bool CreateTextureFromAsset(
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT);
     });
@@ -1176,15 +1075,6 @@ bool CreateTextureFromAsset(
     vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
     vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
     if (!upload_succeeded)
-    {
-        vkDestroyImageView(device, texture.view, context.GetAllocator());
-        vkDestroyImage(device, texture.image, context.GetAllocator());
-        vkFreeMemory(device, texture.memory, context.GetAllocator());
-        texture = {};
-        return false;
-    }
-
-    if (!AllocateMaterialDescriptorSet(device, context.GetDescriptorPool(), descriptor_set_layout, sampler, texture.view, texture.descriptor_set))
     {
         vkDestroyImageView(device, texture.view, context.GetAllocator());
         vkDestroyImage(device, texture.image, context.GetAllocator());
@@ -1234,33 +1124,6 @@ bool UpdateSceneObjectTransform(
     changed = SetSceneObjectRotation(state.active_scene_path, object.name, local_rotation) || changed;
     changed = SetSceneObjectScale(state.active_scene_path, object.name, local_scale) || changed;
     return changed;
-}
-
-void AppendGridQuad(
-    std::vector<SceneGpuVertex>& vertices,
-    std::vector<std::uint32_t>& indices,
-    float min_x,
-    float max_x,
-    float min_z,
-    float max_z,
-    float y,
-    float r,
-    float g,
-    float b,
-    float a)
-{
-    const std::uint32_t base_index = static_cast<std::uint32_t>(vertices.size());
-    vertices.push_back(BuildColoredVertex(min_x, y, min_z, 0.0f, 1.0f, 0.0f, r, g, b, a));
-    vertices.push_back(BuildColoredVertex(max_x, y, min_z, 0.0f, 1.0f, 0.0f, r, g, b, a));
-    vertices.push_back(BuildColoredVertex(max_x, y, max_z, 0.0f, 1.0f, 0.0f, r, g, b, a));
-    vertices.push_back(BuildColoredVertex(min_x, y, max_z, 0.0f, 1.0f, 0.0f, r, g, b, a));
-
-    indices.push_back(base_index + 0);
-    indices.push_back(base_index + 1);
-    indices.push_back(base_index + 2);
-    indices.push_back(base_index + 0);
-    indices.push_back(base_index + 2);
-    indices.push_back(base_index + 3);
 }
 
 void RecoverOrbitCameraFromView(
@@ -1611,7 +1474,7 @@ bool SceneViewportRenderer::Initialize(VulkanContext* context)
 {
     vulkan_context_ = context;
     ray_tracing_.Initialize(context);
-    return EnsurePipeline();
+    return vulkan_context_ != nullptr;
 }
 
 void SceneViewportRenderer::ReleaseBuffer(GpuBuffer& buffer)
@@ -1645,11 +1508,6 @@ void SceneViewportRenderer::ReleaseTexture(GpuTexture& texture)
 
     VkDevice device = vulkan_context_->GetDevice();
     const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
-    if (texture.descriptor_set != VK_NULL_HANDLE)
-    {
-        vkFreeDescriptorSets(device, vulkan_context_->GetDescriptorPool(), 1, &texture.descriptor_set);
-        texture.descriptor_set = VK_NULL_HANDLE;
-    }
     if (texture.view != VK_NULL_HANDLE)
     {
         vkDestroyImageView(device, texture.view, allocator);
@@ -1671,9 +1529,13 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 {
     ReleaseBuffer(entry.vertex_buffer);
     ReleaseBuffer(entry.index_buffer);
-    for (GpuTexture& material_texture : entry.material_textures)
+    for (GpuMaterialTextures& material_textures : entry.material_textures)
     {
-        ReleaseTexture(material_texture);
+        ReleaseTexture(material_textures.base_color);
+        ReleaseTexture(material_textures.metallic_roughness);
+        ReleaseTexture(material_textures.normal);
+        ReleaseTexture(material_textures.occlusion);
+        ReleaseTexture(material_textures.emissive);
     }
 
     entry.vertex_count = 0;
@@ -1683,93 +1545,15 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
     entry.material_textures.clear();
 }
 
-void SceneViewportRenderer::ReleaseGridCacheEntry()
-{
-    ReleaseBuffer(grid_cache_.vertex_buffer);
-    ReleaseBuffer(grid_cache_.index_buffer);
-
-    grid_cache_.index_count = 0;
-    grid_cache_.spacing = 0.0f;
-    grid_cache_.extent = 0.0f;
-    grid_cache_.origin_x = 0.0f;
-    grid_cache_.origin_z = 0.0f;
-}
-
-void SceneViewportRenderer::DestroyRenderTargets()
-{
-    target_width_ = 0;
-    target_height_ = 0;
-    offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    if (vulkan_context_ != nullptr)
-    {
-        VkDevice vk_device = vulkan_context_->GetDevice();
-        if (offscreen_framebuffer_ != VK_NULL_HANDLE)
-        {
-            vkDestroyFramebuffer(vk_device, offscreen_framebuffer_, vulkan_context_->GetAllocator());
-            offscreen_framebuffer_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_depth_view_ != VK_NULL_HANDLE)
-        {
-            vkDestroyImageView(vk_device, offscreen_depth_view_, vulkan_context_->GetAllocator());
-            offscreen_depth_view_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_depth_image_ != VK_NULL_HANDLE)
-        {
-            vkDestroyImage(vk_device, offscreen_depth_image_, vulkan_context_->GetAllocator());
-            offscreen_depth_image_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_depth_memory_ != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(vk_device, offscreen_depth_memory_, vulkan_context_->GetAllocator());
-            offscreen_depth_memory_ = VK_NULL_HANDLE;
-        }
-    }
-}
-
 void SceneViewportRenderer::Shutdown()
 {
     ray_tracing_.Shutdown();
-    DestroyRenderTargets();
 
     for (auto& mesh_entry : mesh_cache_)
     {
         ReleaseMeshCacheEntry(mesh_entry.second);
     }
     mesh_cache_.clear();
-    ReleaseGridCacheEntry();
-
-    ReleaseTexture(fallback_texture_);
-
-    if (vulkan_context_ != nullptr)
-    {
-        VkDevice vk_device = vulkan_context_->GetDevice();
-        if (scene_pipeline_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipeline(vk_device, scene_pipeline_, vulkan_context_->GetAllocator());
-            scene_pipeline_ = VK_NULL_HANDLE;
-        }
-        if (scene_pipeline_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipelineLayout(vk_device, scene_pipeline_layout_, vulkan_context_->GetAllocator());
-            scene_pipeline_layout_ = VK_NULL_HANDLE;
-        }
-        if (material_descriptor_set_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyDescriptorSetLayout(vk_device, material_descriptor_set_layout_, vulkan_context_->GetAllocator());
-            material_descriptor_set_layout_ = VK_NULL_HANDLE;
-        }
-        if (material_sampler_ != VK_NULL_HANDLE)
-        {
-            vkDestroySampler(vk_device, material_sampler_, vulkan_context_->GetAllocator());
-            material_sampler_ = VK_NULL_HANDLE;
-        }
-        if (offscreen_render_pass_ != VK_NULL_HANDLE)
-        {
-            vkDestroyRenderPass(vk_device, offscreen_render_pass_, vulkan_context_->GetAllocator());
-            offscreen_render_pass_ = VK_NULL_HANDLE;
-        }
-    }
 
     queued_objects_.clear();
     render_requested_ = false;
@@ -1780,462 +1564,6 @@ void SceneViewportRenderer::BeginFrame()
 {
     render_requested_ = false;
     queued_objects_.clear();
-}
-
-bool SceneViewportRenderer::EnsureMaterialResources()
-{
-    if (vulkan_context_ == nullptr || ray_tracing_.GetCommandPool() == VK_NULL_HANDLE || material_descriptor_set_layout_ == VK_NULL_HANDLE)
-    {
-        return false;
-    }
-
-    if (material_sampler_ == VK_NULL_HANDLE)
-    {
-        VkSamplerCreateInfo sampler_info = {};
-        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sampler_info.magFilter = VK_FILTER_LINEAR;
-        sampler_info.minFilter = VK_FILTER_LINEAR;
-        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.maxLod = 1.0f;
-        const VkResult result = vkCreateSampler(vulkan_context_->GetDevice(), &sampler_info, vulkan_context_->GetAllocator(), &material_sampler_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    if (fallback_texture_.image == VK_NULL_HANDLE)
-    {
-        ModelTextureAsset fallback_texture_asset;
-        fallback_texture_asset.valid = true;
-        fallback_texture_asset.width = 1;
-        fallback_texture_asset.height = 1;
-        fallback_texture_asset.pixels = {255, 255, 255, 255};
-        if (!CreateTextureFromAsset(
-                *vulkan_context_,
-            ray_tracing_.GetCommandPool(),
-                material_descriptor_set_layout_,
-                material_sampler_,
-                fallback_texture_asset,
-                fallback_texture_))
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool SceneViewportRenderer::EnsurePipeline()
-{
-    if (vulkan_context_ == nullptr)
-    {
-        return false;
-    }
-
-    if (offscreen_render_pass_ != VK_NULL_HANDLE &&
-        material_descriptor_set_layout_ != VK_NULL_HANDLE &&
-        scene_pipeline_layout_ != VK_NULL_HANDLE &&
-        scene_pipeline_ != VK_NULL_HANDLE)
-    {
-        return true;
-    }
-
-    const VkDevice vk_device = vulkan_context_->GetDevice();
-    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
-
-    if (offscreen_render_pass_ == VK_NULL_HANDLE)
-    {
-        VkAttachmentDescription color_attachment = {};
-        color_attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
-        color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        color_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentDescription depth_attachment = {};
-        depth_attachment.format = VK_FORMAT_D32_SFLOAT;
-        depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference color_reference = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkAttachmentReference depth_reference = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-
-        VkSubpassDescription subpass = {};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color_reference;
-        subpass.pDepthStencilAttachment = &depth_reference;
-
-        std::array<VkAttachmentDescription, 2> attachments = {color_attachment, depth_attachment};
-        VkRenderPassCreateInfo render_pass_info = {};
-        render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        render_pass_info.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-        render_pass_info.pAttachments = attachments.data();
-        render_pass_info.subpassCount = 1;
-        render_pass_info.pSubpasses = &subpass;
-
-        VkSubpassDependency dependency = {};
-        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        render_pass_info.dependencyCount = 1;
-        render_pass_info.pDependencies = &dependency;
-
-        const VkResult result = vkCreateRenderPass(vk_device, &render_pass_info, allocator, &offscreen_render_pass_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    if (material_descriptor_set_layout_ == VK_NULL_HANDLE)
-    {
-        VkDescriptorSetLayoutBinding texture_binding = {};
-        texture_binding.binding = 0;
-        texture_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        texture_binding.descriptorCount = 1;
-        texture_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        VkDescriptorSetLayoutCreateInfo layout_info = {};
-        layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layout_info.bindingCount = 1;
-        layout_info.pBindings = &texture_binding;
-
-        VkResult result = vkCreateDescriptorSetLayout(vk_device, &layout_info, allocator, &material_descriptor_set_layout_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    if (scene_pipeline_layout_ == VK_NULL_HANDLE)
-    {
-        VkPushConstantRange push_constant_range = {};
-        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        push_constant_range.offset = 0;
-        push_constant_range.size = sizeof(SceneUniformBlock);
-
-        VkPipelineLayoutCreateInfo layout_info = {};
-        layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layout_info.setLayoutCount = 1;
-        layout_info.pSetLayouts = &material_descriptor_set_layout_;
-        layout_info.pushConstantRangeCount = 1;
-        layout_info.pPushConstantRanges = &push_constant_range;
-
-        VkResult result = vkCreatePipelineLayout(vk_device, &layout_info, allocator, &scene_pipeline_layout_);
-        VulkanContext::CheckVkResult(result);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    if (scene_pipeline_ == VK_NULL_HANDLE)
-    {
-        VkShaderModule vertex_shader = LoadShaderModule(vk_device, ResolveShaderPath("scene_viewport.vert.spv"));
-        VkShaderModule fragment_shader = LoadShaderModule(vk_device, ResolveShaderPath("scene_viewport.frag.spv"));
-        if (vertex_shader == VK_NULL_HANDLE || fragment_shader == VK_NULL_HANDLE)
-        {
-            if (vertex_shader != VK_NULL_HANDLE)
-            {
-                vkDestroyShaderModule(vk_device, vertex_shader, allocator);
-            }
-            if (fragment_shader != VK_NULL_HANDLE)
-            {
-                vkDestroyShaderModule(vk_device, fragment_shader, allocator);
-            }
-            return false;
-        }
-
-        VkPipelineShaderStageCreateInfo shader_stages[2] = {};
-        shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        shader_stages[0].module = vertex_shader;
-        shader_stages[0].pName = "main";
-        shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        shader_stages[1].module = fragment_shader;
-        shader_stages[1].pName = "main";
-
-        VkVertexInputBindingDescription binding_description = {};
-        binding_description.binding = 0;
-        binding_description.stride = sizeof(SceneGpuVertex);
-        binding_description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        std::array<VkVertexInputAttributeDescription, 4> attributes = {};
-        attributes[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, position))};
-        attributes[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, normal))};
-        attributes[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, uv))};
-        attributes[3] = {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<std::uint32_t>(offsetof(SceneGpuVertex, color))};
-
-        VkPipelineVertexInputStateCreateInfo vertex_input = {};
-        vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input.vertexBindingDescriptionCount = 1;
-        vertex_input.pVertexBindingDescriptions = &binding_description;
-        vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
-        vertex_input.pVertexAttributeDescriptions = attributes.data();
-
-        VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
-        input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-        VkPipelineViewportStateCreateInfo viewport_state = {};
-        viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewport_state.viewportCount = 1;
-        viewport_state.scissorCount = 1;
-
-        VkPipelineRasterizationStateCreateInfo rasterization = {};
-        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterization.lineWidth = 1.0f;
-        rasterization.cullMode = VK_CULL_MODE_NONE;
-        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-
-        VkPipelineMultisampleStateCreateInfo multisample = {};
-        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-        VkPipelineDepthStencilStateCreateInfo depth_stencil = {};
-        depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depth_stencil.depthTestEnable = VK_TRUE;
-        depth_stencil.depthWriteEnable = VK_TRUE;
-        depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-
-        VkPipelineColorBlendAttachmentState color_blend_attachment = {};
-        color_blend_attachment.blendEnable = VK_TRUE;
-        color_blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        color_blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        color_blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
-        color_blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        color_blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        color_blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
-        color_blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-        VkPipelineColorBlendStateCreateInfo color_blend = {};
-        color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        color_blend.attachmentCount = 1;
-        color_blend.pAttachments = &color_blend_attachment;
-
-        std::array<VkDynamicState, 2> dynamic_states = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamic_state = {};
-        dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamic_state.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
-        dynamic_state.pDynamicStates = dynamic_states.data();
-
-        VkGraphicsPipelineCreateInfo pipeline_info = {};
-        pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount = 2;
-        pipeline_info.pStages = shader_stages;
-        pipeline_info.pVertexInputState = &vertex_input;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &rasterization;
-        pipeline_info.pMultisampleState = &multisample;
-        pipeline_info.pDepthStencilState = &depth_stencil;
-        pipeline_info.pColorBlendState = &color_blend;
-        pipeline_info.pDynamicState = &dynamic_state;
-        pipeline_info.layout = scene_pipeline_layout_;
-        pipeline_info.renderPass = offscreen_render_pass_;
-        pipeline_info.subpass = 0;
-
-        VkResult result = vkCreateGraphicsPipelines(vk_device, vulkan_context_->GetPipelineCache(), 1, &pipeline_info, allocator, &scene_pipeline_);
-        VulkanContext::CheckVkResult(result);
-        vkDestroyShaderModule(vk_device, vertex_shader, allocator);
-        vkDestroyShaderModule(vk_device, fragment_shader, allocator);
-        if (result != VK_SUCCESS)
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool SceneViewportRenderer::EnsureGridCacheEntry()
-{
-    if (!grid_enabled_ || vulkan_context_ == nullptr || grid_spacing_ <= 0.0f)
-    {
-        ReleaseGridCacheEntry();
-        return false;
-    }
-
-    if (grid_cache_.vertex_buffer.buffer != VK_NULL_HANDLE &&
-        grid_cache_.index_buffer.buffer != VK_NULL_HANDLE &&
-        std::abs(grid_cache_.spacing - grid_spacing_) < 0.0001f &&
-        std::abs(grid_cache_.extent - grid_extent_) < 0.0001f &&
-        std::abs(grid_cache_.origin_x - grid_origin_x_) < 0.0001f &&
-        std::abs(grid_cache_.origin_z - grid_origin_z_) < 0.0001f)
-    {
-        return true;
-    }
-
-    ReleaseGridCacheEntry();
-
-    const float major_spacing = grid_spacing_;
-    const float minor_spacing = (std::max)(0.0625f, major_spacing * 0.25f);
-    const int half_steps = (std::max)(1, static_cast<int>(std::ceil(grid_extent_ / minor_spacing)));
-    const int subdivisions = (std::max)(1, static_cast<int>(std::round(major_spacing / minor_spacing)));
-    const float minor_thickness = (std::max)(0.004f, minor_spacing * 0.045f);
-    const float major_thickness = (std::max)(minor_thickness * 1.9f, major_spacing * 0.016f);
-    const float y = 0.0f;
-
-    std::vector<SceneGpuVertex> vertices;
-    std::vector<std::uint32_t> indices;
-    vertices.reserve(static_cast<std::size_t>((half_steps * 2 + 2) * 8));
-    indices.reserve(static_cast<std::size_t>((half_steps * 2 + 2) * 12));
-
-    for (int step = -half_steps; step <= half_steps; ++step)
-    {
-        const float offset = static_cast<float>(step) * minor_spacing;
-        const bool major_line = (step % subdivisions) == 0;
-        const float thickness = major_line ? major_thickness : minor_thickness;
-        const float shade = major_line ? 0.32f : 0.16f;
-
-        const float x = grid_origin_x_ + offset;
-        AppendGridQuad(
-            vertices,
-            indices,
-            x - thickness,
-            x + thickness,
-            grid_origin_z_ - grid_extent_,
-            grid_origin_z_ + grid_extent_,
-            y,
-            shade,
-            shade,
-            shade,
-            1.0f);
-
-        const float z = grid_origin_z_ + offset;
-        AppendGridQuad(
-            vertices,
-            indices,
-            grid_origin_x_ - grid_extent_,
-            grid_origin_x_ + grid_extent_,
-            z - thickness,
-            z + thickness,
-            y,
-            shade,
-            shade,
-            shade,
-            1.0f);
-    }
-
-    if (vertices.empty() || indices.empty())
-    {
-        return false;
-    }
-
-    const VkDeviceSize vertex_buffer_size = static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex));
-    const VkDeviceSize index_buffer_size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
-
-    if (!CreateVulkanBuffer(
-            *vulkan_context_,
-            vertex_buffer_size,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            grid_cache_.vertex_buffer))
-    {
-        ReleaseGridCacheEntry();
-        return false;
-    }
-
-    if (!CreateVulkanBuffer(
-            *vulkan_context_,
-            index_buffer_size,
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            grid_cache_.index_buffer))
-    {
-        ReleaseGridCacheEntry();
-        return false;
-    }
-
-    if (!UploadBufferData(vulkan_context_->GetDevice(), grid_cache_.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
-        !UploadBufferData(vulkan_context_->GetDevice(), grid_cache_.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
-    {
-        ReleaseGridCacheEntry();
-        return false;
-    }
-
-    grid_cache_.index_count = static_cast<std::uint32_t>(indices.size());
-    grid_cache_.spacing = grid_spacing_;
-    grid_cache_.extent = grid_extent_;
-    grid_cache_.origin_x = grid_origin_x_;
-    grid_cache_.origin_z = grid_origin_z_;
-    return true;
-}
-
-bool SceneViewportRenderer::EnsureRenderTargets(std::uint32_t width, std::uint32_t height)
-{
-    if (ray_tracing_.GetOutputImage() != VK_NULL_HANDLE && offscreen_depth_image_ != VK_NULL_HANDLE && offscreen_framebuffer_ != VK_NULL_HANDLE && target_width_ == width && target_height_ == height)
-    {
-        return true;
-    }
-
-    DestroyRenderTargets();
-
-    if (vulkan_context_ == nullptr || !ray_tracing_.EnsureViewportOutput(width, height))
-    {
-        return false;
-    }
-
-    const VkDevice vk_device = vulkan_context_->GetDevice();
-    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
-
-    if (!CreateVulkanImage(
-            vulkan_context_->GetPhysicalDevice(),
-            vk_device,
-            width,
-            height,
-            VK_FORMAT_D32_SFLOAT,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-            VK_IMAGE_ASPECT_DEPTH_BIT,
-            offscreen_depth_image_,
-            offscreen_depth_memory_,
-            offscreen_depth_view_))
-    {
-        DestroyRenderTargets();
-        return false;
-    }
-
-    std::array<VkImageView, 2> attachments = {ray_tracing_.GetOutputView(), offscreen_depth_view_};
-    VkFramebufferCreateInfo framebuffer_info = {};
-    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebuffer_info.renderPass = offscreen_render_pass_;
-    framebuffer_info.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-    framebuffer_info.pAttachments = attachments.data();
-    framebuffer_info.width = width;
-    framebuffer_info.height = height;
-    framebuffer_info.layers = 1;
-    VkResult result = vkCreateFramebuffer(vk_device, &framebuffer_info, allocator, &offscreen_framebuffer_);
-    VulkanContext::CheckVkResult(result);
-    if (result != VK_SUCCESS)
-    {
-        DestroyRenderTargets();
-        return false;
-    }
-
-    target_width_ = width;
-    target_height_ = height;
-    offscreen_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-    return true;
 }
 
 bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_path, const SceneViewportResolvedModel& resolved_model)
@@ -2264,18 +1592,58 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     {
         const ModelMaterialAsset& material = resolved_model.asset->materials[material_index];
         cache_entry.materials[material_index].base_color = material.base_color;
+        cache_entry.materials[material_index].emissive_color = material.emissive_color;
+        cache_entry.materials[material_index].metallic_factor = material.metallic_factor;
+        cache_entry.materials[material_index].roughness_factor = material.roughness_factor;
+        cache_entry.materials[material_index].normal_scale = material.normal_scale;
+        cache_entry.materials[material_index].occlusion_strength = material.occlusion_strength;
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
         if (material.base_color_texture.valid)
         {
             CreateTextureFromAsset(
                 *vulkan_context_,
                 ray_tracing_.GetCommandPool(),
-                material_descriptor_set_layout_,
-                material_sampler_,
                 material.base_color_texture,
-                cache_entry.material_textures[material_index]);
+                cache_entry.material_textures[material_index].base_color);
         }
-            cache_entry.materials[material_index].base_color_view = cache_entry.material_textures[material_index].view;
+        if (material.metallic_roughness_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.metallic_roughness_texture,
+                cache_entry.material_textures[material_index].metallic_roughness);
+        }
+        if (material.normal_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.normal_texture,
+                cache_entry.material_textures[material_index].normal);
+        }
+        if (material.occlusion_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.occlusion_texture,
+                cache_entry.material_textures[material_index].occlusion);
+        }
+        if (material.emissive_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.emissive_texture,
+                cache_entry.material_textures[material_index].emissive);
+        }
+
+        cache_entry.materials[material_index].base_color_view = cache_entry.material_textures[material_index].base_color.view;
+        cache_entry.materials[material_index].metallic_roughness_view = cache_entry.material_textures[material_index].metallic_roughness.view;
+        cache_entry.materials[material_index].normal_view = cache_entry.material_textures[material_index].normal.view;
+        cache_entry.materials[material_index].occlusion_view = cache_entry.material_textures[material_index].occlusion.view;
+        cache_entry.materials[material_index].emissive_view = cache_entry.material_textures[material_index].emissive.view;
     }
 
     for (const ModelMeshAsset& mesh : resolved_model.asset->meshes)
@@ -2481,7 +1849,7 @@ void SceneViewportRenderer::RenderUi(
     const std::uint32_t target_width = static_cast<std::uint32_t>((std::max)(1.0f, std::round(available.x * framebuffer_scale.x)));
     const std::uint32_t target_height = static_cast<std::uint32_t>((std::max)(1.0f, std::round(available.y * framebuffer_scale.y)));
 
-    if (!EnsurePipeline() || !EnsureMaterialResources() || !EnsureRenderTargets(target_width, target_height))
+    if (vulkan_context_ == nullptr || !ray_tracing_.EnsureViewportOutput(target_width, target_height))
     {
         draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
         draw_list->AddText(ImVec2(min.x + 12.0f, min.y + 12.0f), IM_COL32(235, 238, 242, 255), "Scene GPU renderer unavailable");
@@ -2903,7 +2271,7 @@ void SceneViewportRenderer::RenderCameraPreview(
     const std::uint32_t target_width = static_cast<std::uint32_t>((std::max)(1.0f, std::round(ImGui::GetWindowSize().x * framebuffer_scale.x)));
     const std::uint32_t target_height = static_cast<std::uint32_t>((std::max)(1.0f, std::round(ImGui::GetWindowSize().y * framebuffer_scale.y)));
 
-    if (!EnsurePipeline() || !EnsureMaterialResources() || !EnsureRenderTargets(target_width, target_height))
+    if (vulkan_context_ == nullptr || !ray_tracing_.EnsureViewportOutput(target_width, target_height))
     {
         draw_list->AddRect(min, max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
         draw_message("Scene GPU renderer unavailable");

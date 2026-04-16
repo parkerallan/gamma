@@ -22,8 +22,17 @@ struct ModelMaterialMetadata
     std::string name;
     ModelColorMetadata base_color;
     ModelColorMetadata emissive_color;
+    std::string alpha_mode = "OPAQUE";
+    float alpha_cutoff = 0.5f;
+    bool has_alpha_cutoff = false;
+    bool double_sided = false;
+    bool unlit = false;
     float opacity = 1.0f;
     bool has_opacity = false;
+    float normal_scale = 1.0f;
+    bool has_normal_scale = false;
+    float occlusion_strength = 1.0f;
+    bool has_occlusion_strength = false;
     float roughness = 0.0f;
     bool has_roughness = false;
     float metalness = 0.0f;

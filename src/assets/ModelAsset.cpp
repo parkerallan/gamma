@@ -1,5 +1,6 @@
 #include "assets/ModelAsset.h"
 
+#include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
@@ -10,9 +11,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <initializer_list>
 
 namespace
 {
+bool LoadTextureFromFile(const std::filesystem::path& texture_path, ModelTextureAsset& texture_asset);
+bool LoadEmbeddedTexture(const aiTexture* embedded_texture, ModelTextureAsset& texture_asset);
+
 std::string ToLowerExtension(const std::filesystem::path& path)
 {
     std::string extension = path.extension().string();
@@ -21,6 +26,15 @@ std::string ToLowerExtension(const std::filesystem::path& path)
         return static_cast<char>(std::tolower(character));
     });
     return extension;
+}
+
+std::string ToUpper(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::toupper(character));
+    });
+    return value;
 }
 
 std::string ToDisplayString(const aiString& value)
@@ -40,6 +54,144 @@ std::array<float, 4> ReadMaterialBaseColor(const aiMaterial* material)
     }
 
     return {color.r, color.g, color.b, color.a};
+}
+
+std::array<float, 3> ReadMaterialEmissiveColor(const aiMaterial* material)
+{
+    aiColor3D color = aiColor3D(0.0f, 0.0f, 0.0f);
+    if (material != nullptr)
+    {
+        material->Get(AI_MATKEY_COLOR_EMISSIVE, color);
+    }
+
+    return {color.r, color.g, color.b};
+}
+
+float ReadMaterialFloatProperty(
+    const aiMaterial* material,
+    const char* key,
+    unsigned int type,
+    unsigned int index,
+    float fallback_value)
+{
+    if (material == nullptr)
+    {
+        return fallback_value;
+    }
+
+    float value = fallback_value;
+    return material->Get(key, type, index, value) == AI_SUCCESS ? value : fallback_value;
+}
+
+float ReadMaterialOpacityFactor(const aiMaterial* material)
+{
+    return ReadMaterialFloatProperty(material, AI_MATKEY_OPACITY, 1.0f);
+}
+
+float ReadMaterialMetallicFactor(const aiMaterial* material)
+{
+    return ReadMaterialFloatProperty(material, AI_MATKEY_METALLIC_FACTOR, 1.0f);
+}
+
+float ReadMaterialRoughnessFactor(const aiMaterial* material)
+{
+    return ReadMaterialFloatProperty(material, AI_MATKEY_ROUGHNESS_FACTOR, 1.0f);
+}
+
+float ReadMaterialNormalScale(const aiMaterial* material)
+{
+    if (material == nullptr)
+    {
+        return 1.0f;
+    }
+
+    float scale = 1.0f;
+    return material->Get(AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_NORMALS, 0), scale) == AI_SUCCESS ? scale : 1.0f;
+}
+
+float ReadMaterialOcclusionStrength(const aiMaterial* material)
+{
+    if (material == nullptr)
+    {
+        return 1.0f;
+    }
+
+    float strength = 1.0f;
+    return material->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_AMBIENT_OCCLUSION, 0), strength) == AI_SUCCESS ? strength : 1.0f;
+}
+
+bool ReadMaterialBooleanProperty(
+    const aiMaterial* material,
+    const char* key,
+    unsigned int type,
+    unsigned int index,
+    bool fallback_value)
+{
+    if (material == nullptr)
+    {
+        return fallback_value;
+    }
+
+    int value = fallback_value ? 1 : 0;
+    return material->Get(key, type, index, value) == AI_SUCCESS ? value != 0 : fallback_value;
+}
+
+bool ReadMaterialDoubleSided(const aiMaterial* material)
+{
+    return ReadMaterialBooleanProperty(material, AI_MATKEY_TWOSIDED, false);
+}
+
+bool ReadMaterialUnlit(const aiMaterial* material)
+{
+    if (material == nullptr)
+    {
+        return false;
+    }
+
+    int shading_model = 0;
+    return material->Get(AI_MATKEY_SHADING_MODEL, shading_model) == AI_SUCCESS &&
+        (shading_model == aiShadingMode_NoShading || shading_model == aiShadingMode_Unlit);
+}
+
+ModelAlphaMode ParseMaterialAlphaMode(std::string value)
+{
+    value = ToUpper(std::move(value));
+    if (value == "MASK")
+    {
+        return ModelAlphaMode::Mask;
+    }
+    if (value == "BLEND")
+    {
+        return ModelAlphaMode::Blend;
+    }
+    return ModelAlphaMode::Opaque;
+}
+
+ModelAlphaMode ReadMaterialAlphaMode(const aiMaterial* material)
+{
+    if (material == nullptr)
+    {
+        return ModelAlphaMode::Opaque;
+    }
+
+    aiString alpha_mode;
+    if (material->Get(AI_MATKEY_GLTF_ALPHAMODE, alpha_mode) == AI_SUCCESS)
+    {
+        return ParseMaterialAlphaMode(ToDisplayString(alpha_mode));
+    }
+
+    return ModelAlphaMode::Opaque;
+}
+
+float ReadMaterialAlphaCutoff(const aiMaterial* material)
+{
+    if (material == nullptr)
+    {
+        return 0.5f;
+    }
+
+    float value = 0.5f;
+    return material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, value) == AI_SUCCESS ? value : 0.5f;
 }
 
 void FinalizeTextureAlphaMetadata(ModelTextureAsset& texture_asset)
@@ -75,6 +227,34 @@ std::filesystem::path ResolveTexturePath(const std::filesystem::path& model_path
     }
 
     return model_path.parent_path() / texture_path;
+}
+
+bool LoadTextureReference(
+    const aiScene* scene,
+    const std::filesystem::path& model_path,
+    const std::string& texture_reference,
+    bool srgb,
+    std::string& texture_source,
+    ModelTextureAsset& texture_asset)
+{
+    if (texture_reference.empty())
+    {
+        return false;
+    }
+
+    texture_source = texture_reference;
+    texture_asset = {};
+    texture_asset.srgb = srgb;
+
+    const aiTexture* embedded_texture = scene != nullptr ? scene->GetEmbeddedTexture(texture_reference.c_str()) : nullptr;
+    if (embedded_texture != nullptr)
+    {
+        return LoadEmbeddedTexture(embedded_texture, texture_asset);
+    }
+
+    const std::filesystem::path resolved_path = ResolveTexturePath(model_path, texture_reference);
+    texture_source = resolved_path.string();
+    return LoadTextureFromFile(resolved_path, texture_asset);
 }
 
 bool LoadTextureFromFile(const std::filesystem::path& texture_path, ModelTextureAsset& texture_asset)
@@ -155,18 +335,20 @@ bool LoadEmbeddedTexture(const aiTexture* embedded_texture, ModelTextureAsset& t
     return true;
 }
 
-bool LoadMaterialBaseColorTexture(
+bool LoadMaterialTexture(
     const aiScene* scene,
     const aiMaterial* material,
     const std::filesystem::path& model_path,
-    ModelMaterialAsset& material_asset)
+    std::initializer_list<aiTextureType> texture_types,
+    bool srgb,
+    std::string& texture_source,
+    ModelTextureAsset& texture_asset)
 {
     if (material == nullptr)
     {
         return false;
     }
 
-    const aiTextureType texture_types[] = {aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE};
     for (aiTextureType texture_type : texture_types)
     {
         if (material->GetTextureCount(texture_type) == 0)
@@ -186,19 +368,36 @@ bool LoadMaterialBaseColorTexture(
             continue;
         }
 
-        material_asset.base_color_texture_source = texture_reference;
-        const aiTexture* embedded_texture = scene != nullptr ? scene->GetEmbeddedTexture(texture_reference.c_str()) : nullptr;
-        if (embedded_texture != nullptr)
-        {
-            return LoadEmbeddedTexture(embedded_texture, material_asset.base_color_texture);
-        }
-
-        const std::filesystem::path resolved_path = ResolveTexturePath(model_path, texture_reference);
-        material_asset.base_color_texture_source = resolved_path.string();
-        return LoadTextureFromFile(resolved_path, material_asset.base_color_texture);
+        return LoadTextureReference(scene, model_path, texture_reference, srgb, texture_source, texture_asset);
     }
 
     return false;
+}
+
+bool DetermineMaterialTransparency(const ModelMaterialAsset& material_asset)
+{
+    if (material_asset.alpha_mode != ModelAlphaMode::Opaque)
+    {
+        return true;
+    }
+
+    return material_asset.base_color[3] < 0.999f ||
+        material_asset.opacity_factor < 0.999f ||
+        material_asset.base_color_texture.has_transparency;
+}
+
+float Dot(const std::array<float, 3>& left, const std::array<float, 3>& right)
+{
+    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
+}
+
+std::array<float, 3> Cross(const std::array<float, 3>& left, const std::array<float, 3>& right)
+{
+    return {
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    };
 }
 
 void ExpandBounds(ModelBounds& bounds, const std::array<float, 3>& point)
@@ -222,7 +421,7 @@ void ExpandBounds(ModelBounds& bounds, const std::array<float, 3>& point)
 bool ModelAsset::IsSupportedPath(const std::filesystem::path& path)
 {
     const std::string extension = ToLowerExtension(path);
-    return extension == ".fbx" || extension == ".glb";
+    return extension == ".fbx" || extension == ".glb" || extension == ".gltf";
 }
 
 ModelAsset LoadModelAsset(const std::filesystem::path& path)
@@ -240,6 +439,7 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
         aiProcess_Triangulate |
             aiProcess_JoinIdenticalVertices |
             aiProcess_ImproveCacheLocality |
+            aiProcess_CalcTangentSpace |
             aiProcess_GenSmoothNormals |
             aiProcess_ValidateDataStructure |
             aiProcess_SortByPType);
@@ -271,10 +471,76 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
         }
 
         material_asset.base_color = ReadMaterialBaseColor(source_material);
-        LoadMaterialBaseColorTexture(scene, source_material, path, material_asset);
-        material_asset.uses_alpha_transparency =
-            material_asset.base_color[3] < 0.999f ||
-            material_asset.base_color_texture.has_transparency;
+        material_asset.emissive_color = ReadMaterialEmissiveColor(source_material);
+        material_asset.opacity_factor = ReadMaterialOpacityFactor(source_material);
+        material_asset.metallic_factor = ReadMaterialMetallicFactor(source_material);
+        material_asset.roughness_factor = ReadMaterialRoughnessFactor(source_material);
+        material_asset.normal_scale = ReadMaterialNormalScale(source_material);
+        material_asset.occlusion_strength = ReadMaterialOcclusionStrength(source_material);
+        material_asset.alpha_mode = ReadMaterialAlphaMode(source_material);
+        material_asset.alpha_cutoff = ReadMaterialAlphaCutoff(source_material);
+        material_asset.double_sided = ReadMaterialDoubleSided(source_material);
+        material_asset.unlit = ReadMaterialUnlit(source_material);
+
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE},
+            true,
+            material_asset.base_color_texture_source,
+            material_asset.base_color_texture);
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_UNKNOWN},
+            false,
+            material_asset.metallic_roughness_texture_source,
+            material_asset.metallic_roughness_texture);
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_METALNESS},
+            false,
+            material_asset.metallic_texture_source,
+            material_asset.metallic_texture);
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_DIFFUSE_ROUGHNESS},
+            false,
+            material_asset.roughness_texture_source,
+            material_asset.roughness_texture);
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_NORMALS, aiTextureType_NORMAL_CAMERA},
+            false,
+            material_asset.normal_texture_source,
+            material_asset.normal_texture);
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_AMBIENT_OCCLUSION},
+            false,
+            material_asset.occlusion_texture_source,
+            material_asset.occlusion_texture);
+        LoadMaterialTexture(
+            scene,
+            source_material,
+            path,
+            {aiTextureType_EMISSIVE, aiTextureType_EMISSION_COLOR},
+            true,
+            material_asset.emissive_texture_source,
+            material_asset.emissive_texture);
+
+        material_asset.base_color[3] = std::clamp(material_asset.base_color[3] * material_asset.opacity_factor, 0.0f, 1.0f);
+        material_asset.uses_alpha_transparency = DetermineMaterialTransparency(material_asset);
         asset.materials.push_back(std::move(material_asset));
     }
 
@@ -306,6 +572,21 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
             {
                 const aiVector3D& normal = source_mesh->mNormals[vertex_index];
                 vertex.normal = {normal.x, normal.y, normal.z};
+            }
+
+            if (source_mesh->HasTangentsAndBitangents())
+            {
+                const aiVector3D& tangent = source_mesh->mTangents[vertex_index];
+                vertex.tangent = {tangent.x, tangent.y, tangent.z, 1.0f};
+
+                if (source_mesh->mBitangents != nullptr && source_mesh->HasNormals())
+                {
+                    const aiVector3D& bitangent = source_mesh->mBitangents[vertex_index];
+                    const std::array<float, 3> tangent_axis = {tangent.x, tangent.y, tangent.z};
+                    const std::array<float, 3> normal_axis = {vertex.normal[0], vertex.normal[1], vertex.normal[2]};
+                    const std::array<float, 3> bitangent_axis = {bitangent.x, bitangent.y, bitangent.z};
+                    vertex.tangent[3] = Dot(Cross(normal_axis, tangent_axis), bitangent_axis) < 0.0f ? -1.0f : 1.0f;
+                }
             }
 
             if (source_mesh->HasTextureCoords(0))
