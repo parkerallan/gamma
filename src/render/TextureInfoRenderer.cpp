@@ -1,4 +1,4 @@
-#include "panels/TextureInfoRenderer.h"
+#include "render/TextureInfoRenderer.h"
 
 #include "imgui_impl_vulkan.h"
 

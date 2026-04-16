@@ -220,7 +220,7 @@ add_executable(engine
     src/render/Raytracing.cpp
     src/render/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
-    src/panels/TextureInfoRenderer.cpp
+    src/render/TextureInfoRenderer.cpp
     src/panels/WorkspacePanel.cpp
 )
 
