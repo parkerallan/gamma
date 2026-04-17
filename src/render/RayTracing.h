@@ -152,7 +152,7 @@ private:
     {
         std::array<float, 16> view_inverse = {};
         std::array<float, 16> projection_inverse = {};
-        std::array<float, 4> ambient_light = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::array<float, 4> ambient_light = {0.0f, 0.0f, 0.0f, 0.0f};
         std::array<float, 4> directional_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
         std::array<float, 4> directional_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
         std::array<float, 4> spot_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
