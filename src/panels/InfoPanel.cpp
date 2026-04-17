@@ -160,7 +160,8 @@ void InfoPanel::Shutdown()
     model_asset_cache_.clear();
     active_camera_preview_scope_.clear();
     preview_vulkan_context_ = nullptr;
-    texture_info_renderer_.Shutdown();
+    image_info_renderer_.Shutdown();
+    font_info_renderer_.Shutdown();
 }
 
 const ModelMetadata& InfoPanel::GetModelMetadata(const std::filesystem::path& path)
@@ -228,21 +229,38 @@ const SceneMetadata& InfoPanel::GetSceneMetadata(const std::filesystem::path& pa
     return cached_scene_metadata_;
 }
 
-const TextureMetadata& InfoPanel::GetTextureMetadata(const std::filesystem::path& path)
+const ImageMetadata& InfoPanel::GetImageMetadata(const std::filesystem::path& path)
 {
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
-    const bool cache_valid = has_cached_texture_metadata_ && cached_texture_path_ == path && !error && cached_texture_write_time_ == write_time;
+    const bool cache_valid = has_cached_image_metadata_ && cached_image_path_ == path && !error && cached_image_write_time_ == write_time;
     if (cache_valid)
     {
-        return cached_texture_metadata_;
+        return cached_image_metadata_;
     }
 
-    cached_texture_path_ = path;
-    cached_texture_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
-    cached_texture_metadata_ = LoadTextureMetadata(path);
-    has_cached_texture_metadata_ = true;
-    return cached_texture_metadata_;
+    cached_image_path_ = path;
+    cached_image_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+    cached_image_metadata_ = LoadImageMetadata(path);
+    has_cached_image_metadata_ = true;
+    return cached_image_metadata_;
+}
+
+const FontMetadata& InfoPanel::GetFontMetadata(const std::filesystem::path& path)
+{
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
+    const bool cache_valid = has_cached_font_metadata_ && cached_font_path_ == path && !error && cached_font_write_time_ == write_time;
+    if (cache_valid)
+    {
+        return cached_font_metadata_;
+    }
+
+    cached_font_path_ = path;
+    cached_font_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+    cached_font_metadata_ = LoadFontMetadata(path);
+    has_cached_font_metadata_ = true;
+    return cached_font_metadata_;
 }
 
 SceneViewportRenderer* InfoPanel::GetCameraPreviewRenderer(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index)
@@ -618,14 +636,14 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     }
 }
 
-void InfoPanel::RenderTextureMetadata(const std::filesystem::path& path, const TextureMetadata& metadata, VulkanContext* vulkan_context)
+void InfoPanel::RenderImageMetadata(const std::filesystem::path& path, const ImageMetadata& metadata, VulkanContext* vulkan_context)
 {
     ImGui::Spacing();
-    ImGui::SeparatorText("Texture");
+    ImGui::SeparatorText("Image");
 
     if (!metadata.parsed)
     {
-        ImGui::TextUnformatted("Unable to parse texture metadata.");
+        ImGui::TextUnformatted("Unable to parse image metadata.");
         if (!metadata.error_message.empty())
         {
             ImGui::TextWrapped("Reason: %s", metadata.error_message.c_str());
@@ -633,25 +651,67 @@ void InfoPanel::RenderTextureMetadata(const std::filesystem::path& path, const T
         return;
     }
 
-    if (ImTextureID preview_texture = texture_info_renderer_.GetTexturePreview(path, vulkan_context))
+    if (ImTextureID preview_image = image_info_renderer_.GetImagePreview(path, vulkan_context))
     {
         const float available_width = ImGui::GetContentRegionAvail().x;
         const float max_preview_width = available_width > 0.0f ? available_width : 220.0f;
         const float max_preview_height = 220.0f;
-        const float width_scale = max_preview_width / static_cast<float>(texture_info_renderer_.GetPreviewWidth());
-        const float height_scale = max_preview_height / static_cast<float>(texture_info_renderer_.GetPreviewHeight());
+        const float width_scale = max_preview_width / static_cast<float>(image_info_renderer_.GetPreviewWidth());
+        const float height_scale = max_preview_height / static_cast<float>(image_info_renderer_.GetPreviewHeight());
         const float scale = (std::min)(1.0f, (std::min)(width_scale, height_scale));
         const ImVec2 preview_size(
-            static_cast<float>(texture_info_renderer_.GetPreviewWidth()) * scale,
-            static_cast<float>(texture_info_renderer_.GetPreviewHeight()) * scale);
+            static_cast<float>(image_info_renderer_.GetPreviewWidth()) * scale,
+            static_cast<float>(image_info_renderer_.GetPreviewHeight()) * scale);
 
-        ImGui::Image(preview_texture, preview_size);
+        ImGui::Image(preview_image, preview_size);
         ImGui::Spacing();
     }
 
     ImGui::Text("Resolution: %d x %d", metadata.width, metadata.height);
     ImGui::Text("Channels: %d", metadata.channel_count);
     ImGui::Text("Bits/channel: %d", metadata.bits_per_channel);
+}
+
+void InfoPanel::RenderFontMetadata(const std::filesystem::path& path, const FontMetadata& metadata, VulkanContext* vulkan_context)
+{
+    ImGui::Spacing();
+    ImGui::SeparatorText("Font");
+
+    if (!metadata.parsed)
+    {
+        ImGui::TextUnformatted("Unable to parse font metadata.");
+        if (!metadata.error_message.empty())
+        {
+            ImGui::TextWrapped("Reason: %s", metadata.error_message.c_str());
+        }
+        return;
+    }
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Preview Size", &font_preview_size_pixels_, 18.0f, 72.0f, "%.0f px");
+
+    if (ImTextureID preview_image = font_info_renderer_.GetFontPreview(path, vulkan_context, font_preview_size_pixels_))
+    {
+        const float available_width = ImGui::GetContentRegionAvail().x;
+        const float max_preview_width = available_width > 0.0f ? available_width : 220.0f;
+        const float max_preview_height = 420.0f;
+        const float width_scale = max_preview_width / static_cast<float>(font_info_renderer_.GetPreviewWidth());
+        const float height_scale = max_preview_height / static_cast<float>(font_info_renderer_.GetPreviewHeight());
+        const float scale = (std::min)(1.0f, (std::min)(width_scale, height_scale));
+        const ImVec2 preview_size(
+            static_cast<float>(font_info_renderer_.GetPreviewWidth()) * scale,
+            static_cast<float>(font_info_renderer_.GetPreviewHeight()) * scale);
+
+        ImGui::Image(preview_image, preview_size);
+        ImGui::Spacing();
+    }
+    else
+    {
+        ImGui::TextDisabled("Preview unavailable.");
+        ImGui::Spacing();
+    }
+
+    ImGui::Text("Glyphs: %d", metadata.glyph_count);
 }
 
 void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
@@ -856,9 +916,13 @@ void InfoPanel::Render(EngineState& state, VulkanContext* vulkan_context)
         {
             RenderMaterialMetadata(GetMaterialMetadata(selected_path));
         }
-        else if (TextureMetadata::IsSupportedPath(selected_path))
+        else if (ImageMetadata::IsSupportedPath(selected_path))
         {
-            RenderTextureMetadata(selected_path, GetTextureMetadata(selected_path), vulkan_context);
+            RenderImageMetadata(selected_path, GetImageMetadata(selected_path), vulkan_context);
+        }
+        else if (FontMetadata::IsSupportedPath(selected_path))
+        {
+            RenderFontMetadata(selected_path, GetFontMetadata(selected_path), vulkan_context);
         }
     }
     else

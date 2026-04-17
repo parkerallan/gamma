@@ -86,13 +86,6 @@ std::string BuildSceneStub(const std::string& scene_name)
     return "Scene: " + scene_name + "\n";
 }
 
-std::string BuildMaterialStub(const std::string& material_name)
-{
-    return "Material: " + material_name + "\n"
-        "Shader: Default\n"
-        "BaseColor: 1.0, 1.0, 1.0, 1.0\n";
-}
-
 std::string BuildObjectStub(const std::string& object_name)
 {
     return "\nObject: " + object_name + "\n"
@@ -537,26 +530,28 @@ std::filesystem::path ShowNativeModelImportDialog()
     return ShowNativeImportDialog(L"Import Model (.fbx/.glb/.gltf)", filters, std::size(filters));
 }
 
-std::filesystem::path ShowNativeMaterialImportDialog()
+std::filesystem::path ShowNativeFontImportDialog()
 {
     const COMDLG_FILTERSPEC filters[] = {
-        {L"Material Files", L"*.mat"},
+        {L"Font Files", L"*.ttf;*.otf"},
+        {L"TrueType", L"*.ttf"},
+        {L"OpenType", L"*.otf"},
         {L"All Files", L"*.*"},
     };
-    return ShowNativeImportDialog(L"Import Material (.mat)", filters, std::size(filters));
+    return ShowNativeImportDialog(L"Import Font (.ttf/.otf)", filters, std::size(filters));
 }
 
-std::filesystem::path ShowNativeTextureImportDialog()
+std::filesystem::path ShowNativeImageImportDialog()
 {
     const COMDLG_FILTERSPEC filters[] = {
-        {L"Textures", L"*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.gif;*.psd;*.hdr"},
+        {L"Images", L"*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.gif;*.psd;*.hdr"},
         {L"PNG", L"*.png"},
         {L"JPEG", L"*.jpg;*.jpeg"},
         {L"Targa", L"*.tga"},
         {L"Bitmap", L"*.bmp"},
         {L"All Files", L"*.*"},
     };
-    return ShowNativeImportDialog(L"Import Texture", filters, std::size(filters));
+    return ShowNativeImportDialog(L"Import Image", filters, std::size(filters));
 }
 #endif
 }
@@ -604,12 +599,6 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
             OpenCreateDialog(scene_directory, CreateTarget::Scene);
         }
 
-        const std::filesystem::path material_directory = directory_path == state.project_root ? state.project_root / "Assets" / "Materials" : directory_path;
-        if (ImGui::MenuItem("New Material (.mat)"))
-        {
-            OpenCreateDialog(material_directory, CreateTarget::Material);
-        }
-
         ImGui::Separator();
 
         if (ImGui::MenuItem("Import Model (.fbx/.glb/.gltf)..."))
@@ -617,14 +606,14 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
             changed = ImportModel(state, directory_path) || changed;
         }
 
-        if (ImGui::MenuItem("Import Material (.mat)..."))
+        if (ImGui::MenuItem("Import Font (.ttf/.otf)..."))
         {
-            changed = ImportMaterial(state, directory_path) || changed;
+            changed = ImportFont(state, directory_path) || changed;
         }
 
-        if (ImGui::MenuItem("Import Texture..."))
+        if (ImGui::MenuItem("Import Image..."))
         {
-            changed = ImportTexture(state, directory_path) || changed;
+            changed = ImportImage(state, directory_path) || changed;
         }
 
         const std::filesystem::path target_scene_path = ResolveSceneTarget(state);
@@ -657,14 +646,12 @@ bool CreationMenu::Render(EngineState& state)
     const bool creating_script = create_target_ == CreateTarget::Script;
     const bool creating_graph = create_target_ == CreateTarget::Graph;
     const bool creating_scene = create_target_ == CreateTarget::Scene;
-    const bool creating_material = create_target_ == CreateTarget::Material;
     const bool creating_object = create_target_ == CreateTarget::Object;
 
     const char* title = creating_folder ? "Create Folder"
         : creating_script ? "Create Script"
         : creating_graph ? "Create Graph"
         : creating_scene ? "Create Scene"
-        : creating_material ? "Create Material"
         : "Add Object";
     ImGui::TextUnformatted(title);
     ImGui::Text("Target: %s", state.GetDisplayPath(target_directory_).c_str());
@@ -685,7 +672,6 @@ bool CreationMenu::Render(EngineState& state)
         : creating_script ? "Script Name"
         : creating_graph ? "Graph Name"
         : creating_scene ? "Scene Name"
-        : creating_material ? "Material Name"
         : "Object Name";
     const bool submitted = ImGui::InputText(input_label, name_buffer_.data(), name_buffer_.size(), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
@@ -768,10 +754,6 @@ bool CreationMenu::CreateItem(EngineState& state)
     {
         target_path += ".scene";
     }
-    else if (create_target_ == CreateTarget::Material && target_path.extension() != ".mat")
-    {
-        target_path += ".mat";
-    }
 
     if (std::filesystem::exists(target_path))
     {
@@ -820,10 +802,6 @@ bool CreationMenu::CreateItem(EngineState& state)
     {
         output << BuildSceneStub(target_path.stem().string());
     }
-    else if (create_target_ == CreateTarget::Material)
-    {
-        output << BuildMaterialStub(target_path.stem().string());
-    }
 
     if (!output)
     {
@@ -834,7 +812,7 @@ bool CreationMenu::CreateItem(EngineState& state)
     const char* item_kind = create_target_ == CreateTarget::Script ? "script"
         : create_target_ == CreateTarget::Graph ? "graph"
         : create_target_ == CreateTarget::Scene ? "scene"
-        : "material";
+        : "item";
     state.AddLog(std::string("Created ") + item_kind + ": " + state.GetDisplayPath(target_path));
     state.SetSelectedItem(target_path);
     state.OpenTextFile(target_path);
@@ -897,18 +875,18 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
 #endif
 }
 
-bool CreationMenu::ImportMaterial(EngineState& state, const std::filesystem::path& directory_path)
+bool CreationMenu::ImportFont(EngineState& state, const std::filesystem::path& directory_path)
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import material: no project is loaded");
+        state.AddLog("Cannot import font: no project is loaded");
         return false;
     }
 
 #ifdef _WIN32
-    std::filesystem::path destination_directory = state.project_root / "Assets" / "Materials";
-    const std::filesystem::path materials_directory = state.project_root / "Assets" / "Materials";
-    if (!directory_path.empty() && IsPathWithin(materials_directory, directory_path))
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Fonts";
+    const std::filesystem::path fonts_directory = state.project_root / "Assets" / "Fonts";
+    if (!directory_path.empty() && IsPathWithin(fonts_directory, directory_path))
     {
         destination_directory = directory_path;
     }
@@ -917,26 +895,26 @@ bool CreationMenu::ImportMaterial(EngineState& state, const std::filesystem::pat
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare material directory: " + state.GetDisplayPath(destination_directory));
+        state.AddLog("Failed to prepare font directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
-    const std::filesystem::path source_path = ShowNativeMaterialImportDialog();
+    const std::filesystem::path source_path = ShowNativeFontImportDialog();
     if (source_path.empty())
     {
         return false;
     }
 
-    if (!HasExtension(source_path, {".mat"}))
+    if (!HasExtension(source_path, {".ttf", ".otf"}))
     {
-        state.AddLog("Cannot import material: only .mat is supported");
+        state.AddLog("Cannot import font: only .ttf and .otf are supported");
         return false;
     }
 
     const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
     if (destination_path.empty())
     {
-        state.AddLog("Cannot import material: failed to choose a destination name");
+        state.AddLog("Cannot import font: failed to choose a destination name");
         return false;
     }
 
@@ -944,31 +922,31 @@ bool CreationMenu::ImportMaterial(EngineState& state, const std::filesystem::pat
     std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
     if (copy_error)
     {
-        state.AddLog("Failed to import material into: " + state.GetDisplayPath(destination_directory));
+        state.AddLog("Failed to import font into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
     state.SetSelectedItem(destination_path);
-    state.AddLog("Imported material: " + state.GetDisplayPath(destination_path));
+    state.AddLog("Imported font: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Material import is only implemented on Windows");
+    state.AddLog("Font import is only implemented on Windows");
     return false;
 #endif
 }
 
-bool CreationMenu::ImportTexture(EngineState& state, const std::filesystem::path& directory_path)
+bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& directory_path)
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import texture: no project is loaded");
+        state.AddLog("Cannot import Image: no project is loaded");
         return false;
     }
 
 #ifdef _WIN32
-    std::filesystem::path destination_directory = state.project_root / "Assets" / "Textures";
-    const std::filesystem::path textures_directory = state.project_root / "Assets" / "Textures";
-    if (!directory_path.empty() && IsPathWithin(textures_directory, directory_path))
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Images";
+    const std::filesystem::path Images_directory = state.project_root / "Assets" / "Images";
+    if (!directory_path.empty() && IsPathWithin(Images_directory, directory_path))
     {
         destination_directory = directory_path;
     }
@@ -977,11 +955,11 @@ bool CreationMenu::ImportTexture(EngineState& state, const std::filesystem::path
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare texture directory: " + state.GetDisplayPath(destination_directory));
+        state.AddLog("Failed to prepare Image directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
-    const std::filesystem::path source_path = ShowNativeTextureImportDialog();
+    const std::filesystem::path source_path = ShowNativeImageImportDialog();
     if (source_path.empty())
     {
         return false;
@@ -989,14 +967,14 @@ bool CreationMenu::ImportTexture(EngineState& state, const std::filesystem::path
 
     if (!HasExtension(source_path, {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".psd", ".hdr"}))
     {
-        state.AddLog("Cannot import texture: unsupported texture format");
+        state.AddLog("Cannot import Image: unsupported Image format");
         return false;
     }
 
     const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
     if (destination_path.empty())
     {
-        state.AddLog("Cannot import texture: failed to choose a destination name");
+        state.AddLog("Cannot import Image: failed to choose a destination name");
         return false;
     }
 
@@ -1004,15 +982,15 @@ bool CreationMenu::ImportTexture(EngineState& state, const std::filesystem::path
     std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
     if (copy_error)
     {
-        state.AddLog("Failed to import texture into: " + state.GetDisplayPath(destination_directory));
+        state.AddLog("Failed to import Image into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
     state.SetSelectedItem(destination_path);
-    state.AddLog("Imported texture: " + state.GetDisplayPath(destination_path));
+    state.AddLog("Imported Image: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Texture import is only implemented on Windows");
+    state.AddLog("Image import is only implemented on Windows");
     return false;
 #endif
 }

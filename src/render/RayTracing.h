@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-class SceneViewportRayTracing
+class RayTracing
 {
 public:
     struct MaterialRecord

@@ -93,7 +93,7 @@ public:
         std::uint32_t vertex_count = 0;
         std::uint32_t index_count = 0;
         std::vector<GpuMeshSection> sections;
-        std::vector<SceneViewportRayTracing::MaterialRecord> materials;
+        std::vector<RayTracing::MaterialRecord> materials;
         std::vector<GpuMaterialTextures> material_textures;
     };
 
@@ -116,7 +116,7 @@ public:
 
 private:
     VulkanContext* vulkan_context_ = nullptr;
-    SceneViewportRayTracing ray_tracing_{};
+    RayTracing ray_tracing_{};
     bool render_requested_ = false;
     bool middle_mouse_panning_ = false;
     std::uint32_t gizmo_operation_ = 0;

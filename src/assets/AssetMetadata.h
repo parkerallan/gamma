@@ -39,7 +39,7 @@ struct ParsedMaterialMetadata
     static bool IsSupportedPath(const std::filesystem::path& path);
 };
 
-struct TextureMetadata
+struct ImageMetadata
 {
     bool parsed = false;
     std::string error_message;
@@ -51,5 +51,15 @@ struct TextureMetadata
     static bool IsSupportedPath(const std::filesystem::path& path);
 };
 
+struct FontMetadata
+{
+    bool parsed = false;
+    std::string error_message;
+    int glyph_count = 0;
+
+    static bool IsSupportedPath(const std::filesystem::path& path);
+};
+
 ParsedMaterialMetadata LoadMaterialMetadata(const std::filesystem::path& path);
-TextureMetadata LoadTextureMetadata(const std::filesystem::path& path);
+ImageMetadata LoadImageMetadata(const std::filesystem::path& path);
+FontMetadata LoadFontMetadata(const std::filesystem::path& path);

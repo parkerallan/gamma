@@ -218,7 +218,8 @@ add_executable(engine
     src/render/Raytracing.cpp
     src/render/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
-    src/render/TextureInfoRenderer.cpp
+    src/render/FontInfoRenderer.cpp
+    src/render/ImageInfoRenderer.cpp
     src/panels/WorkspacePanel.cpp
 )
 

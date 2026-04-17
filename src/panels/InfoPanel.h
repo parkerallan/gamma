@@ -4,8 +4,9 @@
 #include "assets/ModelAsset.h"
 #include "assets/ModelMetadata.h"
 #include "assets/SceneMetadata.h"
+#include "render/FontInfoRenderer.h"
 #include "render/SceneViewportRenderer.h"
-#include "render/TextureInfoRenderer.h"
+#include "render/ImageInfoRenderer.h"
 #include "state/EngineState.h"
 
 #include <filesystem>
@@ -35,7 +36,8 @@ private:
     const CachedModelAssetEntry& GetModelAssetEntry(const std::filesystem::path& path);
     const ParsedMaterialMetadata& GetMaterialMetadata(const std::filesystem::path& path);
     const SceneMetadata& GetSceneMetadata(const std::filesystem::path& path);
-    const TextureMetadata& GetTextureMetadata(const std::filesystem::path& path);
+    const ImageMetadata& GetImageMetadata(const std::filesystem::path& path);
+    const FontMetadata& GetFontMetadata(const std::filesystem::path& path);
     SceneViewportRenderer* GetCameraPreviewRenderer(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index);
     void ClearCameraPreviewRenderers();
     void RenderCameraAttributePreview(
@@ -47,7 +49,8 @@ private:
     bool HandleSceneObjectAttachmentDrop(EngineState& state, const std::filesystem::path& scene_path, const std::string& object_name);
     void RenderSelectedSceneObject(EngineState& state);
     void RenderMaterialMetadata(const ParsedMaterialMetadata& metadata) const;
-    void RenderTextureMetadata(const std::filesystem::path& path, const TextureMetadata& metadata, VulkanContext* vulkan_context);
+    void RenderImageMetadata(const std::filesystem::path& path, const ImageMetadata& metadata, VulkanContext* vulkan_context);
+    void RenderFontMetadata(const std::filesystem::path& path, const FontMetadata& metadata, VulkanContext* vulkan_context);
     void RenderModelMetadata(const ModelMetadata& metadata) const;
 
     std::filesystem::path cached_model_path_;
@@ -62,13 +65,19 @@ private:
     std::filesystem::file_time_type cached_scene_write_time_{};
     SceneMetadata cached_scene_metadata_{};
     bool has_cached_scene_metadata_ = false;
-    std::filesystem::path cached_texture_path_;
-    std::filesystem::file_time_type cached_texture_write_time_{};
-    TextureMetadata cached_texture_metadata_{};
-    bool has_cached_texture_metadata_ = false;
+    std::filesystem::path cached_image_path_;
+    std::filesystem::file_time_type cached_image_write_time_{};
+    ImageMetadata cached_image_metadata_{};
+    bool has_cached_image_metadata_ = false;
+    std::filesystem::path cached_font_path_;
+    std::filesystem::file_time_type cached_font_write_time_{};
+    FontMetadata cached_font_metadata_{};
+    bool has_cached_font_metadata_ = false;
     VulkanContext* preview_vulkan_context_ = nullptr;
     std::string active_camera_preview_scope_;
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
     std::unordered_map<std::string, std::unique_ptr<SceneViewportRenderer>> camera_preview_renderers_;
-    TextureInfoRenderer texture_info_renderer_{};
+    ImageInfoRenderer image_info_renderer_{};
+    FontInfoRenderer font_info_renderer_{};
+    float font_preview_size_pixels_ = 34.0f;
 };

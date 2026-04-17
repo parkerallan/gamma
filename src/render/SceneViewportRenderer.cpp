@@ -1733,8 +1733,8 @@ void SceneViewportRenderer::SyncRayTracingScene()
         return;
     }
 
-    std::vector<SceneViewportRayTracing::MeshInput> mesh_inputs;
-    std::vector<SceneViewportRayTracing::InstanceInput> instance_inputs;
+    std::vector<RayTracing::MeshInput> mesh_inputs;
+    std::vector<RayTracing::InstanceInput> instance_inputs;
     std::unordered_map<std::string, std::size_t> mesh_index_by_key;
 
     mesh_inputs.reserve(queued_objects_.size());
@@ -1761,7 +1761,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         const std::string mesh_key = object.model_path.string();
         if (mesh_index_by_key.find(mesh_key) == mesh_index_by_key.end())
         {
-            SceneViewportRayTracing::MeshInput mesh_input;
+            RayTracing::MeshInput mesh_input;
             mesh_input.key = mesh_key;
             mesh_input.vertex_device_address = mesh_entry.vertex_buffer.device_address;
             mesh_input.index_device_address = mesh_entry.index_buffer.device_address;
@@ -1771,7 +1771,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
             mesh_input.sections.reserve(mesh_entry.sections.size());
             for (const GpuMeshSection& section : mesh_entry.sections)
             {
-                mesh_input.sections.push_back(SceneViewportRayTracing::MeshSectionRecord{
+                mesh_input.sections.push_back(RayTracing::MeshSectionRecord{
                     section.first_index,
                     section.index_count,
                     section.material_index,
@@ -1783,7 +1783,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
             mesh_inputs.push_back(std::move(mesh_input));
         }
 
-        SceneViewportRayTracing::InstanceInput instance_input;
+        RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
         instance_input.transform = object.model_matrix;
@@ -1792,7 +1792,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
 
     if (!ray_tracing_.UpdateScene(mesh_inputs, instance_inputs))
     {
-        SDL_Log("SceneViewportRayTracing::UpdateScene failed: %s", ray_tracing_.GetStatusMessage().c_str());
+        SDL_Log("RayTracing::UpdateScene failed: %s", ray_tracing_.GetStatusMessage().c_str());
     }
 }
 
@@ -2405,6 +2405,6 @@ void SceneViewportRenderer::RenderGpu()
             grid_origin_z_,
             grid_extent_))
     {
-        SDL_Log("SceneViewportRayTracing::RenderFrame failed: %s", ray_tracing_.GetStatusMessage().c_str());
+        SDL_Log("RayTracing::RenderFrame failed: %s", ray_tracing_.GetStatusMessage().c_str());
     }
 }

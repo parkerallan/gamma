@@ -48,13 +48,13 @@ bool CreateGpuBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
     VkMemoryPropertyFlags properties,
-    SceneViewportRayTracing::GpuBuffer& buffer);
+    RayTracing::GpuBuffer& buffer);
 
-void DestroyGpuBuffer(const VulkanContext* context, SceneViewportRayTracing::GpuBuffer& buffer);
+void DestroyGpuBuffer(const VulkanContext* context, RayTracing::GpuBuffer& buffer);
 
 bool UploadGpuBuffer(
     const VulkanContext& context,
-    const SceneViewportRayTracing::GpuBuffer& buffer,
+    const RayTracing::GpuBuffer& buffer,
     const void* data,
     std::size_t size);
 
@@ -245,7 +245,7 @@ bool BuildShaderBindingTable(
     VkPipeline pipeline,
     std::uint32_t first_group,
     std::uint32_t group_count,
-    SceneViewportRayTracing::ShaderBindingTable& table)
+    RayTracing::ShaderBindingTable& table)
 {
     const VulkanRayTracingSupport& support = context.GetRayTracingSupport();
     const std::uint32_t handle_size = support.ray_tracing_pipeline_properties.shaderGroupHandleSize;
@@ -318,9 +318,9 @@ VkTransformMatrixKHR ToVkTransformMatrix(const std::array<float, 16>& matrix)
     return transform;
 }
 
-bool IsOpaqueMesh(const SceneViewportRayTracing::MeshInput& mesh)
+bool IsOpaqueMesh(const RayTracing::MeshInput& mesh)
 {
-    return std::none_of(mesh.sections.begin(), mesh.sections.end(), [](const SceneViewportRayTracing::MeshSectionRecord& section)
+    return std::none_of(mesh.sections.begin(), mesh.sections.end(), [](const RayTracing::MeshSectionRecord& section)
     {
         return section.uses_alpha_transparency;
     });
@@ -331,7 +331,7 @@ bool CreateGpuBuffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
     VkMemoryPropertyFlags properties,
-    SceneViewportRayTracing::GpuBuffer& buffer)
+    RayTracing::GpuBuffer& buffer)
 {
     const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
     const VkDevice device = context.GetDevice();
@@ -405,7 +405,7 @@ bool CreateGpuBuffer(
     return true;
 }
 
-void DestroyGpuBuffer(const VulkanContext* context, SceneViewportRayTracing::GpuBuffer& buffer)
+void DestroyGpuBuffer(const VulkanContext* context, RayTracing::GpuBuffer& buffer)
 {
     if (context != nullptr)
     {
@@ -424,7 +424,7 @@ void DestroyGpuBuffer(const VulkanContext* context, SceneViewportRayTracing::Gpu
     buffer = {};
 }
 
-bool UploadGpuBuffer(const VulkanContext& context, const SceneViewportRayTracing::GpuBuffer& buffer, const void* data, std::size_t size)
+bool UploadGpuBuffer(const VulkanContext& context, const RayTracing::GpuBuffer& buffer, const void* data, std::size_t size)
 {
     if (buffer.buffer == VK_NULL_HANDLE || buffer.memory == VK_NULL_HANDLE || data == nullptr || size == 0)
     {
@@ -502,7 +502,7 @@ bool ExecuteImmediateCommands(
     return result == VK_SUCCESS;
 }
 
-void DestroyAccelerationStructure(const VulkanContext* context, SceneViewportRayTracing::AccelerationStructure& acceleration_structure)
+void DestroyAccelerationStructure(const VulkanContext* context, RayTracing::AccelerationStructure& acceleration_structure)
 {
     if (context != nullptr && acceleration_structure.handle != VK_NULL_HANDLE)
     {
@@ -534,7 +534,7 @@ bool CreateAccelerationStructure(
     const VulkanContext& context,
     VkAccelerationStructureTypeKHR type,
     VkDeviceSize size,
-    SceneViewportRayTracing::AccelerationStructure& acceleration_structure)
+    RayTracing::AccelerationStructure& acceleration_structure)
 {
     if (!CreateGpuBuffer(
             context,
@@ -570,8 +570,8 @@ bool CreateAccelerationStructure(
 bool BuildBottomLevelAccelerationStructure(
     const VulkanContext& context,
     VkCommandPool command_pool,
-    const SceneViewportRayTracing::MeshInput& mesh,
-    SceneViewportRayTracing::BottomLevelCacheEntry& cache_entry)
+    const RayTracing::MeshInput& mesh,
+    RayTracing::BottomLevelCacheEntry& cache_entry)
 {
     DestroyAccelerationStructure(&context, cache_entry.acceleration_structure);
 
@@ -610,7 +610,7 @@ bool BuildBottomLevelAccelerationStructure(
         return false;
     }
 
-    SceneViewportRayTracing::GpuBuffer scratch_buffer{};
+    RayTracing::GpuBuffer scratch_buffer{};
     if (!CreateGpuBuffer(
             context,
             build_sizes.buildScratchSize,
@@ -666,7 +666,7 @@ bool BuildBottomLevelAccelerationStructure(
 }
 }
 
-bool SceneViewportRayTracing::Initialize(VulkanContext* context)
+bool RayTracing::Initialize(VulkanContext* context)
 {
     vulkan_context_ = context;
     available_ = false;
@@ -770,7 +770,7 @@ bool SceneViewportRayTracing::Initialize(VulkanContext* context)
     return true;
 }
 
-void SceneViewportRayTracing::Shutdown()
+void RayTracing::Shutdown()
 {
     DestroyOutputResources();
     DestroyPipelineResources();
@@ -781,7 +781,7 @@ void SceneViewportRayTracing::Shutdown()
     status_message_.clear();
 }
 
-bool SceneViewportRayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
+bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
 {
     if (vulkan_context_ == nullptr || width == 0 || height == 0 || output_sampler_ == VK_NULL_HANDLE)
     {
@@ -893,7 +893,7 @@ bool SceneViewportRayTracing::EnsureViewportOutput(std::uint32_t width, std::uin
     return true;
 }
 
-bool SceneViewportRayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::vector<InstanceInput>& instances)
+bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::vector<InstanceInput>& instances)
 {
     if (!available_)
     {
@@ -1209,7 +1209,7 @@ bool SceneViewportRayTracing::UpdateScene(const std::vector<MeshInput>& meshes, 
     return true;
 }
 
-void SceneViewportRayTracing::DestroyOutputResources()
+void RayTracing::DestroyOutputResources()
 {
     output_width_ = 0;
     output_height_ = 0;
@@ -1248,7 +1248,7 @@ void SceneViewportRayTracing::DestroyOutputResources()
     }
 }
 
-void SceneViewportRayTracing::DestroyFrameResources()
+void RayTracing::DestroyFrameResources()
 {
     if (vulkan_context_ != nullptr)
     {
@@ -1280,7 +1280,7 @@ void SceneViewportRayTracing::DestroyFrameResources()
     }
 }
 
-void SceneViewportRayTracing::DestroySceneResources()
+void RayTracing::DestroySceneResources()
 {
     DestroyAccelerationStructure(vulkan_context_, top_level_as_);
     DestroyGpuBuffer(vulkan_context_, instance_buffer_);
@@ -1299,7 +1299,7 @@ void SceneViewportRayTracing::DestroySceneResources()
     texture_descriptors_cpu_.clear();
 }
 
-void SceneViewportRayTracing::DestroyPipelineResources()
+void RayTracing::DestroyPipelineResources()
 {
     if (vulkan_context_ != nullptr)
     {
@@ -1366,7 +1366,7 @@ void SceneViewportRayTracing::DestroyPipelineResources()
     descriptor_set_ = VK_NULL_HANDLE;
 }
 
-bool SceneViewportRayTracing::EnsurePipelineResources()
+bool RayTracing::EnsurePipelineResources()
 {
     if (!available_ || vulkan_context_ == nullptr)
     {
@@ -1676,7 +1676,7 @@ bool SceneViewportRayTracing::EnsurePipelineResources()
     return UpdateDescriptors();
 }
 
-bool SceneViewportRayTracing::UpdateDescriptors()
+bool RayTracing::UpdateDescriptors()
 {
     if (vulkan_context_ == nullptr || descriptor_set_ == VK_NULL_HANDLE || descriptor_set_layout_ == VK_NULL_HANDLE)
     {
@@ -1780,7 +1780,7 @@ bool SceneViewportRayTracing::UpdateDescriptors()
     return true;
 }
 
-bool SceneViewportRayTracing::RenderFrame(
+bool RayTracing::RenderFrame(
     const ResolvedSceneLighting& lighting,
     const std::array<float, 16>& view_inverse,
     const std::array<float, 16>& projection_inverse,

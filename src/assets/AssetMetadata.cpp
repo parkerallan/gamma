@@ -1,5 +1,7 @@
 #include "assets/AssetMetadata.h"
 
+#include "imgui.h"
+
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
@@ -10,6 +12,9 @@
 
 namespace
 {
+constexpr float kFontMetadataPreviewSizePixels = 48.0f;
+constexpr ImWchar kFontPreviewGlyphRanges[] = {32, 126, 0};
+
 std::string ToLower(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character)
@@ -139,7 +144,7 @@ bool ParsedMaterialMetadata::IsSupportedPath(const std::filesystem::path& path)
     return GetLowerExtension(path) == ".mat";
 }
 
-bool TextureMetadata::IsSupportedPath(const std::filesystem::path& path)
+bool ImageMetadata::IsSupportedPath(const std::filesystem::path& path)
 {
     const std::string extension = GetLowerExtension(path);
     return extension == ".png" ||
@@ -150,6 +155,12 @@ bool TextureMetadata::IsSupportedPath(const std::filesystem::path& path)
         extension == ".psd" ||
         extension == ".gif" ||
         extension == ".hdr";
+}
+
+bool FontMetadata::IsSupportedPath(const std::filesystem::path& path)
+{
+    const std::string extension = GetLowerExtension(path);
+    return extension == ".ttf" || extension == ".otf";
 }
 
 ParsedMaterialMetadata LoadMaterialMetadata(const std::filesystem::path& path)
@@ -239,22 +250,70 @@ ParsedMaterialMetadata LoadMaterialMetadata(const std::filesystem::path& path)
     return metadata;
 }
 
-TextureMetadata LoadTextureMetadata(const std::filesystem::path& path)
+ImageMetadata LoadImageMetadata(const std::filesystem::path& path)
 {
-    TextureMetadata metadata;
-    if (!TextureMetadata::IsSupportedPath(path))
+    ImageMetadata metadata;
+    if (!ImageMetadata::IsSupportedPath(path))
     {
-        metadata.error_message = "Unsupported texture format.";
+        metadata.error_message = "Unsupported image format.";
         return metadata;
     }
 
     if (stbi_info(path.string().c_str(), &metadata.width, &metadata.height, &metadata.channel_count) == 0)
     {
-        metadata.error_message = stbi_failure_reason() != nullptr ? stbi_failure_reason() : "Failed to read texture metadata.";
+        metadata.error_message = stbi_failure_reason() != nullptr ? stbi_failure_reason() : "Failed to read image metadata.";
         return metadata;
     }
 
     metadata.bits_per_channel = stbi_is_16_bit(path.string().c_str()) != 0 ? 16 : 8;
+    metadata.parsed = true;
+    return metadata;
+}
+
+FontMetadata LoadFontMetadata(const std::filesystem::path& path)
+{
+    FontMetadata metadata;
+    if (!FontMetadata::IsSupportedPath(path))
+    {
+        metadata.error_message = "Unsupported font format.";
+        return metadata;
+    }
+
+    ImFontAtlas preview_atlas;
+    preview_atlas.Flags |= ImFontAtlasFlags_NoMouseCursors | ImFontAtlasFlags_NoBakedLines;
+
+    ImFontConfig font_config;
+    font_config.Flags |= ImFontFlags_NoLoadError;
+
+    ImFont* font = preview_atlas.AddFontFromFileTTF(
+        path.string().c_str(),
+        kFontMetadataPreviewSizePixels,
+        &font_config,
+        kFontPreviewGlyphRanges);
+    if (font == nullptr)
+    {
+        metadata.error_message = "Failed to load font data.";
+        return metadata;
+    }
+
+    unsigned char* atlas_pixels = nullptr;
+    int atlas_width = 0;
+    int atlas_height = 0;
+    preview_atlas.GetTexDataAsRGBA32(&atlas_pixels, &atlas_width, &atlas_height);
+    if (atlas_pixels == nullptr || atlas_width <= 0 || atlas_height <= 0)
+    {
+        metadata.error_message = "Failed to rasterize font preview data.";
+        return metadata;
+    }
+
+    ImFontBaked* baked_font = font->GetFontBaked(font->LegacySize);
+    if (baked_font == nullptr)
+    {
+        metadata.error_message = "Failed to bake font metrics.";
+        return metadata;
+    }
+
+    metadata.glyph_count = baked_font->Glyphs.Size;
     metadata.parsed = true;
     return metadata;
 }

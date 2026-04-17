@@ -21,7 +21,6 @@ private:
         Script,
         Graph,
         Scene,
-        Material,
         Object,
     };
 
@@ -36,8 +35,8 @@ private:
 
     bool CreateItem(EngineState& state);
     bool ImportModel(EngineState& state, const std::filesystem::path& directory_path);
-    bool ImportMaterial(EngineState& state, const std::filesystem::path& directory_path);
-    bool ImportTexture(EngineState& state, const std::filesystem::path& directory_path);
+    bool ImportFont(EngineState& state, const std::filesystem::path& directory_path);
+    bool ImportImage(EngineState& state, const std::filesystem::path& directory_path);
     void OpenCreateDialog(const std::filesystem::path& directory_path, CreateTarget create_target, std::filesystem::path target_scene_path = {});
     void Reset();
 };

@@ -182,8 +182,8 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
         project_root / "Graphs",
         project_root / "Assets",
         project_root / "Assets" / "Models",
-        project_root / "Assets" / "Textures",
-        project_root / "Assets" / "Materials",
+        project_root / "Assets" / "Images",
+        project_root / "Assets" / "Fonts",
         project_root / "Scripts",
         project_root / "Config",
     };
