@@ -5,6 +5,7 @@
 #include <ImGuizmo.h>
 
 #include "imgui.h"
+#include "ui/Codicons.h"
 
 #include <algorithm>
 #include <array>
@@ -1378,6 +1379,36 @@ struct AxisViewFlipResult
     bool hovered = false;
 };
 
+constexpr float kViewportHeaderButtonHeight = 24.0f;
+constexpr float kViewportHeaderButtonRounding = 5.0f;
+constexpr float kViewportHeaderButtonHorizontalPadding = 8.0f;
+constexpr float kViewportHeaderButtonVerticalPadding = 4.0f;
+constexpr float kViewportHeaderButtonMinWidth = 28.0f;
+
+float ComputeViewportHeaderButtonWidth(const char* label)
+{
+    const float button_width = ImGui::CalcTextSize(label).x + kViewportHeaderButtonHorizontalPadding * 2.0f;
+    return (std::max)(button_width, kViewportHeaderButtonMinWidth);
+}
+
+bool DrawViewportHeaderButton(const char* label, const char* tooltip)
+{
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, kViewportHeaderButtonRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kViewportHeaderButtonHorizontalPadding, kViewportHeaderButtonVerticalPadding));
+
+    const bool pressed = ImGui::Button(label, ImVec2(ComputeViewportHeaderButtonWidth(label), kViewportHeaderButtonHeight));
+    const bool hovered = ImGui::IsItemHovered();
+
+    if (hovered && tooltip != nullptr && tooltip[0] != '\0')
+    {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+
+    ImGui::PopStyleVar(2);
+
+    return pressed;
+}
+
 bool DrawTransformModeToolbar(const ImVec2& viewport_min, std::uint32_t& gizmo_operation, bool& gizmo_local_mode)
 {
     const float button_height = 24.0f;
@@ -1802,9 +1833,31 @@ void SceneViewportRenderer::RenderUi(
     const SceneViewportModelResolver& resolve_model_asset,
     SceneViewportCameraState& camera_state)
 {
+    constexpr const char* kBuildButtonLabel = ICON_CI_RUN_WITH_DEPS;
+    constexpr const char* kPlayButtonLabel = ICON_CI_PLAY;
+
     ImGui::TextUnformatted("Scene Viewport");
-    ImGui::SameLine();
-    ImGui::TextDisabled("Right-drag orbit, middle-drag pan, wheel zoom, F focus");
+
+    const float header_spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float build_button_width = ComputeViewportHeaderButtonWidth(kBuildButtonLabel);
+    const float play_button_width = ComputeViewportHeaderButtonWidth(kPlayButtonLabel);
+    const float header_toolbar_width = build_button_width + play_button_width + header_spacing;
+    const float header_toolbar_x = (std::max)(
+        ImGui::GetCursorPosX() + header_spacing,
+        ImGui::GetWindowContentRegionMax().x - header_toolbar_width);
+
+    ImGui::SameLine(header_toolbar_x);
+    if (DrawViewportHeaderButton(kBuildButtonLabel, "Build"))
+    {
+        state.TriggerBuildAction();
+    }
+
+    ImGui::SameLine(0.0f, header_spacing);
+    if (DrawViewportHeaderButton(kPlayButtonLabel, "Play"))
+    {
+        state.TriggerPlayAction();
+    }
+
     ImGui::Separator();
 
     const ImVec2 available = ImGui::GetContentRegionAvail();

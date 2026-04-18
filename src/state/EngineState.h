@@ -54,6 +54,7 @@ struct EngineState
     int auto_save_interval_minutes = 5;
     bool highlight_drop_targets = true;
     bool wrap_editor_text = false;
+    bool request_files_tree_refresh = false;
     std::string saved_file_contents;
     std::string open_file_contents;
     std::vector<char> editor_buffer = std::vector<char>(kEditorBufferCapacity, '\0');
@@ -76,6 +77,38 @@ struct EngineState
     bool HasOpenProject() const
     {
         return !project_root.empty();
+    }
+
+    bool CanBuildProject() const
+    {
+        return HasOpenProject();
+    }
+
+    bool CanPlayScene() const
+    {
+        return HasActiveScene();
+    }
+
+    void TriggerBuildAction()
+    {
+        if (!CanBuildProject())
+        {
+            AddLog("Cannot build: no project is loaded");
+            return;
+        }
+
+        AddLog("Build action is not implemented yet");
+    }
+
+    void TriggerPlayAction()
+    {
+        if (!CanPlayScene())
+        {
+            AddLog("Cannot play: no active scene is available");
+            return;
+        }
+
+        AddLog("Play action is not implemented yet");
     }
 
     bool HasSelectedItem() const
@@ -125,6 +158,7 @@ struct EngineState
         open_file_dirty = false;
         open_graph_dirty = false;
         graph_reload_requested = false;
+        request_files_tree_refresh = false;
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }

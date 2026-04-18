@@ -18,6 +18,8 @@ struct FileTreeNode
     std::string label;
     bool is_directory = false;
     bool is_scene_object = false;
+    bool has_camera_attribute = false;
+    bool is_active_camera = false;
     std::vector<FileTreeNode> children;
 };
 

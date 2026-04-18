@@ -56,6 +56,7 @@ bool SaveSceneObjectAttributeEdit(
     }
 
     RefreshOpenSceneBuffer(state);
+    state.request_files_tree_refresh = true;
     state.AddLog("Updated object " + label + ": " + object.name);
     return true;
 }
@@ -266,6 +267,15 @@ bool RenderAttributeSection(
                 changed = SaveSceneObjectAttributeEdit(state, object, "camera far clip", [&]()
                 {
                     return SetSceneObjectAttributeFarClip(state.selected_item_path, object.name, attribute_index, far_clip);
+                }) || changed;
+            }
+
+            bool active = attribute.camera.active;
+            if (ImGui::Checkbox("Set Camera Active", &active))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "camera active", [&]()
+                {
+                    return SetSceneObjectCameraActive(state.selected_item_path, object.name, attribute_index, active);
                 }) || changed;
             }
 

@@ -118,6 +118,7 @@ set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
 set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
 set(ENGINE_SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/shaders)
 set(ENGINE_SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
+set(ENGINE_UI_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/ui)
 set(ENGINE_SHADER_FLAGS --target-env=vulkan1.2 --target-spv=spv1.4)
 
 function(add_engine_shader source_name shader_stage)
@@ -254,9 +255,14 @@ if(WIN32)
     add_custom_command(TARGET engine POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             $<TARGET_FILE_DIR:engine>/shaders
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            $<TARGET_FILE_DIR:engine>/ui
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${ENGINE_SHADER_OUTPUTS}
             $<TARGET_FILE_DIR:engine>/shaders
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ENGINE_UI_SOURCE_DIR}/codicon.ttf
+            $<TARGET_FILE_DIR:engine>/ui
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_RUNTIME_DLLS:engine>
             $<TARGET_FILE_DIR:engine>

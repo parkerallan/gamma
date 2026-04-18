@@ -32,6 +32,16 @@ bool StartsWith(std::string_view value, std::string_view prefix)
     return value.rfind(prefix, 0) == 0;
 }
 
+std::string ToLowerCopy(std::string_view value)
+{
+    std::string lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+    return lowered;
+}
+
 std::string ExtractValue(std::string_view line, std::string_view prefix)
 {
     return TrimCopy(std::string(line.substr(prefix.size())));
@@ -134,10 +144,33 @@ std::string FormatScalar(float value)
     return stream.str();
 }
 
+std::string FormatBool(bool value)
+{
+    return value ? "true" : "false";
+}
+
 bool ParseScalar(std::string_view value, float& result)
 {
     std::istringstream stream{std::string(value)};
     return static_cast<bool>(stream >> result);
+}
+
+bool ParseBool(std::string_view value, bool& result)
+{
+    const std::string normalized = ToLowerCopy(TrimCopy(std::string(value)));
+    if (normalized == "true" || normalized == "1" || normalized == "yes" || normalized == "on")
+    {
+        result = true;
+        return true;
+    }
+
+    if (normalized == "false" || normalized == "0" || normalized == "no" || normalized == "off")
+    {
+        result = false;
+        return true;
+    }
+
+    return false;
 }
 
 std::vector<std::string> ReadSceneLines(const std::filesystem::path& scene_path)
@@ -303,7 +336,8 @@ bool IsAttributePropertyLine(std::string_view line)
         StartsWith(line, "AttributeOuterCone:") ||
         StartsWith(line, "AttributeFov:") ||
         StartsWith(line, "AttributeNearClip:") ||
-        StartsWith(line, "AttributeFarClip:");
+    StartsWith(line, "AttributeFarClip:") ||
+    StartsWith(line, "AttributeActive:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -377,6 +411,42 @@ bool SetSceneObjectAttributeScalar(
 
         const std::string key_prefix = std::string(key) + ":";
         const std::string new_line = std::string(key) + ": " + FormatScalar(value);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
+bool SetSceneObjectAttributeBoolean(
+    std::string_view key,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    bool value)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + FormatBool(value);
         for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
         {
             if (StartsWith(TrimCopy(lines[index]), key_prefix))
@@ -745,6 +815,10 @@ bool DuplicateSceneObject(const std::filesystem::path& scene_path, const std::st
                 const std::string parent_name = ExtractValue(trimmed, "Parent:");
                 copied_line = parent_name.empty() ? copied_line : "Parent: " + map_name(parent_name);
             }
+            else if (StartsWith(trimmed, "AttributeActive:"))
+            {
+                copied_line = "AttributeActive: false";
+            }
 
             lines.push_back(copied_line);
         }
@@ -978,6 +1052,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseScalar(ExtractValue(trimmed, "AttributeFarClip:"), current_attribute->camera.far_clip);
         }
+        else if (StartsWith(trimmed, "AttributeActive:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeActive:"), current_attribute->camera.active);
+        }
         else if (StartsWith(trimmed, "Model:"))
         {
             current_attribute = nullptr;
@@ -1118,6 +1196,56 @@ bool SetSceneObjectAttributeNearClip(const std::filesystem::path& scene_path, co
 bool SetSceneObjectAttributeFarClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float far_clip)
 {
     return SetSceneObjectAttributeScalar("AttributeFarClip", scene_path, object_name, attribute_index, far_clip);
+}
+
+bool SetSceneObjectCameraActive(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool active)
+{
+    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    if (!scene_metadata.parsed)
+    {
+        return false;
+    }
+
+    const SceneObjectAttribute* target_attribute = nullptr;
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        if (object.name == object_name && attribute_index < object.attributes.size())
+        {
+            target_attribute = &object.attributes[attribute_index];
+            break;
+        }
+    }
+
+    if (target_attribute == nullptr || target_attribute->kind != SceneObjectAttributeKind::Camera)
+    {
+        return false;
+    }
+
+    if (active)
+    {
+        for (const SceneObjectMetadata& object : scene_metadata.objects)
+        {
+            for (std::size_t index = 0; index < object.attributes.size(); ++index)
+            {
+                const SceneObjectAttribute& attribute = object.attributes[index];
+                if (attribute.kind != SceneObjectAttributeKind::Camera)
+                {
+                    continue;
+                }
+
+                const bool is_target = object.name == object_name && index == attribute_index;
+                if (!is_target && attribute.camera.active)
+                {
+                    if (!SetSceneObjectAttributeBoolean("AttributeActive", scene_path, object.name, index, false))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    return SetSceneObjectAttributeBoolean("AttributeActive", scene_path, object_name, attribute_index, active);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)

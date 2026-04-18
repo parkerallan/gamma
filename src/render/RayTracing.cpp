@@ -1211,6 +1211,13 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 
 void RayTracing::DestroyOutputResources()
 {
+    if (vulkan_context_ != nullptr &&
+        (output_descriptor_set_ != VK_NULL_HANDLE || output_view_ != VK_NULL_HANDLE || output_image_ != VK_NULL_HANDLE))
+    {
+        // The previous UI frame can still be sampling the old viewport image when a resize triggers reallocation.
+        vulkan_context_->WaitIdle();
+    }
+
     output_width_ = 0;
     output_height_ = 0;
     output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;

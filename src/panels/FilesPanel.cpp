@@ -3,6 +3,7 @@
 #include "imgui.h"
 
 #include "assets/SceneMetadata.h"
+#include "ui/Codicons.h"
 
 #include <algorithm>
 #include <cctype>
@@ -139,6 +140,11 @@ void FilesPanel::Render(EngineState& state)
     if (current_root_ != state.project_root)
     {
         RebuildTree(state.project_root);
+    }
+    else if (state.request_files_tree_refresh)
+    {
+        RebuildTree(state.project_root);
+        state.request_files_tree_refresh = false;
     }
 
     if (state.request_open_project_dialog)
@@ -328,6 +334,14 @@ std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesyste
             object_node.path = scene_path;
             object_node.label = object.name;
             object_node.is_scene_object = true;
+            object_node.has_camera_attribute = std::any_of(object.attributes.begin(), object.attributes.end(), [](const SceneObjectAttribute& attribute)
+            {
+                return attribute.kind == SceneObjectAttributeKind::Camera;
+            });
+            object_node.is_active_camera = std::any_of(object.attributes.begin(), object.attributes.end(), [](const SceneObjectAttribute& attribute)
+            {
+                return attribute.kind == SceneObjectAttributeKind::Camera && attribute.camera.active;
+            });
             object_node.children = self(self, object.name);
             child_nodes.push_back(std::move(object_node));
         }
@@ -383,16 +397,24 @@ void FilesPanel::RenderNode(
         flags |= ImGuiTreeNodeFlags_Selected;
     }
 
-    if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
+    const bool show_active_camera_indicator = node.is_scene_object && node.is_active_camera;
+    if (show_active_camera_indicator)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.30f, 0.86f, 0.42f, 1.0f));
+    }
+    else if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
     {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.52f, 1.0f));
     }
 
     const ImVec2 node_pos = ImGui::GetCursorScreenPos();
-    const bool opened = ImGui::TreeNodeEx(tree_id.c_str(), flags, "%s", node.label.c_str());
+    const std::string display_label = show_active_camera_indicator
+        ? std::string(ICON_CI_DEVICE_CAMERA_VIDEO) + " " + node.label
+        : node.label;
+    const bool opened = ImGui::TreeNodeEx(tree_id.c_str(), flags, "%s", display_label.c_str());
     DrawHierarchyGuides(node_pos.x, depth, ancestor_has_next, is_last_sibling);
 
-    if (is_scene_file && !state.IsActiveScene(node.path) && !is_selected)
+    if (show_active_camera_indicator || (is_scene_file && !state.IsActiveScene(node.path) && !is_selected))
     {
         ImGui::PopStyleColor();
     }

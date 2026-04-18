@@ -4,12 +4,20 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
+#include "ui/Codicons.h"
 
+#include <array>
 #include <filesystem>
 #include <string>
 
 namespace
 {
+constexpr ImWchar kCodiconGlyphRanges[] = {
+    static_cast<ImWchar>(ICON_MIN_CI),
+    static_cast<ImWchar>(ICON_MAX_16_CI),
+    0,
+};
+
 bool IsWorkspaceRoot(const std::filesystem::path& path)
 {
     return std::filesystem::exists(path / "CMakeLists.txt") && std::filesystem::exists(path / "src");
@@ -44,6 +52,97 @@ std::filesystem::path ResolveWorkspaceRoot()
 
     return current;
 }
+
+std::filesystem::path ResolveCodiconFontPath(const std::filesystem::path& workspace_root)
+{
+    const std::array<std::filesystem::path, 2> relative_paths = {
+        std::filesystem::path("src/ui/codicon.ttf"),
+        std::filesystem::path("ui/codicon.ttf"),
+    };
+
+    std::error_code error;
+    if (!workspace_root.empty())
+    {
+        for (const std::filesystem::path& relative_path : relative_paths)
+        {
+            const std::filesystem::path candidate = workspace_root / relative_path;
+            if (std::filesystem::exists(candidate, error))
+            {
+                return candidate;
+            }
+            error.clear();
+        }
+    }
+
+    const std::filesystem::path current = std::filesystem::current_path(error);
+    if (!error)
+    {
+        for (const std::filesystem::path& relative_path : relative_paths)
+        {
+            const std::filesystem::path candidate = current / relative_path;
+            if (std::filesystem::exists(candidate, error))
+            {
+                return candidate;
+            }
+            error.clear();
+        }
+    }
+
+    const char* base_path_raw = SDL_GetBasePath();
+    if (base_path_raw != nullptr)
+    {
+        const std::filesystem::path base_path(base_path_raw);
+        for (const std::filesystem::path& relative_path : relative_paths)
+        {
+            const std::filesystem::path candidate = base_path / relative_path;
+            if (std::filesystem::exists(candidate, error))
+            {
+                return candidate;
+            }
+            error.clear();
+        }
+    }
+
+    return {};
+}
+
+void LoadUserInterfaceFonts(ImGuiIO& io, const std::filesystem::path& workspace_root)
+{
+    ImFont* default_font = io.Fonts->AddFontDefaultVector();
+    if (default_font == nullptr)
+    {
+        default_font = io.Fonts->AddFontDefaultBitmap();
+    }
+
+    if (default_font == nullptr)
+    {
+        SDL_Log("Failed to initialize the default ImGui font");
+        return;
+    }
+
+    const std::filesystem::path codicon_font_path = ResolveCodiconFontPath(workspace_root);
+    if (codicon_font_path.empty())
+    {
+        SDL_Log("Codicon font not found; viewport toolbar icons will use missing glyphs");
+        return;
+    }
+
+    ImFontConfig icon_font_config;
+    icon_font_config.MergeMode = true;
+    icon_font_config.PixelSnapH = true;
+    icon_font_config.GlyphOffset.y = 2.0f;
+    icon_font_config.Flags |= ImFontFlags_NoLoadError;
+
+    const float icon_font_size = default_font->LegacySize > 0.0f ? default_font->LegacySize : 13.0f;
+    if (io.Fonts->AddFontFromFileTTF(
+            codicon_font_path.string().c_str(),
+            icon_font_size,
+            &icon_font_config,
+            kCodiconGlyphRanges) == nullptr)
+    {
+        SDL_Log("Failed to merge Codicon font from %s", codicon_font_path.string().c_str());
+    }
+}
 }
 
 bool EngineApplication::Init()
@@ -76,6 +175,8 @@ bool EngineApplication::Init()
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window_);
 
+    const std::filesystem::path workspace_root = ResolveWorkspaceRoot();
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -105,10 +206,7 @@ bool EngineApplication::Init()
     init_info.CheckVkResultFn = VulkanContext::CheckVkResult;
     ImGui_ImplVulkan_Init(&init_info);
 
-    if (io.Fonts->AddFontDefaultVector() == nullptr)
-    {
-        io.Fonts->AddFontDefaultBitmap();
-    }
+    LoadUserInterfaceFonts(io, workspace_root);
 
     if (!workspace_panel_.InitializeSceneRenderer(&vulkan_context_))
     {
@@ -119,7 +217,7 @@ bool EngineApplication::Init()
         SDL_Log("Info panel scene preview renderer initialization failed");
     }
 
-    state_.SetWorkspaceRoot(ResolveWorkspaceRoot());
+    state_.SetWorkspaceRoot(workspace_root);
     state_.AddLog("Workspace root: " + state_.workspace_root.generic_string());
     state_.AddLog("Rendering backend: raw Vulkan API");
     state_.AddLog("Engine started");
@@ -295,6 +393,18 @@ void EngineApplication::RenderMainMenuBar()
             {
                 state_.OpenTextFile(state_.open_file_path);
             }
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Build", "Ctrl+B", false, state_.CanBuildProject()))
+        {
+            state_.TriggerBuildAction();
+        }
+
+        if (ImGui::MenuItem("Play", "F5", false, state_.CanPlayScene()))
+        {
+            state_.TriggerPlayAction();
         }
 
         ImGui::Separator();

@@ -43,6 +43,7 @@ struct SceneObjectCameraAttributes
     float field_of_view_degrees = 55.0f;
     float near_clip = 0.01f;
     float far_clip = 250.0f;
+    bool active = false;
 };
 
 struct SceneObjectAttribute
@@ -98,6 +99,7 @@ bool SetSceneObjectAttributeOuterConeDegrees(const std::filesystem::path& scene_
 bool SetSceneObjectAttributeFieldOfView(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float field_of_view_degrees);
 bool SetSceneObjectAttributeNearClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float near_clip);
 bool SetSceneObjectAttributeFarClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float far_clip);
+bool SetSceneObjectCameraActive(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool active);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);
 bool AddSceneObjectScript(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& script_path);
