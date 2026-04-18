@@ -55,6 +55,12 @@ struct EngineState
     bool highlight_drop_targets = true;
     bool wrap_editor_text = false;
     bool request_files_tree_refresh = false;
+    bool play_start_requested = false;
+    bool play_stop_requested = false;
+    bool play_restart_requested = false;
+    bool is_playing = false;
+    std::filesystem::path playing_scene_path;
+    std::string last_play_error;
     std::string saved_file_contents;
     std::string open_file_contents;
     std::vector<char> editor_buffer = std::vector<char>(kEditorBufferCapacity, '\0');
@@ -104,11 +110,37 @@ struct EngineState
     {
         if (!CanPlayScene())
         {
-            AddLog("Cannot play: no active scene is available");
+            last_play_error = "Cannot play: no active scene is available";
+            AddLog(last_play_error);
             return;
         }
 
-        AddLog("Play action is not implemented yet");
+        if (is_playing)
+        {
+            play_restart_requested = true;
+            play_stop_requested = true;
+            AddLog("Restarting runtime session");
+            return;
+        }
+
+        play_start_requested = true;
+        play_stop_requested = false;
+        play_restart_requested = false;
+        last_play_error.clear();
+        AddLog("Starting runtime session");
+    }
+
+    void ClearPlayRequests()
+    {
+        play_start_requested = false;
+        play_stop_requested = false;
+        play_restart_requested = false;
+    }
+
+    void SetPlayError(std::string message)
+    {
+        last_play_error = std::move(message);
+        AddLog(last_play_error);
     }
 
     bool HasSelectedItem() const
@@ -159,6 +191,10 @@ struct EngineState
         open_graph_dirty = false;
         graph_reload_requested = false;
         request_files_tree_refresh = false;
+        ClearPlayRequests();
+        is_playing = false;
+        playing_scene_path.clear();
+        last_play_error.clear();
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }

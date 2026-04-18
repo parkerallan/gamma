@@ -1,0 +1,1344 @@
+#include "render/RuntimeRenderer.h"
+
+#include <SDL3/SDL.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <functional>
+#include <limits>
+
+namespace
+{
+constexpr float kPi = 3.1415926535f;
+
+struct Vec3
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+struct SceneGpuVertex
+{
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float normal[3] = {0.0f, 1.0f, 0.0f};
+    float uv[2] = {0.0f, 0.0f};
+    float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float tangent[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+};
+
+Vec3 Add(const Vec3& left, const Vec3& right)
+{
+    return Vec3{left.x + right.x, left.y + right.y, left.z + right.z};
+}
+
+Vec3 Multiply(const Vec3& value, float scalar)
+{
+    return Vec3{value.x * scalar, value.y * scalar, value.z * scalar};
+}
+
+Vec3 Subtract(const Vec3& left, const Vec3& right)
+{
+    return Vec3{left.x - right.x, left.y - right.y, left.z - right.z};
+}
+
+float Dot(const Vec3& left, const Vec3& right)
+{
+    return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+Vec3 Cross(const Vec3& left, const Vec3& right)
+{
+    return Vec3{
+        left.y * right.z - left.z * right.y,
+        left.z * right.x - left.x * right.z,
+        left.x * right.y - left.y * right.x,
+    };
+}
+
+float Length(const Vec3& value)
+{
+    return std::sqrt(Dot(value, value));
+}
+
+Vec3 Normalize(const Vec3& value)
+{
+    const float length = Length(value);
+    if (length <= 0.0001f)
+    {
+        return Vec3{0.0f, 0.0f, 0.0f};
+    }
+
+    return Multiply(value, 1.0f / length);
+}
+
+float DegreesToRadians(float degrees)
+{
+    return degrees * (kPi / 180.0f);
+}
+
+void SetIdentity(float* matrix)
+{
+    for (int index = 0; index < 16; ++index)
+    {
+        matrix[index] = 0.0f;
+    }
+
+    matrix[0] = 1.0f;
+    matrix[5] = 1.0f;
+    matrix[10] = 1.0f;
+    matrix[15] = 1.0f;
+}
+
+void MultiplyMatrix(const float* left, const float* right, float* result)
+{
+    float temp[16];
+    for (int row = 0; row < 4; ++row)
+    {
+        for (int column = 0; column < 4; ++column)
+        {
+            temp[column * 4 + row] = 0.0f;
+            for (int inner = 0; inner < 4; ++inner)
+            {
+                temp[column * 4 + row] += left[inner * 4 + row] * right[column * 4 + inner];
+            }
+        }
+    }
+
+    std::memcpy(result, temp, sizeof(temp));
+}
+
+void BuildScaleMatrix(const SceneVector3& scale, float* matrix)
+{
+    SetIdentity(matrix);
+    matrix[0] = scale[0];
+    matrix[5] = scale[1];
+    matrix[10] = scale[2];
+}
+
+void BuildTranslationMatrix(const SceneVector3& translation, float* matrix)
+{
+    SetIdentity(matrix);
+    matrix[12] = translation[0];
+    matrix[13] = translation[1];
+    matrix[14] = translation[2];
+}
+
+void BuildRotationXMatrix(float radians, float* matrix)
+{
+    SetIdentity(matrix);
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    matrix[5] = c;
+    matrix[6] = s;
+    matrix[9] = -s;
+    matrix[10] = c;
+}
+
+void BuildRotationYMatrix(float radians, float* matrix)
+{
+    SetIdentity(matrix);
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    matrix[0] = c;
+    matrix[2] = -s;
+    matrix[8] = s;
+    matrix[10] = c;
+}
+
+void BuildRotationZMatrix(float radians, float* matrix)
+{
+    SetIdentity(matrix);
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    matrix[0] = c;
+    matrix[1] = s;
+    matrix[4] = -s;
+    matrix[5] = c;
+}
+
+void BuildTransformMatrix(const SceneVector3& position, const SceneVector3& rotation, const SceneVector3& scale, float* matrix)
+{
+    float scale_matrix[16];
+    float rotation_x_matrix[16];
+    float rotation_y_matrix[16];
+    float rotation_z_matrix[16];
+    float translation_matrix[16];
+    float temp_a[16];
+    float temp_b[16];
+
+    BuildScaleMatrix(scale, scale_matrix);
+    BuildRotationXMatrix(DegreesToRadians(rotation[0]), rotation_x_matrix);
+    BuildRotationYMatrix(DegreesToRadians(rotation[1]), rotation_y_matrix);
+    BuildRotationZMatrix(DegreesToRadians(rotation[2]), rotation_z_matrix);
+    BuildTranslationMatrix(position, translation_matrix);
+
+    MultiplyMatrix(rotation_x_matrix, scale_matrix, temp_a);
+    MultiplyMatrix(rotation_y_matrix, temp_a, temp_b);
+    MultiplyMatrix(rotation_z_matrix, temp_b, temp_a);
+    MultiplyMatrix(translation_matrix, temp_a, matrix);
+}
+
+Vec3 TransformPoint(const float* matrix, const Vec3& point)
+{
+    return Vec3{
+        matrix[0] * point.x + matrix[4] * point.y + matrix[8] * point.z + matrix[12],
+        matrix[1] * point.x + matrix[5] * point.y + matrix[9] * point.z + matrix[13],
+        matrix[2] * point.x + matrix[6] * point.y + matrix[10] * point.z + matrix[14]};
+}
+
+Vec3 TransformDirectionByMatrix(const float* matrix, const Vec3& direction)
+{
+    return Normalize(Vec3{
+        matrix[0] * direction.x + matrix[4] * direction.y + matrix[8] * direction.z,
+        matrix[1] * direction.x + matrix[5] * direction.y + matrix[9] * direction.z,
+        matrix[2] * direction.x + matrix[6] * direction.y + matrix[10] * direction.z});
+}
+
+void BuildLookAtMatrix(const Vec3& eye, const Vec3& center, const Vec3& up, float* matrix)
+{
+    const Vec3 forward = Normalize(Subtract(center, eye));
+    Vec3 side = Normalize(Cross(forward, up));
+    if (Length(side) <= 0.0001f)
+    {
+        side = Vec3{1.0f, 0.0f, 0.0f};
+    }
+    const Vec3 true_up = Cross(side, forward);
+
+    SetIdentity(matrix);
+    matrix[0] = side.x;
+    matrix[4] = side.y;
+    matrix[8] = side.z;
+    matrix[1] = true_up.x;
+    matrix[5] = true_up.y;
+    matrix[9] = true_up.z;
+    matrix[2] = -forward.x;
+    matrix[6] = -forward.y;
+    matrix[10] = -forward.z;
+    matrix[12] = -Dot(side, eye);
+    matrix[13] = -Dot(true_up, eye);
+    matrix[14] = Dot(forward, eye);
+}
+
+bool InvertMatrix(const float* matrix, float* inverse)
+{
+    float inv[16];
+
+    inv[0] = matrix[5] * matrix[10] * matrix[15] - matrix[5] * matrix[11] * matrix[14] - matrix[9] * matrix[6] * matrix[15] + matrix[9] * matrix[7] * matrix[14] + matrix[13] * matrix[6] * matrix[11] - matrix[13] * matrix[7] * matrix[10];
+    inv[4] = -matrix[4] * matrix[10] * matrix[15] + matrix[4] * matrix[11] * matrix[14] + matrix[8] * matrix[6] * matrix[15] - matrix[8] * matrix[7] * matrix[14] - matrix[12] * matrix[6] * matrix[11] + matrix[12] * matrix[7] * matrix[10];
+    inv[8] = matrix[4] * matrix[9] * matrix[15] - matrix[4] * matrix[11] * matrix[13] - matrix[8] * matrix[5] * matrix[15] + matrix[8] * matrix[7] * matrix[13] + matrix[12] * matrix[5] * matrix[11] - matrix[12] * matrix[7] * matrix[9];
+    inv[12] = -matrix[4] * matrix[9] * matrix[14] + matrix[4] * matrix[10] * matrix[13] + matrix[8] * matrix[5] * matrix[14] - matrix[8] * matrix[6] * matrix[13] - matrix[12] * matrix[5] * matrix[10] + matrix[12] * matrix[6] * matrix[9];
+    inv[1] = -matrix[1] * matrix[10] * matrix[15] + matrix[1] * matrix[11] * matrix[14] + matrix[9] * matrix[2] * matrix[15] - matrix[9] * matrix[3] * matrix[14] - matrix[13] * matrix[2] * matrix[11] + matrix[13] * matrix[3] * matrix[10];
+    inv[5] = matrix[0] * matrix[10] * matrix[15] - matrix[0] * matrix[11] * matrix[14] - matrix[8] * matrix[2] * matrix[15] + matrix[8] * matrix[3] * matrix[14] + matrix[12] * matrix[2] * matrix[11] - matrix[12] * matrix[3] * matrix[10];
+    inv[9] = -matrix[0] * matrix[9] * matrix[15] + matrix[0] * matrix[11] * matrix[13] + matrix[8] * matrix[1] * matrix[15] - matrix[8] * matrix[3] * matrix[13] - matrix[12] * matrix[1] * matrix[11] + matrix[12] * matrix[3] * matrix[9];
+    inv[13] = matrix[0] * matrix[9] * matrix[14] - matrix[0] * matrix[10] * matrix[13] - matrix[8] * matrix[1] * matrix[14] + matrix[8] * matrix[2] * matrix[13] + matrix[12] * matrix[1] * matrix[10] - matrix[12] * matrix[2] * matrix[9];
+    inv[2] = matrix[1] * matrix[6] * matrix[15] - matrix[1] * matrix[7] * matrix[14] - matrix[5] * matrix[2] * matrix[15] + matrix[5] * matrix[3] * matrix[14] + matrix[13] * matrix[2] * matrix[7] - matrix[13] * matrix[3] * matrix[6];
+    inv[6] = -matrix[0] * matrix[6] * matrix[15] + matrix[0] * matrix[7] * matrix[14] + matrix[4] * matrix[2] * matrix[15] - matrix[4] * matrix[3] * matrix[14] - matrix[12] * matrix[2] * matrix[7] + matrix[12] * matrix[3] * matrix[6];
+    inv[10] = matrix[0] * matrix[5] * matrix[15] - matrix[0] * matrix[7] * matrix[13] - matrix[4] * matrix[1] * matrix[15] + matrix[4] * matrix[3] * matrix[13] + matrix[12] * matrix[1] * matrix[7] - matrix[12] * matrix[3] * matrix[5];
+    inv[14] = -matrix[0] * matrix[5] * matrix[14] + matrix[0] * matrix[6] * matrix[13] + matrix[4] * matrix[1] * matrix[14] - matrix[4] * matrix[2] * matrix[13] - matrix[12] * matrix[1] * matrix[6] + matrix[12] * matrix[2] * matrix[5];
+    inv[3] = -matrix[1] * matrix[6] * matrix[11] + matrix[1] * matrix[7] * matrix[10] + matrix[5] * matrix[2] * matrix[11] - matrix[5] * matrix[3] * matrix[10] - matrix[9] * matrix[2] * matrix[7] + matrix[9] * matrix[3] * matrix[6];
+    inv[7] = matrix[0] * matrix[6] * matrix[11] - matrix[0] * matrix[7] * matrix[10] - matrix[4] * matrix[2] * matrix[11] + matrix[4] * matrix[3] * matrix[10] + matrix[8] * matrix[2] * matrix[7] - matrix[8] * matrix[3] * matrix[6];
+    inv[11] = -matrix[0] * matrix[5] * matrix[11] + matrix[0] * matrix[7] * matrix[9] + matrix[4] * matrix[1] * matrix[11] - matrix[4] * matrix[3] * matrix[9] - matrix[8] * matrix[1] * matrix[7] + matrix[8] * matrix[3] * matrix[5];
+    inv[15] = matrix[0] * matrix[5] * matrix[10] - matrix[0] * matrix[6] * matrix[9] - matrix[4] * matrix[1] * matrix[10] + matrix[4] * matrix[2] * matrix[9] + matrix[8] * matrix[1] * matrix[6] - matrix[8] * matrix[2] * matrix[5];
+
+    float determinant = matrix[0] * inv[0] + matrix[1] * inv[4] + matrix[2] * inv[8] + matrix[3] * inv[12];
+    if (std::abs(determinant) <= 0.000001f)
+    {
+        return false;
+    }
+
+    determinant = 1.0f / determinant;
+    for (int index = 0; index < 16; ++index)
+    {
+        inverse[index] = inv[index] * determinant;
+    }
+
+    return true;
+}
+
+void BuildPerspectiveMatrix(float fovy_degrees, float aspect, float z_near, float z_far, float* matrix)
+{
+    for (int index = 0; index < 16; ++index)
+    {
+        matrix[index] = 0.0f;
+    }
+
+    const float f = 1.0f / std::tan(DegreesToRadians(fovy_degrees) * 0.5f);
+    matrix[0] = f / aspect;
+    matrix[5] = f;
+    matrix[10] = (z_near + z_far) / (z_near - z_far);
+    matrix[11] = -1.0f;
+    matrix[14] = (2.0f * z_near * z_far) / (z_near - z_far);
+}
+
+struct SceneResolvedObjectPose
+{
+    std::array<float, 16> world_matrix = {};
+    std::array<float, 16> parent_matrix = {};
+    bool has_parent = false;
+    bool resolved = false;
+    bool resolving = false;
+};
+
+using SceneResolvedObjectPoseMap = std::unordered_map<std::string, SceneResolvedObjectPose>;
+
+SceneLightingResolvedObjectPoseMap BuildLightingPoseMap(const SceneResolvedObjectPoseMap& resolved_poses)
+{
+    SceneLightingResolvedObjectPoseMap lighting_poses;
+    lighting_poses.reserve(resolved_poses.size());
+    for (const auto& [name, pose] : resolved_poses)
+    {
+        lighting_poses.emplace(name, SceneLightingResolvedObjectPose{pose.world_matrix});
+    }
+    return lighting_poses;
+}
+
+SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_metadata)
+{
+    std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        objects_by_name[object.name] = &object;
+    }
+
+    SceneResolvedObjectPoseMap poses;
+    std::function<const SceneResolvedObjectPose&(const std::string&)> resolve_pose = [&](const std::string& object_name) -> const SceneResolvedObjectPose&
+    {
+        SceneResolvedObjectPose& pose = poses[object_name];
+        if (pose.resolved)
+        {
+            return pose;
+        }
+
+        SetIdentity(pose.world_matrix.data());
+        SetIdentity(pose.parent_matrix.data());
+
+        const auto object_it = objects_by_name.find(object_name);
+        if (object_it == objects_by_name.end())
+        {
+            pose.resolved = true;
+            return pose;
+        }
+
+        if (pose.resolving)
+        {
+            pose.resolved = true;
+            return pose;
+        }
+
+        pose.resolving = true;
+
+        float local_matrix[16];
+        BuildTransformMatrix(object_it->second->position, object_it->second->rotation, object_it->second->scale, local_matrix);
+
+        const std::string& parent_name = object_it->second->parent_name;
+        const auto parent_it = objects_by_name.find(parent_name);
+        if (!parent_name.empty() && parent_it != objects_by_name.end() && parent_name != object_name)
+        {
+            const SceneResolvedObjectPose& parent_pose = resolve_pose(parent_name);
+            std::memcpy(pose.parent_matrix.data(), parent_pose.world_matrix.data(), sizeof(float) * 16);
+            MultiplyMatrix(parent_pose.world_matrix.data(), local_matrix, pose.world_matrix.data());
+            pose.has_parent = true;
+        }
+        else
+        {
+            std::memcpy(pose.world_matrix.data(), local_matrix, sizeof(local_matrix));
+        }
+
+        pose.resolving = false;
+        pose.resolved = true;
+        return pose;
+    };
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        resolve_pose(object.name);
+    }
+
+    return poses;
+}
+
+std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties)
+{
+    VkPhysicalDeviceMemoryProperties memory_properties = {};
+    vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+    for (std::uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index)
+    {
+        const bool type_matches = (type_filter & (1u << index)) != 0;
+        const bool properties_match = (memory_properties.memoryTypes[index].propertyFlags & properties) == properties;
+        if (type_matches && properties_match)
+        {
+            return index;
+        }
+    }
+
+    return UINT32_MAX;
+}
+
+bool CreateVulkanBuffer(
+    const VulkanContext& context,
+    VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags properties,
+    RuntimeRenderer::GpuBuffer& buffer)
+{
+    VkBufferCreateInfo buffer_info = {};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = usage;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkResult result = vkCreateBuffer(context.GetDevice(), &buffer_info, context.GetAllocator(), &buffer.buffer);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkMemoryRequirements requirements = {};
+    vkGetBufferMemoryRequirements(context.GetDevice(), buffer.buffer, &requirements);
+
+    VkMemoryAllocateInfo allocate_info = {};
+    allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate_info.allocationSize = requirements.size;
+    allocate_info.memoryTypeIndex = FindMemoryType(context.GetPhysicalDevice(), requirements.memoryTypeBits, properties);
+
+    VkMemoryAllocateFlagsInfo allocate_flags = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    if ((usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0)
+    {
+        allocate_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        allocate_info.pNext = &allocate_flags;
+    }
+
+    if (allocate_info.memoryTypeIndex == UINT32_MAX)
+    {
+        vkDestroyBuffer(context.GetDevice(), buffer.buffer, context.GetAllocator());
+        buffer.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    result = vkAllocateMemory(context.GetDevice(), &allocate_info, context.GetAllocator(), &buffer.memory);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkDestroyBuffer(context.GetDevice(), buffer.buffer, context.GetAllocator());
+        buffer.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    result = vkBindBufferMemory(context.GetDevice(), buffer.buffer, buffer.memory, 0);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeMemory(context.GetDevice(), buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(context.GetDevice(), buffer.buffer, context.GetAllocator());
+        buffer = {};
+        return false;
+    }
+
+    buffer.size = size;
+    if ((usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0)
+    {
+        const VulkanRayTracingDispatch& dispatch = context.GetRayTracingDispatch();
+        if (dispatch.get_buffer_device_address != nullptr)
+        {
+            VkBufferDeviceAddressInfo address_info = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+            address_info.buffer = buffer.buffer;
+            buffer.device_address = dispatch.get_buffer_device_address(context.GetDevice(), &address_info);
+        }
+    }
+
+    return true;
+}
+
+bool UploadBufferData(VkDevice device, const RuntimeRenderer::GpuBuffer& buffer, const void* data, std::size_t size)
+{
+    if (buffer.buffer == VK_NULL_HANDLE || buffer.memory == VK_NULL_HANDLE || data == nullptr || size == 0)
+    {
+        return false;
+    }
+
+    void* mapped = nullptr;
+    const VkResult result = vkMapMemory(device, buffer.memory, 0, size, 0, &mapped);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS || mapped == nullptr)
+    {
+        return false;
+    }
+
+    std::memcpy(mapped, data, size);
+    vkUnmapMemory(device, buffer.memory);
+    return true;
+}
+
+bool ExecuteImmediateCommands(
+    VkDevice device,
+    VkCommandPool command_pool,
+    VkQueue queue,
+    const std::function<void(VkCommandBuffer)>& record_commands)
+{
+    VkCommandBufferAllocateInfo allocate_info = {};
+    allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = command_pool;
+    allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1;
+
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    VkResult result = vkAllocateCommandBuffers(device, &allocate_info, &command_buffer);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(command_buffer, &begin_info);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+        return false;
+    }
+
+    record_commands(command_buffer);
+
+    result = vkEndCommandBuffer(command_buffer);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+        return false;
+    }
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+    result = vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+        return false;
+    }
+
+    result = vkQueueWaitIdle(queue);
+    VulkanContext::CheckVkResult(result);
+    vkFreeCommandBuffers(device, command_pool, 1, &command_buffer);
+    return result == VK_SUCCESS;
+}
+
+void TransitionImageLayout(
+    VkCommandBuffer command_buffer,
+    VkImage image,
+    VkImageAspectFlags aspect_mask,
+    VkImageLayout old_layout,
+    VkImageLayout new_layout,
+    VkPipelineStageFlags src_stage,
+    VkPipelineStageFlags dst_stage,
+    VkAccessFlags src_access_mask,
+    VkAccessFlags dst_access_mask)
+{
+    VkImageMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = aspect_mask;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = src_access_mask;
+    barrier.dstAccessMask = dst_access_mask;
+
+    vkCmdPipelineBarrier(
+        command_buffer,
+        src_stage,
+        dst_stage,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+}
+
+bool CreateVulkanImage(
+    VkPhysicalDevice physical_device,
+    VkDevice device,
+    const VkAllocationCallbacks* allocator,
+    std::uint32_t width,
+    std::uint32_t height,
+    VkFormat format,
+    VkImageUsageFlags usage,
+    VkImageAspectFlags aspect_mask,
+    VkImage& image,
+    VkDeviceMemory& memory,
+    VkImageView& image_view)
+{
+    VkImageCreateInfo image_info = {};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent.width = width;
+    image_info.extent.height = height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = usage;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkResult result = vkCreateImage(device, &image_info, allocator, &image);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkMemoryRequirements memory_requirements = {};
+    vkGetImageMemoryRequirements(device, image, &memory_requirements);
+
+    VkMemoryAllocateInfo allocation_info = {};
+    allocation_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = memory_requirements.size;
+    allocation_info.memoryTypeIndex = FindMemoryType(physical_device, memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (allocation_info.memoryTypeIndex == UINT32_MAX)
+    {
+        vkDestroyImage(device, image, allocator);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    result = vkAllocateMemory(device, &allocation_info, allocator, &memory);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkDestroyImage(device, image, allocator);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    result = vkBindImageMemory(device, image, memory, 0);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeMemory(device, memory, allocator);
+        vkDestroyImage(device, image, allocator);
+        memory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = aspect_mask;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.layerCount = 1;
+
+    result = vkCreateImageView(device, &view_info, allocator, &image_view);
+    VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        vkFreeMemory(device, memory, allocator);
+        vkDestroyImage(device, image, allocator);
+        memory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
+}
+
+RuntimeRenderer::GpuTexture* SelectTextureSlot(RuntimeRenderer::GpuMaterialTextures& material_textures, std::size_t slot_index)
+{
+    switch (slot_index)
+    {
+    case 0:
+        return &material_textures.base_color;
+    case 1:
+        return &material_textures.metallic_roughness;
+    case 2:
+        return &material_textures.normal;
+    case 3:
+        return &material_textures.occlusion;
+    case 4:
+        return &material_textures.emissive;
+    default:
+        return nullptr;
+    }
+}
+
+bool CreateTextureFromAsset(
+    VulkanContext& context,
+    VkCommandPool command_pool,
+    const ModelTextureAsset& texture_asset,
+    RuntimeRenderer::GpuTexture& texture)
+{
+    if (command_pool == VK_NULL_HANDLE || !texture_asset.valid || texture_asset.width <= 0 || texture_asset.height <= 0 || texture_asset.pixels.empty())
+    {
+        return false;
+    }
+
+    const VkDevice device = context.GetDevice();
+    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) * static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+
+    RuntimeRenderer::GpuBuffer staging_buffer{};
+    if (!CreateVulkanBuffer(
+            context,
+            upload_size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            staging_buffer))
+    {
+        return false;
+    }
+
+    if (!UploadBufferData(device, staging_buffer, texture_asset.pixels.data(), static_cast<std::size_t>(upload_size)))
+    {
+        vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
+        return false;
+    }
+
+    if (!CreateVulkanImage(
+            context.GetPhysicalDevice(),
+            device,
+            context.GetAllocator(),
+            static_cast<std::uint32_t>(texture_asset.width),
+            static_cast<std::uint32_t>(texture_asset.height),
+            texture_format,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            texture.image,
+            texture.memory,
+            texture.view))
+    {
+        vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
+        return false;
+    }
+
+    const bool upload_succeeded = ExecuteImmediateCommands(device, command_pool, context.GetQueue(), [&](VkCommandBuffer command_buffer)
+    {
+        TransitionImageLayout(
+            command_buffer,
+            texture.image,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+
+        VkBufferImageCopy copy_region = {};
+        copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy_region.imageSubresource.layerCount = 1;
+        copy_region.imageExtent.width = static_cast<std::uint32_t>(texture_asset.width);
+        copy_region.imageExtent.height = static_cast<std::uint32_t>(texture_asset.height);
+        copy_region.imageExtent.depth = 1;
+
+        vkCmdCopyBufferToImage(
+            command_buffer,
+            staging_buffer.buffer,
+            texture.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &copy_region);
+
+        TransitionImageLayout(
+            command_buffer,
+            texture.image,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+    });
+
+    vkFreeMemory(device, staging_buffer.memory, context.GetAllocator());
+    vkDestroyBuffer(device, staging_buffer.buffer, context.GetAllocator());
+    if (!upload_succeeded)
+    {
+        vkDestroyImageView(device, texture.view, context.GetAllocator());
+        vkDestroyImage(device, texture.image, context.GetAllocator());
+        vkFreeMemory(device, texture.memory, context.GetAllocator());
+        texture = {};
+        return false;
+    }
+
+    return true;
+}
+
+SceneGpuVertex BuildSceneGpuVertex(const ModelVertex& vertex, const ModelMaterialAsset* material)
+{
+    SceneGpuVertex gpu_vertex;
+    gpu_vertex.position[0] = vertex.position[0];
+    gpu_vertex.position[1] = vertex.position[1];
+    gpu_vertex.position[2] = vertex.position[2];
+    gpu_vertex.normal[0] = vertex.normal[0];
+    gpu_vertex.normal[1] = vertex.normal[1];
+    gpu_vertex.normal[2] = vertex.normal[2];
+    gpu_vertex.uv[0] = vertex.uv0[0];
+    gpu_vertex.uv[1] = 1.0f - vertex.uv0[1];
+
+    const std::array<float, 4> tint = material != nullptr ? material->base_color : std::array<float, 4>{1.0f, 1.0f, 1.0f, 1.0f};
+    gpu_vertex.color[0] = tint[0];
+    gpu_vertex.color[1] = tint[1];
+    gpu_vertex.color[2] = tint[2];
+    gpu_vertex.color[3] = tint[3];
+    gpu_vertex.tangent[0] = vertex.tangent[0];
+    gpu_vertex.tangent[1] = vertex.tangent[1];
+    gpu_vertex.tangent[2] = vertex.tangent[2];
+    gpu_vertex.tangent[3] = vertex.tangent[3];
+    return gpu_vertex;
+}
+}
+
+bool RuntimeRenderer::Initialize(VulkanContext* context)
+{
+    vulkan_context_ = context;
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    return ray_tracing_.Initialize(context);
+}
+
+void RuntimeRenderer::ReleaseBuffer(GpuBuffer& buffer)
+{
+    if (vulkan_context_ == nullptr)
+    {
+        buffer = {};
+        return;
+    }
+
+    if (buffer.buffer != VK_NULL_HANDLE)
+    {
+        vkDestroyBuffer(vulkan_context_->GetDevice(), buffer.buffer, vulkan_context_->GetAllocator());
+    }
+    if (buffer.memory != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(vulkan_context_->GetDevice(), buffer.memory, vulkan_context_->GetAllocator());
+    }
+    buffer = {};
+}
+
+void RuntimeRenderer::ReleaseTexture(GpuTexture& texture)
+{
+    if (vulkan_context_ == nullptr)
+    {
+        texture = {};
+        return;
+    }
+
+    if (texture.view != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(vulkan_context_->GetDevice(), texture.view, vulkan_context_->GetAllocator());
+    }
+    if (texture.image != VK_NULL_HANDLE)
+    {
+        vkDestroyImage(vulkan_context_->GetDevice(), texture.image, vulkan_context_->GetAllocator());
+    }
+    if (texture.memory != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(vulkan_context_->GetDevice(), texture.memory, vulkan_context_->GetAllocator());
+    }
+    texture = {};
+}
+
+void RuntimeRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
+{
+    ReleaseBuffer(entry.vertex_buffer);
+    ReleaseBuffer(entry.index_buffer);
+    for (GpuMaterialTextures& textures : entry.material_textures)
+    {
+        ReleaseTexture(textures.base_color);
+        ReleaseTexture(textures.metallic_roughness);
+        ReleaseTexture(textures.normal);
+        ReleaseTexture(textures.occlusion);
+        ReleaseTexture(textures.emissive);
+    }
+
+    entry = {};
+}
+
+void RuntimeRenderer::Shutdown()
+{
+    ray_tracing_.Shutdown();
+    for (auto& [path, entry] : mesh_cache_)
+    {
+        ReleaseMeshCacheEntry(entry);
+    }
+
+    mesh_cache_.clear();
+    model_asset_cache_.clear();
+    queued_objects_.clear();
+    cached_scene_path_.clear();
+    cached_scene_metadata_ = SceneMetadata{};
+    has_cached_scene_metadata_ = false;
+    project_root_.clear();
+    scene_path_.clear();
+    active_camera_object_name_.clear();
+    active_camera_attribute_index_ = 0;
+    vulkan_context_ = nullptr;
+}
+
+bool RuntimeRenderer::StartSession(
+    const std::filesystem::path& project_root,
+    const std::filesystem::path& scene_path,
+    const ActiveSceneCameraSelection& active_camera,
+    std::string* error_message)
+{
+    if (vulkan_context_ == nullptr)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Runtime renderer has no Vulkan context";
+        }
+        return false;
+    }
+
+    if (!active_camera.found)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Play requires an active scene camera";
+        }
+        return false;
+    }
+
+    project_root_ = project_root;
+    scene_path_ = scene_path;
+    active_camera_object_name_ = active_camera.object_name;
+    active_camera_attribute_index_ = active_camera.attribute_index;
+    cached_scene_path_.clear();
+    cached_scene_metadata_ = SceneMetadata{};
+    has_cached_scene_metadata_ = false;
+    queued_objects_.clear();
+    return true;
+}
+
+const RuntimeRenderer::CachedModelAssetEntry& RuntimeRenderer::GetModelAssetEntry(const std::filesystem::path& path)
+{
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
+    CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
+    if (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded)
+    {
+        cache_entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
+        cache_entry.asset = LoadModelAsset(path);
+    }
+
+    return cache_entry;
+}
+
+const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
+{
+    if (scene_path_.empty())
+    {
+        static SceneMetadata empty_metadata{};
+        return empty_metadata;
+    }
+
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(scene_path_, error);
+    const bool cache_valid = has_cached_scene_metadata_ && cached_scene_path_ == scene_path_ && !error && cached_scene_write_time_ == write_time;
+    if (!cache_valid)
+    {
+        cached_scene_path_ = scene_path_;
+        cached_scene_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+        cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
+        has_cached_scene_metadata_ = true;
+    }
+
+    return cached_scene_metadata_;
+}
+
+bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_path, const CachedModelAssetEntry& model_asset_entry)
+{
+    if (vulkan_context_ == nullptr || !model_asset_entry.asset.loaded)
+    {
+        return false;
+    }
+
+    GpuMeshCacheEntry& cache_entry = mesh_cache_[model_path];
+    if (cache_entry.vertex_buffer.buffer != VK_NULL_HANDLE && cache_entry.index_buffer.buffer != VK_NULL_HANDLE && cache_entry.write_time == model_asset_entry.write_time)
+    {
+        return true;
+    }
+
+    ReleaseMeshCacheEntry(cache_entry);
+
+    std::vector<SceneGpuVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    cache_entry.material_textures.resize(model_asset_entry.asset.materials.size());
+    cache_entry.materials.resize(model_asset_entry.asset.materials.size());
+
+    for (std::size_t material_index = 0; material_index < model_asset_entry.asset.materials.size(); ++material_index)
+    {
+        const ModelMaterialAsset& material = model_asset_entry.asset.materials[material_index];
+        cache_entry.materials[material_index].base_color = material.base_color;
+        cache_entry.materials[material_index].emissive_color = material.emissive_color;
+        cache_entry.materials[material_index].metallic_factor = material.metallic_factor;
+        cache_entry.materials[material_index].roughness_factor = material.roughness_factor;
+        cache_entry.materials[material_index].normal_scale = material.normal_scale;
+        cache_entry.materials[material_index].occlusion_strength = material.occlusion_strength;
+        cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
+
+        const ModelTextureAsset* texture_assets[5] = {
+            &material.base_color_texture,
+            &material.metallic_roughness_texture,
+            &material.normal_texture,
+            &material.occlusion_texture,
+            &material.emissive_texture,
+        };
+
+        for (std::size_t texture_index = 0; texture_index < std::size(texture_assets); ++texture_index)
+        {
+            if (!texture_assets[texture_index]->valid)
+            {
+                continue;
+            }
+
+            GpuTexture* texture_slot = SelectTextureSlot(cache_entry.material_textures[material_index], texture_index);
+            if (texture_slot != nullptr)
+            {
+                CreateTextureFromAsset(*vulkan_context_, ray_tracing_.GetCommandPool(), *texture_assets[texture_index], *texture_slot);
+            }
+        }
+
+        cache_entry.materials[material_index].base_color_view = cache_entry.material_textures[material_index].base_color.view;
+        cache_entry.materials[material_index].metallic_roughness_view = cache_entry.material_textures[material_index].metallic_roughness.view;
+        cache_entry.materials[material_index].normal_view = cache_entry.material_textures[material_index].normal.view;
+        cache_entry.materials[material_index].occlusion_view = cache_entry.material_textures[material_index].occlusion.view;
+        cache_entry.materials[material_index].emissive_view = cache_entry.material_textures[material_index].emissive.view;
+    }
+
+    for (const ModelMeshAsset& mesh : model_asset_entry.asset.meshes)
+    {
+        GpuMeshSection section;
+        section.first_index = static_cast<std::uint32_t>(indices.size());
+        section.material_index = mesh.material_index;
+        const std::uint32_t base_vertex = static_cast<std::uint32_t>(vertices.size());
+        const ModelMaterialAsset* material = mesh.material_index < model_asset_entry.asset.materials.size() ? &model_asset_entry.asset.materials[mesh.material_index] : nullptr;
+        section.uses_alpha_transparency = material != nullptr && material->uses_alpha_transparency;
+
+        for (const ModelVertex& vertex : mesh.vertices)
+        {
+            vertices.push_back(BuildSceneGpuVertex(vertex, material));
+        }
+        for (std::uint32_t index : mesh.indices)
+        {
+            indices.push_back(base_vertex + index);
+        }
+
+        section.index_count = static_cast<std::uint32_t>(indices.size()) - section.first_index;
+        if (section.index_count > 0)
+        {
+            cache_entry.sections.push_back(section);
+        }
+    }
+
+    if (vertices.empty() || indices.empty() || cache_entry.sections.empty())
+    {
+        ReleaseMeshCacheEntry(cache_entry);
+        return false;
+    }
+
+    VkBufferUsageFlags vertex_usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    VkBufferUsageFlags index_usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (ray_tracing_.IsAvailable())
+    {
+        vertex_usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        index_usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
+
+    if (!CreateVulkanBuffer(
+            *vulkan_context_,
+            static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex)),
+            vertex_usage,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            cache_entry.vertex_buffer) ||
+        !CreateVulkanBuffer(
+            *vulkan_context_,
+            static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t)),
+            index_usage,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            cache_entry.index_buffer) ||
+        !UploadBufferData(vulkan_context_->GetDevice(), cache_entry.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
+        !UploadBufferData(vulkan_context_->GetDevice(), cache_entry.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
+    {
+        ReleaseMeshCacheEntry(cache_entry);
+        return false;
+    }
+
+    cache_entry.vertex_count = static_cast<std::uint32_t>(vertices.size());
+    cache_entry.index_count = static_cast<std::uint32_t>(indices.size());
+    cache_entry.write_time = model_asset_entry.write_time;
+    return true;
+}
+
+bool RuntimeRenderer::BuildQueuedScene(
+    const SceneMetadata& scene_metadata,
+    const SceneObjectMetadata& active_camera_object,
+    const SceneObjectCameraAttributes& active_camera,
+    std::array<float, 16>& view_inverse,
+    std::array<float, 16>& projection_inverse,
+    ResolvedSceneLighting& lighting,
+    std::string* error_message)
+{
+    queued_objects_.clear();
+
+    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
+    const auto camera_pose_it = resolved_object_poses.find(active_camera_object.name);
+    if (camera_pose_it == resolved_object_poses.end())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Active camera transform could not be resolved";
+        }
+        return false;
+    }
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        if (object.model_path.empty())
+        {
+            continue;
+        }
+
+        const std::filesystem::path model_path = project_root_ / object.model_path;
+        const CachedModelAssetEntry& model_asset_entry = GetModelAssetEntry(model_path);
+        if (!model_asset_entry.asset.loaded || !EnsureMeshCacheEntry(model_path, model_asset_entry))
+        {
+            continue;
+        }
+
+        QueuedSceneObject queued_object;
+        queued_object.model_path = model_path;
+        queued_object.name = object.name;
+
+        const auto pose_it = resolved_object_poses.find(object.name);
+        if (pose_it != resolved_object_poses.end())
+        {
+            queued_object.model_matrix = pose_it->second.world_matrix;
+        }
+        else
+        {
+            BuildTransformMatrix(object.position, object.rotation, object.scale, queued_object.model_matrix.data());
+        }
+
+        queued_objects_.push_back(std::move(queued_object));
+    }
+
+    lighting = ResolveSceneLighting(scene_metadata, BuildLightingPoseMap(resolved_object_poses), active_camera_object.name);
+
+    const Vec3 camera_position = TransformPoint(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
+    Vec3 camera_forward = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, -1.0f});
+    Vec3 camera_up = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
+    if (Length(camera_forward) <= 0.0001f)
+    {
+        camera_forward = Vec3{0.0f, 0.0f, -1.0f};
+    }
+    if (Length(camera_up) <= 0.0001f || std::abs(Dot(camera_forward, camera_up)) >= 0.999f)
+    {
+        camera_up = Vec3{0.0f, 1.0f, 0.0f};
+    }
+
+    float view_matrix[16];
+    float projection_matrix[16];
+    BuildLookAtMatrix(camera_position, Add(camera_position, camera_forward), camera_up, view_matrix);
+    const float aspect = static_cast<float>(ray_tracing_.GetOutputWidth()) / static_cast<float>(ray_tracing_.GetOutputHeight());
+    const float field_of_view = std::clamp(active_camera.field_of_view_degrees, 1.0f, 179.0f);
+    const float near_clip = (std::max)(active_camera.near_clip, 0.001f);
+    const float far_clip = (std::max)(active_camera.far_clip, near_clip + 0.001f);
+    BuildPerspectiveMatrix(field_of_view, aspect, near_clip, far_clip, projection_matrix);
+    if (!InvertMatrix(view_matrix, view_inverse.data()) || !InvertMatrix(projection_matrix, projection_inverse.data()))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Failed to build active camera matrices";
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
+{
+    if (!ray_tracing_.IsAvailable())
+    {
+        return true;
+    }
+
+    std::vector<RayTracing::MeshInput> mesh_inputs;
+    std::vector<RayTracing::InstanceInput> instance_inputs;
+    std::unordered_map<std::string, std::size_t> mesh_index_by_key;
+    mesh_inputs.reserve(queued_objects_.size());
+    instance_inputs.reserve(queued_objects_.size());
+
+    for (const QueuedSceneObject& object : queued_objects_)
+    {
+        const auto mesh_entry_it = mesh_cache_.find(object.model_path);
+        if (mesh_entry_it == mesh_cache_.end())
+        {
+            continue;
+        }
+
+        const GpuMeshCacheEntry& mesh_entry = mesh_entry_it->second;
+        if (mesh_entry.vertex_buffer.device_address == 0 || mesh_entry.index_buffer.device_address == 0 || mesh_entry.vertex_count == 0 || mesh_entry.index_count < 3)
+        {
+            continue;
+        }
+
+        const std::string mesh_key = object.model_path.string();
+        if (mesh_index_by_key.find(mesh_key) == mesh_index_by_key.end())
+        {
+            RayTracing::MeshInput mesh_input;
+            mesh_input.key = mesh_key;
+            mesh_input.vertex_device_address = mesh_entry.vertex_buffer.device_address;
+            mesh_input.index_device_address = mesh_entry.index_buffer.device_address;
+            mesh_input.vertex_count = mesh_entry.vertex_count;
+            mesh_input.vertex_stride = static_cast<std::uint32_t>(sizeof(SceneGpuVertex));
+            mesh_input.index_count = mesh_entry.index_count;
+            mesh_input.materials = mesh_entry.materials;
+            mesh_input.sections.reserve(mesh_entry.sections.size());
+            for (const GpuMeshSection& section : mesh_entry.sections)
+            {
+                mesh_input.sections.push_back(RayTracing::MeshSectionRecord{
+                    section.first_index,
+                    section.index_count,
+                    section.material_index,
+                    section.uses_alpha_transparency});
+            }
+
+            mesh_index_by_key.emplace(mesh_key, mesh_inputs.size());
+            mesh_inputs.push_back(std::move(mesh_input));
+        }
+
+        RayTracing::InstanceInput instance_input;
+        instance_input.key = object.name;
+        instance_input.mesh_key = mesh_key;
+        instance_input.transform = object.model_matrix;
+        instance_inputs.push_back(std::move(instance_input));
+    }
+
+    if (!ray_tracing_.UpdateScene(mesh_inputs, instance_inputs))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = ray_tracing_.GetStatusMessage();
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t target_height, std::string* error_message)
+{
+    if (vulkan_context_ == nullptr || scene_path_.empty())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Runtime renderer session is not initialized";
+        }
+        return false;
+    }
+
+    const SceneMetadata& scene_metadata = GetSceneMetadata();
+    if (!scene_metadata.parsed)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = scene_metadata.error_message.empty() ? "Failed to parse play scene" : scene_metadata.error_message;
+        }
+        return false;
+    }
+
+    const auto camera_object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+    {
+        return object.name == active_camera_object_name_;
+    });
+    if (camera_object_it == scene_metadata.objects.end() || active_camera_attribute_index_ >= camera_object_it->attributes.size())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Active camera used for Play no longer exists; restart Play";
+        }
+        return false;
+    }
+
+    const SceneObjectAttribute& camera_attribute = camera_object_it->attributes[active_camera_attribute_index_];
+    if (camera_attribute.kind != SceneObjectAttributeKind::Camera)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Play camera attribute is no longer a camera; restart Play";
+        }
+        return false;
+    }
+
+    if (!ray_tracing_.EnsureViewportOutput(target_width, target_height))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = ray_tracing_.GetStatusMessage();
+        }
+        return false;
+    }
+
+    std::array<float, 16> view_inverse = {};
+    std::array<float, 16> projection_inverse = {};
+    ResolvedSceneLighting lighting{};
+    if (!BuildQueuedScene(scene_metadata, *camera_object_it, camera_attribute.camera, view_inverse, projection_inverse, lighting, error_message))
+    {
+        return false;
+    }
+
+    if (!SyncRayTracingScene(error_message))
+    {
+        return false;
+    }
+
+    if (!ray_tracing_.RenderFrame(
+            lighting,
+            view_inverse,
+            projection_inverse,
+            false,
+            1.0f,
+            0.0f,
+            0.0f,
+            0.0f))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = ray_tracing_.GetStatusMessage();
+        }
+        return false;
+    }
+
+    return true;
+}

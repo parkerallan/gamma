@@ -1077,6 +1077,36 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
     return metadata;
 }
 
+ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_metadata)
+{
+    ActiveSceneCameraSelection selection;
+    if (!scene_metadata.parsed)
+    {
+        return selection;
+    }
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Camera || !attribute.camera.active)
+            {
+                continue;
+            }
+
+            selection.found = true;
+            selection.object_name = object.name;
+            selection.attribute_index = attribute_index;
+            selection.object = object;
+            selection.camera = attribute.camera;
+            return selection;
+        }
+    }
+
+    return selection;
+}
+
 bool SetSceneObjectPosition(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& position)
 {
     return SetSceneObjectVector3(scene_path, object_name, "Position", position);

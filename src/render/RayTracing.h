@@ -106,6 +106,9 @@ public:
     VkCommandPool GetCommandPool() const { return command_pool_; }
     VkCommandBuffer GetCommandBuffer() const { return command_buffer_; }
     VkFence GetRenderFence() const { return render_fence_; }
+    VkImage GetOutputImage() const { return output_image_; }
+    std::uint32_t GetOutputWidth() const { return output_width_; }
+    std::uint32_t GetOutputHeight() const { return output_height_; }
     VkImageLayout GetOutputLayout() const { return output_layout_; }
     void SetOutputLayout(VkImageLayout layout) { output_layout_ = layout; }
     VkAccelerationStructureKHR GetTopLevelAccelerationStructure() const { return top_level_as_.handle; }

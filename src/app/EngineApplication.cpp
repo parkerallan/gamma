@@ -230,15 +230,18 @@ void EngineApplication::RunLoop()
     while (running_)
     {
         ProcessEvents();
+        HandlePlayRequests();
 
-        if (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED)
+        const bool editor_minimized = (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED) != 0;
+        const bool runtime_minimized = runtime_window_ != nullptr && (SDL_GetWindowFlags(runtime_window_) & SDL_WINDOW_MINIMIZED) != 0;
+        if (editor_minimized && (!state_.is_playing || runtime_minimized))
         {
             SDL_Delay(10);
             continue;
         }
 
         workspace_panel_.BeginFrame();
-    info_panel_.BeginFrame();
+        info_panel_.BeginFrame();
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -249,12 +252,14 @@ void EngineApplication::RunLoop()
         ImDrawData* draw_data = ImGui::GetDrawData();
         workspace_panel_.RenderSceneGpuPass();
         info_panel_.RenderSceneGpuPass();
+        RenderRuntimeWindow();
         vulkan_context_.RenderFrame(window_, draw_data, ImVec4(0.08f, 0.09f, 0.11f, 1.0f));
     }
 }
 
 void EngineApplication::Shutdown()
 {
+    StopRuntimeSession();
     workspace_panel_.Shutdown();
     info_panel_.Shutdown();
 
@@ -280,6 +285,15 @@ void EngineApplication::ProcessEvents()
     SDL_Event event;
     while (SDL_PollEvent(&event))
     {
+        if (runtime_window_ != nullptr &&
+            event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+            event.window.windowID == SDL_GetWindowID(runtime_window_))
+        {
+            state_.play_stop_requested = true;
+            state_.play_restart_requested = false;
+            continue;
+        }
+
         ImGui_ImplSDL3_ProcessEvent(&event);
 
         if (event.type == SDL_EVENT_QUIT)
@@ -303,6 +317,162 @@ void EngineApplication::ProcessEvents()
                 state_.SaveOpenFile();
             }
         }
+    }
+}
+
+void EngineApplication::HandlePlayRequests()
+{
+    if (state_.play_stop_requested)
+    {
+        const bool restart_requested = state_.play_restart_requested;
+        StopRuntimeSession();
+        state_.play_stop_requested = false;
+        state_.play_restart_requested = false;
+        if (restart_requested)
+        {
+            state_.play_start_requested = true;
+        }
+    }
+
+    if (state_.play_start_requested)
+    {
+        state_.play_start_requested = false;
+        StartRuntimeSession();
+    }
+}
+
+bool EngineApplication::StartRuntimeSession()
+{
+    if (!state_.HasActiveScene())
+    {
+        state_.SetPlayError("Cannot play: no active scene is available");
+        return false;
+    }
+
+    const SceneMetadata scene_metadata = LoadSceneMetadata(state_.active_scene_path);
+    if (!scene_metadata.parsed)
+    {
+        state_.SetPlayError(scene_metadata.error_message.empty() ? "Failed to load active scene for Play" : scene_metadata.error_message);
+        return false;
+    }
+
+    const ActiveSceneCameraSelection active_camera = FindActiveSceneCamera(scene_metadata);
+    if (!active_camera.found)
+    {
+        state_.SetPlayError("Play requires one active camera in the scene");
+        return false;
+    }
+
+    StopRuntimeSession();
+
+    const SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    runtime_window_ = SDL_CreateWindow(
+        "Runtime",
+        static_cast<int>(1280.0f * display_scale_),
+        static_cast<int>(720.0f * display_scale_),
+        window_flags);
+    if (runtime_window_ == nullptr)
+    {
+        state_.SetPlayError(std::string("Failed to create runtime window: ") + SDL_GetError());
+        return false;
+    }
+
+    if (!vulkan_context_.CreateWindowContext(runtime_window_, runtime_window_context_))
+    {
+        SDL_DestroyWindow(runtime_window_);
+        runtime_window_ = nullptr;
+        state_.SetPlayError("Failed to initialize runtime Vulkan window");
+        return false;
+    }
+
+    if (!runtime_renderer_.Initialize(&vulkan_context_))
+    {
+        vulkan_context_.DestroyWindowContext(runtime_window_context_);
+        SDL_DestroyWindow(runtime_window_);
+        runtime_window_ = nullptr;
+        state_.SetPlayError("Failed to initialize runtime renderer backend");
+        return false;
+    }
+
+    std::string runtime_error;
+    if (!runtime_renderer_.StartSession(state_.project_root, state_.active_scene_path, active_camera, &runtime_error))
+    {
+        runtime_renderer_.Shutdown();
+        vulkan_context_.DestroyWindowContext(runtime_window_context_);
+        SDL_DestroyWindow(runtime_window_);
+        runtime_window_ = nullptr;
+        state_.SetPlayError(runtime_error.empty() ? "Failed to start runtime renderer session" : runtime_error);
+        return false;
+    }
+
+    SDL_SetWindowPosition(runtime_window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    SDL_ShowWindow(runtime_window_);
+    state_.is_playing = true;
+    state_.playing_scene_path = state_.active_scene_path;
+    state_.last_play_error.clear();
+    state_.AddLog("Runtime window opened for Play");
+    return true;
+}
+
+void EngineApplication::StopRuntimeSession()
+{
+    if (state_.is_playing || runtime_window_ != nullptr)
+    {
+        vulkan_context_.WaitIdle();
+    }
+
+    runtime_renderer_.Shutdown();
+    if (runtime_window_ != nullptr)
+    {
+        vulkan_context_.DestroyWindowContext(runtime_window_context_);
+        SDL_DestroyWindow(runtime_window_);
+        runtime_window_ = nullptr;
+    }
+
+    state_.is_playing = false;
+    state_.playing_scene_path.clear();
+}
+
+void EngineApplication::RenderRuntimeWindow()
+{
+    if (!state_.is_playing || runtime_window_ == nullptr)
+    {
+        return;
+    }
+
+    if ((SDL_GetWindowFlags(runtime_window_) & SDL_WINDOW_MINIMIZED) != 0)
+    {
+        return;
+    }
+
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSize(runtime_window_, &width, &height);
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    std::string runtime_error;
+    if (!runtime_renderer_.RenderFrame(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), &runtime_error))
+    {
+        state_.SetPlayError(runtime_error.empty() ? "Runtime frame render failed" : runtime_error);
+        state_.play_stop_requested = true;
+        state_.play_restart_requested = false;
+        return;
+    }
+
+    if (!vulkan_context_.PresentImageToWindow(
+            runtime_window_,
+            runtime_window_context_,
+            runtime_renderer_.GetOutputImage(),
+            runtime_renderer_.GetOutputLayout(),
+            runtime_renderer_.GetOutputWidth(),
+            runtime_renderer_.GetOutputHeight()))
+    {
+        state_.SetPlayError("Runtime present failed");
+        state_.play_stop_requested = true;
+        state_.play_restart_requested = false;
     }
 }
 

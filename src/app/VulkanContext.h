@@ -34,6 +34,12 @@ struct VulkanRayTracingSupport
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
 };
 
+struct VulkanWindowContext
+{
+    ImGui_ImplVulkanH_Window window_data{};
+    bool swapchain_rebuild = false;
+};
+
 class VulkanContext
 {
 public:
@@ -41,6 +47,15 @@ public:
     void Shutdown();
     void WaitIdle();
     void RenderFrame(SDL_Window* window, ImDrawData* draw_data, const ImVec4& clear_color);
+    bool CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context);
+    void DestroyWindowContext(VulkanWindowContext& window_context);
+    bool PresentImageToWindow(
+        SDL_Window* window,
+        VulkanWindowContext& window_context,
+        VkImage source_image,
+        VkImageLayout source_layout,
+        std::uint32_t source_width,
+        std::uint32_t source_height);
 
     VkInstance GetInstance() const { return instance_; }
     VkPhysicalDevice GetPhysicalDevice() const { return physical_device_; }
@@ -64,9 +79,13 @@ private:
     bool CreateDevice();
     bool CreateDescriptorPool();
     bool CreateSurface(SDL_Window* window);
+    bool CreateSurface(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data);
     void SetupWindowData(SDL_Window* window);
+    void SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data);
     void EnsureSwapchain(SDL_Window* window);
+    void EnsureSwapchain(SDL_Window* window, VulkanWindowContext& window_context);
     void CleanupWindowData();
+    void CleanupWindowData(ImGui_ImplVulkanH_Window& window_data);
 
     const VkAllocationCallbacks* allocator_ = nullptr;
     VkInstance instance_ = VK_NULL_HANDLE;

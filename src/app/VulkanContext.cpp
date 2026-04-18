@@ -36,6 +36,43 @@ bool HasRequiredRayTracingExtensions(const std::vector<VkExtensionProperties>& p
 
     return true;
 }
+
+void TransitionImageLayout(
+    VkCommandBuffer command_buffer,
+    VkImage image,
+    VkImageAspectFlags aspect_mask,
+    VkImageLayout old_layout,
+    VkImageLayout new_layout,
+    VkPipelineStageFlags src_stage,
+    VkPipelineStageFlags dst_stage,
+    VkAccessFlags src_access_mask,
+    VkAccessFlags dst_access_mask)
+{
+    VkImageMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = aspect_mask;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = src_access_mask;
+    barrier.dstAccessMask = dst_access_mask;
+
+    vkCmdPipelineBarrier(
+        command_buffer,
+        src_stage,
+        dst_stage,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+}
 }
 
 void VulkanContext::CheckVkResult(VkResult err)
@@ -338,7 +375,12 @@ bool VulkanContext::CreateDescriptorPool()
 
 bool VulkanContext::CreateSurface(SDL_Window* window)
 {
-    if (!SDL_Vulkan_CreateSurface(window, instance_, allocator_, &main_window_data_.Surface))
+    return CreateSurface(window, main_window_data_);
+}
+
+bool VulkanContext::CreateSurface(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data)
+{
+    if (!SDL_Vulkan_CreateSurface(window, instance_, allocator_, &window_data.Surface))
     {
         SDL_Log("SDL_Vulkan_CreateSurface failed: %s", SDL_GetError());
         return false;
@@ -349,8 +391,13 @@ bool VulkanContext::CreateSurface(SDL_Window* window)
 
 void VulkanContext::SetupWindowData(SDL_Window* window)
 {
+    SetupWindowData(window, main_window_data_);
+}
+
+void VulkanContext::SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data)
+{
     VkBool32 present_supported = VK_FALSE;
-    VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(physical_device_, queue_family_, main_window_data_.Surface, &present_supported);
+    VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(physical_device_, queue_family_, window_data.Surface, &present_supported);
     CheckVkResult(result);
     if (result != VK_SUCCESS || present_supported != VK_TRUE)
     {
@@ -365,22 +412,22 @@ void VulkanContext::SetupWindowData(SDL_Window* window)
         VK_FORMAT_R8G8B8_UNORM,
     };
 
-    main_window_data_.SurfaceFormat = ImGui_ImplVulkanH_SelectSurfaceFormat(
+    window_data.SurfaceFormat = ImGui_ImplVulkanH_SelectSurfaceFormat(
         physical_device_,
-        main_window_data_.Surface,
+        window_data.Surface,
         request_formats.data(),
         static_cast<int>(request_formats.size()),
         VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
     constexpr VkPresentModeKHR request_modes[] = {VK_PRESENT_MODE_FIFO_KHR};
-    main_window_data_.PresentMode = ImGui_ImplVulkanH_SelectPresentMode(
+    window_data.PresentMode = ImGui_ImplVulkanH_SelectPresentMode(
         physical_device_,
-        main_window_data_.Surface,
+        window_data.Surface,
         request_modes,
         static_cast<int>(std::size(request_modes)));
-    main_window_data_.ClearValue.color.float32[0] = 0.08f;
-    main_window_data_.ClearValue.color.float32[1] = 0.09f;
-    main_window_data_.ClearValue.color.float32[2] = 0.11f;
-    main_window_data_.ClearValue.color.float32[3] = 1.0f;
+    window_data.ClearValue.color.float32[0] = 0.08f;
+    window_data.ClearValue.color.float32[1] = 0.09f;
+    window_data.ClearValue.color.float32[2] = 0.11f;
+    window_data.ClearValue.color.float32[3] = 1.0f;
 
     int width = 0;
     int height = 0;
@@ -389,7 +436,7 @@ void VulkanContext::SetupWindowData(SDL_Window* window)
         instance_,
         physical_device_,
         device_,
-        &main_window_data_,
+        &window_data,
         queue_family_,
         allocator_,
         width,
@@ -400,6 +447,18 @@ void VulkanContext::SetupWindowData(SDL_Window* window)
 
 void VulkanContext::EnsureSwapchain(SDL_Window* window)
 {
+    VulkanWindowContext main_window_context{};
+    main_window_context.window_data = main_window_data_;
+    main_window_context.swapchain_rebuild = swapchain_rebuild_;
+
+    EnsureSwapchain(window, main_window_context);
+
+    main_window_data_ = main_window_context.window_data;
+    swapchain_rebuild_ = main_window_context.swapchain_rebuild;
+}
+
+void VulkanContext::EnsureSwapchain(SDL_Window* window, VulkanWindowContext& window_context)
+{
     int width = 0;
     int height = 0;
     SDL_GetWindowSize(window, &width, &height);
@@ -408,36 +467,231 @@ void VulkanContext::EnsureSwapchain(SDL_Window* window)
         return;
     }
 
-    if (swapchain_rebuild_ || main_window_data_.Width != width || main_window_data_.Height != height)
+    if (window_context.swapchain_rebuild || window_context.window_data.Width != width || window_context.window_data.Height != height)
     {
         ImGui_ImplVulkan_SetMinImageCount(min_image_count_);
         ImGui_ImplVulkanH_CreateOrResizeWindow(
             instance_,
             physical_device_,
             device_,
-            &main_window_data_,
+            &window_context.window_data,
             queue_family_,
             allocator_,
             width,
             height,
             min_image_count_,
             0);
-        main_window_data_.FrameIndex = 0;
-        swapchain_rebuild_ = false;
+        window_context.window_data.FrameIndex = 0;
+        window_context.swapchain_rebuild = false;
     }
 }
 
 void VulkanContext::CleanupWindowData()
 {
-    if (main_window_data_.RenderPass != VK_NULL_HANDLE)
+    CleanupWindowData(main_window_data_);
+}
+
+void VulkanContext::CleanupWindowData(ImGui_ImplVulkanH_Window& window_data)
+{
+    if (window_data.RenderPass != VK_NULL_HANDLE)
     {
-        ImGui_ImplVulkanH_DestroyWindow(instance_, device_, &main_window_data_, allocator_);
+        ImGui_ImplVulkanH_DestroyWindow(instance_, device_, &window_data, allocator_);
     }
-    if (main_window_data_.Surface != VK_NULL_HANDLE && instance_ != VK_NULL_HANDLE)
+    if (window_data.Surface != VK_NULL_HANDLE && instance_ != VK_NULL_HANDLE)
     {
-        SDL_Vulkan_DestroySurface(instance_, main_window_data_.Surface, allocator_);
-        main_window_data_.Surface = VK_NULL_HANDLE;
+        SDL_Vulkan_DestroySurface(instance_, window_data.Surface, allocator_);
+        window_data.Surface = VK_NULL_HANDLE;
     }
+}
+
+bool VulkanContext::CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context)
+{
+    window_context = {};
+    if (window == nullptr || instance_ == VK_NULL_HANDLE || device_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    if (!CreateSurface(window, window_context.window_data))
+    {
+        return false;
+    }
+
+    SetupWindowData(window, window_context.window_data);
+    if (window_context.window_data.Surface == VK_NULL_HANDLE || window_context.window_data.RenderPass == VK_NULL_HANDLE)
+    {
+        DestroyWindowContext(window_context);
+        return false;
+    }
+
+    return true;
+}
+
+void VulkanContext::DestroyWindowContext(VulkanWindowContext& window_context)
+{
+    CleanupWindowData(window_context.window_data);
+    window_context = {};
+}
+
+bool VulkanContext::PresentImageToWindow(
+    SDL_Window* window,
+    VulkanWindowContext& window_context,
+    VkImage source_image,
+    VkImageLayout source_layout,
+    std::uint32_t source_width,
+    std::uint32_t source_height)
+{
+    if (window == nullptr ||
+        source_image == VK_NULL_HANDLE ||
+        source_width == 0 ||
+        source_height == 0 ||
+        device_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    EnsureSwapchain(window, window_context);
+
+    ImGui_ImplVulkanH_Window& window_data = window_context.window_data;
+    const VkSemaphore image_acquired_semaphore = window_data.FrameSemaphores[window_data.SemaphoreIndex].ImageAcquiredSemaphore;
+    const VkSemaphore render_complete_semaphore = window_data.FrameSemaphores[window_data.SemaphoreIndex].RenderCompleteSemaphore;
+    VkResult result = vkAcquireNextImageKHR(device_, window_data.Swapchain, UINT64_MAX, image_acquired_semaphore, VK_NULL_HANDLE, &window_data.FrameIndex);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+    {
+        window_context.swapchain_rebuild = true;
+    }
+    if (result == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        return false;
+    }
+    CheckVkResult(result);
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+    {
+        return false;
+    }
+
+    ImGui_ImplVulkanH_Frame* frame = &window_data.Frames[window_data.FrameIndex];
+    result = vkWaitForFences(device_, 1, &frame->Fence, VK_TRUE, UINT64_MAX);
+    CheckVkResult(result);
+    result = vkResetFences(device_, 1, &frame->Fence);
+    CheckVkResult(result);
+    result = vkResetCommandPool(device_, frame->CommandPool, 0);
+    CheckVkResult(result);
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(frame->CommandBuffer, &begin_info);
+    CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    TransitionImageLayout(
+        frame->CommandBuffer,
+        source_image,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        source_layout,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        source_layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        source_layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT);
+
+    TransitionImageLayout(
+        frame->CommandBuffer,
+        window_data.Frames[window_data.FrameIndex].Backbuffer,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT);
+
+    VkImageBlit blit_region = {};
+    blit_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit_region.srcSubresource.layerCount = 1;
+    blit_region.srcOffsets[1].x = static_cast<int32_t>(source_width);
+    blit_region.srcOffsets[1].y = static_cast<int32_t>(source_height);
+    blit_region.srcOffsets[1].z = 1;
+    blit_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit_region.dstSubresource.layerCount = 1;
+    blit_region.dstOffsets[0].y = static_cast<int32_t>(window_data.Height);
+    blit_region.dstOffsets[1].x = static_cast<int32_t>(window_data.Width);
+    blit_region.dstOffsets[1].z = 1;
+    vkCmdBlitImage(
+        frame->CommandBuffer,
+        source_image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        window_data.Frames[window_data.FrameIndex].Backbuffer,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &blit_region,
+        VK_FILTER_LINEAR);
+
+    TransitionImageLayout(
+        frame->CommandBuffer,
+        source_image,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        source_layout,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        source_layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT);
+
+    TransitionImageLayout(
+        frame->CommandBuffer,
+        window_data.Frames[window_data.FrameIndex].Backbuffer,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        0);
+
+    result = vkEndCommandBuffer(frame->CommandBuffer);
+    CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &image_acquired_semaphore;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &frame->CommandBuffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &render_complete_semaphore;
+    result = vkQueueSubmit(queue_, 1, &submit_info, frame->Fence);
+    CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkPresentInfoKHR present_info = {};
+    present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present_info.waitSemaphoreCount = 1;
+    present_info.pWaitSemaphores = &render_complete_semaphore;
+    present_info.swapchainCount = 1;
+    present_info.pSwapchains = &window_data.Swapchain;
+    present_info.pImageIndices = &window_data.FrameIndex;
+    result = vkQueuePresentKHR(queue_, &present_info);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+    {
+        window_context.swapchain_rebuild = true;
+    }
+    CheckVkResult(result);
+    window_data.SemaphoreIndex = (window_data.SemaphoreIndex + 1) % window_data.SemaphoreCount;
+    return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }
 
 void VulkanContext::RenderFrame(SDL_Window* window, ImDrawData* draw_data, const ImVec4& clear_color)

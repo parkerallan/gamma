@@ -76,7 +76,17 @@ struct SceneMetadata
     std::vector<SceneObjectMetadata> objects;
 };
 
+struct ActiveSceneCameraSelection
+{
+    bool found = false;
+    std::string object_name;
+    std::size_t attribute_index = 0;
+    SceneObjectMetadata object{};
+    SceneObjectCameraAttributes camera{};
+};
+
 SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path);
+ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_metadata);
 const char* ToDisplayName(SceneObjectAttributeKind kind);
 const char* ToStorageName(SceneObjectAttributeKind kind);
 SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value);
