@@ -51,11 +51,9 @@ vec3 linear_to_srgb(vec3 value)
         vec3(1.0));
 }
 
-void main()
+vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
 {
-    vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
-    vec2 pixel_center = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
-    vec2 ndc = (pixel_center / launch_size) * 2.0 - 1.0;
+    vec2 ndc = (pixel_sample / launch_size) * 2.0 - 1.0;
 
     vec4 clip_target = vec4(ndc.x, ndc.y, 1.0, 1.0);
     vec4 view_target = scene_uniforms.projection_inverse * clip_target;
@@ -79,5 +77,25 @@ void main()
         10000.0,
         0);
 
-    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(linear_to_srgb(primary_payload.color.rgb), 1.0));
+    return primary_payload.color.rgb;
+}
+
+void main()
+{
+    vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
+    vec2 pixel_base = vec2(gl_LaunchIDEXT.xy);
+    const vec2 sample_offsets[4] = vec2[4](
+        vec2(0.125, 0.375),
+        vec2(0.625, 0.125),
+        vec2(0.375, 0.875),
+        vec2(0.875, 0.625));
+
+    vec3 accumulated_color = vec3(0.0);
+    for (int sample_index = 0; sample_index < 4; ++sample_index)
+    {
+        accumulated_color += trace_primary_sample(pixel_base + sample_offsets[sample_index], launch_size);
+    }
+
+    vec3 resolved_color = accumulated_color * 0.25;
+    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(linear_to_srgb(resolved_color), 1.0));
 }
