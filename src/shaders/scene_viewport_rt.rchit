@@ -23,6 +23,7 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 ambient_light;
     vec4 directional_light_color;
     vec4 directional_light_direction;
+    vec4 directional_light_data;
     vec4 spot_light_color;
     vec4 spot_light_direction;
     vec4 spot_light_position;
@@ -30,6 +31,7 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 grid_data;
     vec4 grid_origin_extent;
     uvec4 counts;
+    uvec4 accumulation_data;
 } scene_uniforms;
 
 struct SceneVertex
@@ -104,6 +106,74 @@ layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
 layout(set = 0, binding = 6) uniform sampler2D material_textures[256];
 
 const float PI = 3.1415926535897932384626433832795;
+const uint SOFT_SHADOW_SAMPLE_COUNT = 6u;
+
+uint pcg_hash(uint value)
+{
+    uint state = value * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float hash_to_unit_float(uint value)
+{
+    return float(pcg_hash(value)) * (1.0 / 4294967296.0);
+}
+
+float radical_inverse_vdc(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+vec2 hammersley(uint sample_index, uint sample_count, uint scramble)
+{
+    return vec2(
+        (float(sample_index) + hash_to_unit_float(scramble ^ sample_index)) / float(sample_count),
+        radical_inverse_vdc(sample_index ^ scramble));
+}
+
+vec2 sample_concentric_disk(vec2 xi)
+{
+    vec2 offset = 2.0 * xi - vec2(1.0);
+    if (offset.x == 0.0 && offset.y == 0.0)
+    {
+        return vec2(0.0);
+    }
+
+    float radius = 0.0;
+    float theta = 0.0;
+    if (abs(offset.x) > abs(offset.y))
+    {
+        radius = offset.x;
+        theta = (PI * 0.25) * (offset.y / offset.x);
+    }
+    else
+    {
+        radius = offset.y;
+        theta = (PI * 0.5) - (PI * 0.25) * (offset.x / offset.y);
+    }
+
+    return radius * vec2(cos(theta), sin(theta));
+}
+
+void build_basis(vec3 normal, out vec3 tangent, out vec3 bitangent)
+{
+    vec3 reference_axis = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    tangent = normalize(cross(reference_axis, normal));
+    bitangent = cross(normal, tangent);
+}
+
+vec2 rotate_disk_sample(vec2 sample_point, float rotation)
+{
+    float s = sin(rotation);
+    float c = cos(rotation);
+    return vec2(c * sample_point.x - s * sample_point.y, s * sample_point.x + c * sample_point.y);
+}
 
 uint find_section_index(MeshRecord mesh, uint first_index)
 {
@@ -227,6 +297,54 @@ vec3 fresnel_schlick(float cos_theta, vec3 f0)
     return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
 }
 
+uint make_sample_seed(vec3 world_position)
+{
+    uvec3 position_bits = floatBitsToUint(world_position * 64.0);
+    return pcg_hash(
+        position_bits.x ^
+        (position_bits.y * 31u) ^
+    (position_bits.z * 131u) ^
+    (gl_InstanceCustomIndexEXT * 3571u));
+}
+
+vec3 evaluate_direct_brdf(vec3 albedo_rgb, float metallic, float roughness, vec3 f0, vec3 world_normal, vec3 view_direction, vec3 light_direction)
+{
+    float dot_nl = max(dot(world_normal, light_direction), 0.0);
+    if (dot_nl <= 0.0)
+    {
+        return vec3(0.0);
+    }
+
+    float dot_nv = max(dot(world_normal, view_direction), 0.0);
+    vec3 half_vector = normalize(view_direction + light_direction);
+    float dot_nh = max(dot(world_normal, half_vector), 0.0);
+    float dot_hv = max(dot(half_vector, view_direction), 0.0);
+    float d = distribution_ggx(dot_nh, roughness);
+    float g = geometry_smith(dot_nl, dot_nv, roughness);
+    vec3 f = fresnel_schlick(dot_hv, f0);
+    vec3 specular = (d * g * f) / max(4.0 * dot_nl * dot_nv, 0.001);
+    vec3 kd = (vec3(1.0) - f) * (1.0 - metallic);
+    return (kd * albedo_rgb / PI + specular) * dot_nl;
+}
+
+float trace_shadow_visibility(vec3 origin, vec3 direction, float max_distance)
+{
+    shadow_payload = 1.0;
+    traceRayEXT(
+        top_level_as,
+        gl_RayFlagsNoneEXT,
+        0xFF,
+        1,
+        1,
+        1,
+        origin,
+        0.001,
+        direction,
+        max_distance,
+        1);
+    return shadow_payload;
+}
+
 void main()
 {
     MeshRecord mesh = meshes[gl_InstanceCustomIndexEXT];
@@ -244,7 +362,7 @@ void main()
     SceneVertex vertex2 = mesh.vertex_buffer.vertices[index2];
 
     vec3 barycentrics = vec3(1.0 - hit_attributes.x - hit_attributes.y, hit_attributes.x, hit_attributes.y);
-    vec3 object_normal = normalize(vertex0.normal * barycentrics.x + vertex1.normal * barycentrics.y + vertex2.normal * barycentrics.z);
+    vec3 interpolated_object_normal = normalize(vertex0.normal * barycentrics.x + vertex1.normal * barycentrics.y + vertex2.normal * barycentrics.z);
     vec2 uv = vertex0.uv * barycentrics.x + vertex1.uv * barycentrics.y + vertex2.uv * barycentrics.z;
     vec4 vertex_color = vertex0.color * barycentrics.x + vertex1.color * barycentrics.y + vertex2.color * barycentrics.z;
     vec4 object_tangent = vertex0.tangent * barycentrics.x + vertex1.tangent * barycentrics.y + vertex2.tangent * barycentrics.z;
@@ -256,98 +374,124 @@ void main()
     float roughness = metallic_roughness.y;
     float ambient_occlusion = sample_occlusion(material, uv);
     vec3 emissive = sample_emissive(material, uv);
-    object_normal = sample_normal(material, uv, object_normal, object_tangent);
+    vec3 shading_object_normal = sample_normal(material, uv, interpolated_object_normal, object_tangent);
+
     vec3 world_position = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
-    vec3 world_normal = normalize(mat3(gl_ObjectToWorldEXT) * object_normal);
+    vec3 world_vertex_normal = normalize(mat3(gl_ObjectToWorldEXT) * interpolated_object_normal);
+    vec3 world_normal = normalize(mat3(gl_ObjectToWorldEXT) * shading_object_normal);
+    vec3 object_geometric_normal = normalize(cross(vertex1.position - vertex0.position, vertex2.position - vertex0.position));
+    vec3 world_geometric_normal = normalize(mat3(gl_ObjectToWorldEXT) * object_geometric_normal);
     if (dot(world_normal, gl_WorldRayDirectionEXT) > 0.0)
     {
         world_normal = -world_normal;
+    }
+    if (dot(world_vertex_normal, gl_WorldRayDirectionEXT) > 0.0)
+    {
+        world_vertex_normal = -world_vertex_normal;
+    }
+    if (dot(world_geometric_normal, world_normal) < 0.0)
+    {
+        world_geometric_normal = -world_geometric_normal;
+    }
+    if (dot(world_vertex_normal, world_normal) < 0.0)
+    {
+        world_vertex_normal = -world_vertex_normal;
     }
 
     vec3 view_direction = normalize(-gl_WorldRayDirectionEXT);
     float dot_nv = max(dot(world_normal, view_direction), 0.0);
     vec3 f0 = mix(vec3(0.04), albedo.rgb, metallic);
+    uint sample_seed = make_sample_seed(world_position);
+    vec3 shadow_offset_normal = world_vertex_normal;
+    if (dot(shadow_offset_normal, world_geometric_normal) < 0.0)
+    {
+        shadow_offset_normal = -shadow_offset_normal;
+    }
+    if (dot(shadow_offset_normal, world_normal) < 0.0)
+    {
+        shadow_offset_normal = -shadow_offset_normal;
+    }
 
     vec3 lighting = scene_uniforms.ambient_light.rgb * scene_uniforms.ambient_light.a * albedo.rgb * (1.0 - metallic) * ambient_occlusion;
-    vec3 shadow_origin = world_position + world_normal * 0.01;
+    vec3 shadow_origin = world_position + shadow_offset_normal * 0.0015;
 
     if (scene_uniforms.directional_light_color.a > 0.0)
     {
         vec3 light_direction = normalize(-scene_uniforms.directional_light_direction.xyz);
-        float dot_nl = max(dot(world_normal, light_direction), 0.0);
-        if (dot_nl > 0.0)
-        {
-            shadow_payload = 1.0;
-            traceRayEXT(
-                top_level_as,
-                gl_RayFlagsNoneEXT,
-                0xFF,
-                1,
-                1,
-                1,
-                shadow_origin,
-                0.001,
-                light_direction,
-                10000.0,
-                1);
+        vec3 sample_tangent;
+        vec3 sample_bitangent;
+        build_basis(light_direction, sample_tangent, sample_bitangent);
+        float angular_radius = max(scene_uniforms.directional_light_data.x, 0.0);
+        float disk_radius = tan(angular_radius);
+        uint sample_count = angular_radius > 0.00001 ? SOFT_SHADOW_SAMPLE_COUNT : 1u;
+        float sample_rotation = hash_to_unit_float(sample_seed ^ 0x68bc21ebu) * (2.0 * PI);
+        vec3 light_sum = vec3(0.0);
 
-            vec3 half_vector = normalize(view_direction + light_direction);
-            float dot_nh = max(dot(world_normal, half_vector), 0.0);
-            float dot_hv = max(dot(half_vector, view_direction), 0.0);
-            float d = distribution_ggx(dot_nh, roughness);
-            float g = geometry_smith(dot_nl, dot_nv, roughness);
-            vec3 f = fresnel_schlick(dot_hv, f0);
-            vec3 specular = (d * g * f) / max(4.0 * dot_nl * dot_nv, 0.001);
-            vec3 kd = (vec3(1.0) - f) * (1.0 - metallic);
-            vec3 radiance = scene_uniforms.directional_light_color.rgb * scene_uniforms.directional_light_color.a * shadow_payload;
-            lighting += (kd * albedo.rgb / PI + specular) * radiance * dot_nl;
+        for (uint sample_index = 0u; sample_index < sample_count; ++sample_index)
+        {
+            vec2 disk_sample = sample_count > 1u ? sample_concentric_disk(hammersley(sample_index, sample_count, sample_seed ^ 0x9e3779b9u)) : vec2(0.0);
+            disk_sample = rotate_disk_sample(disk_sample, sample_rotation);
+            vec3 sampled_light_direction = normalize(light_direction + (sample_tangent * disk_sample.x + sample_bitangent * disk_sample.y) * disk_radius);
+            vec3 brdf = evaluate_direct_brdf(albedo.rgb, metallic, roughness, f0, world_normal, view_direction, sampled_light_direction);
+            if (max(brdf.r, max(brdf.g, brdf.b)) <= 0.0)
+            {
+                continue;
+            }
+
+            float visibility = trace_shadow_visibility(shadow_origin + sampled_light_direction * 0.0025, sampled_light_direction, 10000.0);
+            vec3 radiance = scene_uniforms.directional_light_color.rgb * scene_uniforms.directional_light_color.a * visibility;
+            light_sum += brdf * radiance;
         }
+
+        lighting += light_sum / float(sample_count);
     }
 
     if (scene_uniforms.spot_light_color.a > 0.0)
     {
-        vec3 to_light = scene_uniforms.spot_light_position.xyz - world_position;
-        float distance_to_light = length(to_light);
-        if (distance_to_light > 0.0001)
-        {
-            vec3 light_direction = to_light / distance_to_light;
-            float dot_nl = max(dot(world_normal, light_direction), 0.0);
-            if (dot_nl > 0.0)
-            {
-                float range = max(scene_uniforms.spot_light_position.w, 0.0001);
-                float range_factor = clamp(1.0 - (distance_to_light / range), 0.0, 1.0);
-                float cone_cos = dot(normalize(-scene_uniforms.spot_light_direction.xyz), light_direction);
-                float cone_factor = smoothstep(scene_uniforms.spot_light_data.x, scene_uniforms.spot_light_direction.w, cone_cos);
-                float attenuation = range_factor * range_factor * cone_factor;
-                if (attenuation > 0.0)
-                {
-                    shadow_payload = 1.0;
-                    traceRayEXT(
-                        top_level_as,
-                        gl_RayFlagsNoneEXT,
-                        0xFF,
-                        1,
-                        1,
-                        1,
-                        shadow_origin,
-                        0.001,
-                        light_direction,
-                        max(distance_to_light - 0.01, 0.001),
-                        1);
+        vec3 light_axis = normalize(-scene_uniforms.spot_light_direction.xyz);
+        vec3 sample_tangent;
+        vec3 sample_bitangent;
+        build_basis(light_axis, sample_tangent, sample_bitangent);
+        float source_radius = max(scene_uniforms.spot_light_data.y, 0.0);
+        uint sample_count = source_radius > 0.00001 ? SOFT_SHADOW_SAMPLE_COUNT : 1u;
+        float sample_rotation = hash_to_unit_float(sample_seed ^ 0x51f15e5du) * (2.0 * PI);
+        vec3 light_sum = vec3(0.0);
 
-                    vec3 half_vector = normalize(view_direction + light_direction);
-                    float dot_nh = max(dot(world_normal, half_vector), 0.0);
-                    float dot_hv = max(dot(half_vector, view_direction), 0.0);
-                    float d = distribution_ggx(dot_nh, roughness);
-                    float g = geometry_smith(dot_nl, dot_nv, roughness);
-                    vec3 f = fresnel_schlick(dot_hv, f0);
-                    vec3 specular = (d * g * f) / max(4.0 * dot_nl * dot_nv, 0.001);
-                    vec3 kd = (vec3(1.0) - f) * (1.0 - metallic);
-                    vec3 radiance = scene_uniforms.spot_light_color.rgb * scene_uniforms.spot_light_color.a * attenuation * shadow_payload;
-                    lighting += (kd * albedo.rgb / PI + specular) * radiance * dot_nl;
-                }
+        for (uint sample_index = 0u; sample_index < sample_count; ++sample_index)
+        {
+            vec2 disk_sample = sample_count > 1u ? sample_concentric_disk(hammersley(sample_index, sample_count, sample_seed ^ 0x243f6a88u)) : vec2(0.0);
+            disk_sample = rotate_disk_sample(disk_sample, sample_rotation) * source_radius;
+            vec3 sampled_light_position = scene_uniforms.spot_light_position.xyz + sample_tangent * disk_sample.x + sample_bitangent * disk_sample.y;
+            vec3 to_light = sampled_light_position - world_position;
+            float distance_to_light = length(to_light);
+            if (distance_to_light <= 0.0001)
+            {
+                continue;
             }
+
+            vec3 light_direction = to_light / distance_to_light;
+            float range = max(scene_uniforms.spot_light_position.w, 0.0001);
+            float range_factor = clamp(1.0 - (distance_to_light / range), 0.0, 1.0);
+            float cone_cos = dot(light_axis, light_direction);
+            float cone_factor = smoothstep(scene_uniforms.spot_light_data.x, scene_uniforms.spot_light_direction.w, cone_cos);
+            float attenuation = range_factor * range_factor * cone_factor;
+            if (attenuation <= 0.0)
+            {
+                continue;
+            }
+
+            vec3 brdf = evaluate_direct_brdf(albedo.rgb, metallic, roughness, f0, world_normal, view_direction, light_direction);
+            if (max(brdf.r, max(brdf.g, brdf.b)) <= 0.0)
+            {
+                continue;
+            }
+
+            float visibility = trace_shadow_visibility(shadow_origin + light_direction * 0.0025, light_direction, max(distance_to_light - 0.01, 0.001));
+            vec3 radiance = scene_uniforms.spot_light_color.rgb * scene_uniforms.spot_light_color.a * attenuation * visibility;
+            light_sum += brdf * radiance;
         }
+
+        lighting += light_sum / float(sample_count);
     }
 
     vec3 shaded_color = lighting + emissive;

@@ -6,6 +6,8 @@
 namespace
 {
 constexpr float kPi = 3.1415926535f;
+constexpr float kDefaultDirectionalAngularRadiusDegrees = 0.27f;
+constexpr float kDefaultSpotLightSourceRadius = 0.1f;
 
 struct Vec3
 {
@@ -84,6 +86,7 @@ void ApplyDirectionalLight(ResolvedSceneLighting& lighting, const SceneLightingR
         attribute.directional_light.color[2],
         attribute.directional_light.intensity};
     lighting.directional_light_direction = {direction.x, direction.y, direction.z, 1.0f};
+    lighting.directional_light_data = {DegreesToRadians(kDefaultDirectionalAngularRadiusDegrees), 0.0f, 0.0f, 0.0f};
 }
 
 void ApplySpotLight(ResolvedSceneLighting& lighting, const SceneLightingResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
@@ -107,7 +110,7 @@ void ApplySpotLight(ResolvedSceneLighting& lighting, const SceneLightingResolved
         (std::max)(attribute.spot_light.range, 0.001f)};
     lighting.spot_light_data = {
         std::cos(DegreesToRadians(attribute.spot_light.outer_cone_degrees)),
-        0.0f,
+        kDefaultSpotLightSourceRadius,
         0.0f,
         0.0f};
 }

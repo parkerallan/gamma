@@ -115,6 +115,7 @@ public:
 
 private:
     static constexpr std::uint32_t kMaxTextures = 256;
+    static constexpr std::uint32_t kMaxAccumulationFrames = 64;
 
     struct MeshRecordGpu
     {
@@ -158,18 +159,21 @@ private:
         std::array<float, 4> ambient_light = {0.0f, 0.0f, 0.0f, 0.0f};
         std::array<float, 4> directional_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
         std::array<float, 4> directional_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
+        std::array<float, 4> directional_light_data = {0.004712389f, 0.0f, 0.0f, 0.0f};
         std::array<float, 4> spot_light_color = {1.0f, 1.0f, 1.0f, 0.0f};
         std::array<float, 4> spot_light_direction = {0.0f, -1.0f, 0.0f, 1.0f};
         std::array<float, 4> spot_light_position = {0.0f, 0.0f, 0.0f, 1.0f};
-        std::array<float, 4> spot_light_data = {0.0f, 0.0f, 0.0f, 0.0f};
+        std::array<float, 4> spot_light_data = {0.0f, 0.1f, 0.0f, 0.0f};
         std::array<float, 4> grid_data = {0.0f, 1.0f, 0.0f, 0.0f};
         std::array<float, 4> grid_origin_extent = {0.0f, 0.0f, 0.0f, 0.0f};
         std::uint32_t mesh_count = 0;
         std::uint32_t material_count = 0;
         std::uint32_t section_count = 0;
         std::uint32_t texture_count = 0;
+        std::array<std::uint32_t, 4> accumulation_data = {0, 0, 0, 0};
     };
 
+    void ResetAccumulationState();
     void DestroyOutputResources();
     void DestroyFrameResources();
     void DestroySceneResources();
@@ -183,12 +187,16 @@ private:
     VkImage output_image_ = VK_NULL_HANDLE;
     VkDeviceMemory output_memory_ = VK_NULL_HANDLE;
     VkImageView output_view_ = VK_NULL_HANDLE;
+    VkImage history_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory history_memory_ = VK_NULL_HANDLE;
+    VkImageView history_view_ = VK_NULL_HANDLE;
     VkSampler output_sampler_ = VK_NULL_HANDLE;
     VkDescriptorSet output_descriptor_set_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
     VkFence render_fence_ = VK_NULL_HANDLE;
     VkImageLayout output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint32_t output_width_ = 0;
     std::uint32_t output_height_ = 0;
     GpuBuffer uniform_buffer_{};
@@ -213,4 +221,10 @@ private:
     std::vector<SectionRecordGpu> section_records_cpu_;
     std::vector<MaterialRecordGpu> material_records_cpu_;
     std::vector<VkDescriptorImageInfo> texture_descriptors_cpu_;
+    UniformBlock accumulation_reference_uniforms_{};
+    bool accumulation_reference_uniforms_valid_ = false;
+    std::uint32_t accumulation_frame_count_ = 0;
+    bool accumulation_reset_requested_ = true;
+    std::uint64_t scene_signature_ = 0;
+    bool scene_signature_valid_ = false;
 };

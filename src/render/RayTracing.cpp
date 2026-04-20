@@ -13,6 +13,9 @@
 
 namespace
 {
+constexpr std::uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
 std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties)
 {
     VkPhysicalDeviceMemoryProperties memory_properties = {};
@@ -57,6 +60,27 @@ bool UploadGpuBuffer(
     const RayTracing::GpuBuffer& buffer,
     const void* data,
     std::size_t size);
+
+void HashBytes(std::uint64_t& hash, const void* data, std::size_t size)
+{
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (std::size_t index = 0; index < size; ++index)
+    {
+        hash ^= static_cast<std::uint64_t>(bytes[index]);
+        hash *= kFnvPrime;
+    }
+}
+
+template <typename T>
+void HashVector(std::uint64_t& hash, const std::vector<T>& values)
+{
+    const std::uint64_t size = static_cast<std::uint64_t>(values.size());
+    HashBytes(hash, &size, sizeof(size));
+    if (!values.empty())
+    {
+        HashBytes(hash, values.data(), values.size() * sizeof(T));
+    }
+}
 
 std::filesystem::path ResolveShaderPath(const char* file_name)
 {
@@ -666,6 +690,14 @@ bool BuildBottomLevelAccelerationStructure(
 }
 }
 
+void RayTracing::ResetAccumulationState()
+{
+    accumulation_reference_uniforms_ = {};
+    accumulation_reference_uniforms_valid_ = false;
+    accumulation_frame_count_ = 0;
+    accumulation_reset_requested_ = true;
+}
+
 bool RayTracing::Initialize(VulkanContext* context)
 {
     vulkan_context_ = context;
@@ -788,7 +820,7 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
         return false;
     }
 
-    if (output_image_ != VK_NULL_HANDLE && output_width_ == width && output_height_ == height)
+    if (output_image_ != VK_NULL_HANDLE && history_image_ != VK_NULL_HANDLE && output_width_ == width && output_height_ == height)
     {
         return true;
     }
@@ -890,6 +922,26 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
     output_width_ = width;
     output_height_ = height;
     output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!CreateVulkanImage(
+            vulkan_context_->GetPhysicalDevice(),
+            device,
+            allocator,
+            width,
+            height,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            history_image_,
+            history_memory_,
+            history_view_))
+    {
+        status_message_ = "Failed to create viewport RT history image";
+        DestroyOutputResources();
+        return false;
+    }
+
+    history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    ResetAccumulationState();
     return true;
 }
 
@@ -1004,6 +1056,8 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         DestroyGpuBuffer(vulkan_context_, mesh_record_buffer_);
         DestroyGpuBuffer(vulkan_context_, section_record_buffer_);
         DestroyGpuBuffer(vulkan_context_, material_record_buffer_);
+        scene_signature_valid_ = false;
+        ResetAccumulationState();
         status_message_ = "RT scene cleared";
         return true;
     }
@@ -1059,8 +1113,23 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 
     if (acceleration_instances.empty())
     {
+        scene_signature_valid_ = false;
+        ResetAccumulationState();
         status_message_ = "RT scene has no buildable instances";
         return true;
+    }
+
+    std::uint64_t scene_signature = kFnvOffsetBasis;
+    HashVector(scene_signature, mesh_records_cpu_);
+    HashVector(scene_signature, section_records_cpu_);
+    HashVector(scene_signature, material_records_cpu_);
+    HashVector(scene_signature, texture_descriptors_cpu_);
+    HashVector(scene_signature, acceleration_instances);
+    if (!scene_signature_valid_ || scene_signature_ != scene_signature)
+    {
+        scene_signature_ = scene_signature;
+        scene_signature_valid_ = true;
+        ResetAccumulationState();
     }
 
     const VkDeviceSize instance_buffer_size =
@@ -1212,7 +1281,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 void RayTracing::DestroyOutputResources()
 {
     if (vulkan_context_ != nullptr &&
-        (output_descriptor_set_ != VK_NULL_HANDLE || output_view_ != VK_NULL_HANDLE || output_image_ != VK_NULL_HANDLE))
+        (output_descriptor_set_ != VK_NULL_HANDLE || output_view_ != VK_NULL_HANDLE || output_image_ != VK_NULL_HANDLE || history_view_ != VK_NULL_HANDLE || history_image_ != VK_NULL_HANDLE))
     {
         // The previous UI frame can still be sampling the old viewport image when a resize triggers reallocation.
         vulkan_context_->WaitIdle();
@@ -1221,6 +1290,8 @@ void RayTracing::DestroyOutputResources()
     output_width_ = 0;
     output_height_ = 0;
     output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    ResetAccumulationState();
 
     if (output_descriptor_set_ != VK_NULL_HANDLE)
     {
@@ -1233,6 +1304,9 @@ void RayTracing::DestroyOutputResources()
         output_image_ = VK_NULL_HANDLE;
         output_memory_ = VK_NULL_HANDLE;
         output_view_ = VK_NULL_HANDLE;
+        history_image_ = VK_NULL_HANDLE;
+        history_memory_ = VK_NULL_HANDLE;
+        history_view_ = VK_NULL_HANDLE;
         return;
     }
 
@@ -1252,6 +1326,21 @@ void RayTracing::DestroyOutputResources()
     {
         vkFreeMemory(device, output_memory_, allocator);
         output_memory_ = VK_NULL_HANDLE;
+    }
+    if (history_view_ != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, history_view_, allocator);
+        history_view_ = VK_NULL_HANDLE;
+    }
+    if (history_image_ != VK_NULL_HANDLE)
+    {
+        vkDestroyImage(device, history_image_, allocator);
+        history_image_ = VK_NULL_HANDLE;
+    }
+    if (history_memory_ != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(device, history_memory_, allocator);
+        history_memory_ = VK_NULL_HANDLE;
     }
 }
 
@@ -1480,7 +1569,7 @@ bool RayTracing::EnsurePipelineResources()
 
     if (descriptor_set_layout_ == VK_NULL_HANDLE)
     {
-        std::array<VkDescriptorSetLayoutBinding, 7> bindings = {};
+        std::array<VkDescriptorSetLayoutBinding, 8> bindings = {};
         bindings[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, nullptr};
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
         bindings[2] = {
@@ -1496,6 +1585,7 @@ bool RayTracing::EnsurePipelineResources()
         bindings[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR, nullptr};
         bindings[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR, nullptr};
         bindings[6] = {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxTextures, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR, nullptr};
+        bindings[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
 
         VkDescriptorSetLayoutCreateInfo layout_info = {};
         layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1690,7 +1780,7 @@ bool RayTracing::UpdateDescriptors()
         return false;
     }
 
-    if (output_view_ == VK_NULL_HANDLE || uniform_buffer_.buffer == VK_NULL_HANDLE || fallback_texture_view_ == VK_NULL_HANDLE)
+    if (output_view_ == VK_NULL_HANDLE || history_view_ == VK_NULL_HANDLE || uniform_buffer_.buffer == VK_NULL_HANDLE || fallback_texture_view_ == VK_NULL_HANDLE)
     {
         return false;
     }
@@ -1717,6 +1807,10 @@ bool RayTracing::UpdateDescriptors()
     output_image_info.imageView = output_view_;
     output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo history_image_info = {};
+    history_image_info.imageView = history_view_;
+    history_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     VkDescriptorBufferInfo uniform_info = {};
     uniform_info.buffer = uniform_buffer_.buffer;
     uniform_info.range = sizeof(UniformBlock);
@@ -1733,7 +1827,7 @@ bool RayTracing::UpdateDescriptors()
     material_info.buffer = material_record_buffer_.buffer;
     material_info.range = material_record_buffer_.size;
 
-    std::array<VkWriteDescriptorSet, 7> writes = {};
+    std::array<VkWriteDescriptorSet, 8> writes = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     writes[0].pNext = &acceleration_write;
     writes[0].dstSet = descriptor_set_;
@@ -1783,6 +1877,13 @@ bool RayTracing::UpdateDescriptors()
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[6].pImageInfo = texture_infos.data();
 
+    writes[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[7].dstSet = descriptor_set_;
+    writes[7].dstBinding = 7;
+    writes[7].descriptorCount = 1;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[7].pImageInfo = &history_image_info;
+
     vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
 }
@@ -1800,6 +1901,7 @@ bool RayTracing::RenderFrame(
     if (!available_ ||
         vulkan_context_ == nullptr ||
         output_image_ == VK_NULL_HANDLE ||
+        history_image_ == VK_NULL_HANDLE ||
         command_buffer_ == VK_NULL_HANDLE ||
         render_fence_ == VK_NULL_HANDLE ||
         command_pool_ == VK_NULL_HANDLE)
@@ -1874,11 +1976,24 @@ bool RayTracing::RenderFrame(
         VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     output_layout_ = VK_IMAGE_LAYOUT_GENERAL;
 
+    TransitionImageLayout(
+        command_buffer_,
+        history_image_,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        history_layout_,
+        VK_IMAGE_LAYOUT_GENERAL,
+        history_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        history_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    history_layout_ = VK_IMAGE_LAYOUT_GENERAL;
+
     if (top_level_as_.handle == VK_NULL_HANDLE ||
         mesh_record_buffer_.buffer == VK_NULL_HANDLE ||
         section_record_buffer_.buffer == VK_NULL_HANDLE ||
         material_record_buffer_.buffer == VK_NULL_HANDLE)
     {
+        ResetAccumulationState();
         VkClearColorValue clear_value = {};
         clear_value.float32[0] = 0.08f;
         clear_value.float32[1] = 0.09f;
@@ -1904,6 +2019,7 @@ bool RayTracing::RenderFrame(
     uniforms.ambient_light = lighting.ambient_light;
     uniforms.directional_light_color = lighting.directional_light_color;
     uniforms.directional_light_direction = lighting.directional_light_direction;
+    uniforms.directional_light_data = lighting.directional_light_data;
     uniforms.spot_light_color = lighting.spot_light_color;
     uniforms.spot_light_direction = lighting.spot_light_direction;
     uniforms.spot_light_position = lighting.spot_light_position;
@@ -1914,6 +2030,23 @@ bool RayTracing::RenderFrame(
     uniforms.material_count = static_cast<std::uint32_t>(material_records_cpu_.size());
     uniforms.section_count = static_cast<std::uint32_t>(section_records_cpu_.size());
     uniforms.texture_count = static_cast<std::uint32_t>(texture_descriptors_cpu_.size());
+
+    UniformBlock accumulation_reference = uniforms;
+    accumulation_reference.accumulation_data = {0, 0, 0, 0};
+    const bool accumulation_reset =
+        accumulation_reset_requested_ ||
+        !accumulation_reference_uniforms_valid_ ||
+        std::memcmp(&accumulation_reference, &accumulation_reference_uniforms_, sizeof(UniformBlock)) != 0;
+    if (accumulation_reset)
+    {
+        accumulation_frame_count_ = 0;
+    }
+    uniforms.accumulation_data = {
+        accumulation_frame_count_,
+        accumulation_frame_count_ > 0 ? 1u : 0u,
+        accumulation_reset ? 1u : 0u,
+        0u};
+
     if (!UploadGpuBuffer(*vulkan_context_, uniform_buffer_, &uniforms, sizeof(uniforms)))
     {
         status_message_ = "Failed to upload viewport RT uniforms";
@@ -1950,6 +2083,15 @@ bool RayTracing::RenderFrame(
         output_height_,
         1);
 
+    accumulation_reference_uniforms_ = accumulation_reference;
+    accumulation_reference_uniforms_valid_ = true;
+
     status_message_ = "Viewport RT frame traced";
-    return finalize_and_submit();
+    const bool submitted = finalize_and_submit();
+    if (submitted)
+    {
+        accumulation_frame_count_ = (std::min)(accumulation_frame_count_ + 1u, kMaxAccumulationFrames);
+        accumulation_reset_requested_ = false;
+    }
+    return submitted;
 }

@@ -15,6 +15,7 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 ambient_light;
     vec4 directional_light_color;
     vec4 directional_light_direction;
+    vec4 directional_light_data;
     vec4 spot_light_color;
     vec4 spot_light_direction;
     vec4 spot_light_position;
@@ -22,6 +23,7 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 grid_data;
     vec4 grid_origin_extent;
     uvec4 counts;
+    uvec4 accumulation_data;
 } scene_uniforms;
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;
