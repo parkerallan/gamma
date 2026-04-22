@@ -157,8 +157,14 @@ void FilesPanel::Render(EngineState& state)
         new_project_dialog_.Open();
         state.request_new_project_dialog = false;
     }
+    if (state.request_build_game_dialog)
+    {
+        build_game_dialog_.Open(state);
+        state.request_build_game_dialog = false;
+    }
 
     const bool project_changed = open_project_dialog_.Render(state) || new_project_dialog_.Render(state);
+    build_game_dialog_.Render(state);
     bool file_tree_changed = false;
     if (project_changed)
     {

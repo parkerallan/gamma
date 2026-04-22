@@ -11,6 +11,13 @@
 
 #include <SDL3/SDL.h>
 
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
 class EngineApplication
 {
 public:
@@ -34,8 +41,33 @@ private:
     InfoPanel info_panel_;
     LogPanel log_panel_;
 
+    // Background game build
+    std::thread build_thread_;
+    std::atomic<bool> is_build_running_{false};
+    std::atomic<bool> build_succeeded_{false};
+    std::mutex build_log_mutex_;
+    std::vector<std::string> pending_build_log_;
+    std::string pending_build_error_; // written once, under build_log_mutex_
+
     void ProcessEvents();
+    void HandleBuildRequests();
+    void DrainBuildLog();
     void HandlePlayRequests();
+    void ExecuteBuildRequest(
+        const EngineBuildRequest& request,
+        const std::filesystem::path& project_root,
+        const std::filesystem::path& active_scene_path,
+        const std::filesystem::path& project_file_path); // runs on build_thread_
+    bool StageBuiltGame(
+        const EngineBuildRequest& request,
+        const std::filesystem::path& project_root,
+        const std::filesystem::path& active_scene_path,
+        const std::filesystem::path& project_file_path,
+        const std::filesystem::path& external_build_directory,
+        const std::filesystem::path& built_output_directory,
+        const std::filesystem::path& built_game_executable_path,
+        const std::function<void(const std::string&)>& log,
+        std::string& out_error);
     bool StartRuntimeSession();
     void StopRuntimeSession();
     void RenderRuntimeWindow();

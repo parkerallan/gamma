@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# When ON, only the standalone game target is built (no engine editor).
+# Set by the engine's build dialog: cmake -DENGINE_BUILD_GAME=ON ...
+# The default cmake --build build command leaves this OFF and builds only the engine.
+option(ENGINE_BUILD_GAME "Build the standalone game target instead of the engine editor" OFF)
+
 find_package(Vulkan REQUIRED)
 
 find_program(GLSLC_EXECUTABLE
@@ -34,11 +39,30 @@ endif()
 
 include(FetchContent)
 
-set(SDL_SHARED ON CACHE BOOL "" FORCE)
-set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+# SDL3: shared for the engine editor, static for the standalone game so that
+# no SDL3.dll needs to be distributed with the game.
+# For game builds, disable unused subsystems to reduce compile time and size.
+if(ENGINE_BUILD_GAME)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON  CACHE BOOL "" FORCE)
+    # Disable unused SDL3 subsystems for game builds
+    set(SDL_AUDIO      OFF CACHE BOOL "" FORCE)
+    set(SDL_JOYSTICK   OFF CACHE BOOL "" FORCE)
+    set(SDL_HAPTIC     OFF CACHE BOOL "" FORCE)
+    set(SDL_HIDAPI     OFF CACHE BOOL "" FORCE)
+    set(SDL_SENSOR     OFF CACHE BOOL "" FORCE)
+    set(SDL_POWER      OFF CACHE BOOL "" FORCE)
+    set(SDL_TRAY       OFF CACHE BOOL "" FORCE)
+    set(SDL_DIALOG     OFF CACHE BOOL "" FORCE)
+    set(SDL_CAMERA     OFF CACHE BOOL "" FORCE)
+    set(SDL_RENDER     OFF CACHE BOOL "" FORCE)
+else()
+    set(SDL_SHARED ON  CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+endif()
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-set(SDL_TESTS OFF CACHE BOOL "" FORCE)
-set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS        OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES     OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     sdl3
@@ -86,6 +110,22 @@ set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 
+# For game builds: disable all assimp importers by default, then enable only
+# the formats we actually use (FBX, GLTF, OBJ). This dramatically reduces
+# compile time and binary size.
+if(ENGINE_BUILD_GAME)
+    set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_FBX_IMPORTER  ON CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_OBJ_IMPORTER  ON CACHE BOOL "" FORCE)
+endif()
+
+# Force assimp to produce a static library when building the game so the
+# final staged output requires no assimp DLL.
+if(ENGINE_BUILD_GAME)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_Declare(
     assimp
     GIT_REPOSITORY https://github.com/assimp/assimp.git
@@ -116,6 +156,17 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
 set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
 set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
+
+# ---------------------------------------------------------------------------
+# ENGINE_BUILD_GAME=ON  → build only the standalone game target
+# ENGINE_BUILD_GAME=OFF → build only the engine editor (default)
+# ---------------------------------------------------------------------------
+if(ENGINE_BUILD_GAME)
+
+    include(cmake/game.cmake)
+
+else() # engine editor build ---------------------------------------------------
+
 set(ENGINE_SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/shaders)
 set(ENGINE_SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
 set(ENGINE_UI_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/ui)
@@ -208,8 +259,10 @@ add_executable(engine
     src/components/CreationMenu.cpp
     src/components/FileContextMenu.cpp
     src/components/SceneObjectAttributesEditor.cpp
+    src/dialogs/BuildGameDialog.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
+    src/pak/PakArchive.cpp
     src/graph/GraphDocument.cpp
     src/graph/NodeLibrary.cpp
     src/panels/FilesPanel.cpp
@@ -290,3 +343,5 @@ endif()
 set_target_properties(engine PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
+
+endif() # ENGINE_BUILD_GAME

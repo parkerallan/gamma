@@ -18,6 +18,24 @@ enum class WorkspaceTab
     Editor,
 };
 
+enum class EngineBuildType
+{
+    Debug,
+    Final,
+};
+
+struct EngineBuildRequest
+{
+    std::string game_name;
+    std::filesystem::path output_root;
+    EngineBuildType build_type = EngineBuildType::Debug;
+
+    std::filesystem::path GetStageDirectory() const
+    {
+        return output_root / game_name;
+    }
+};
+
 struct EngineState
 {
     static constexpr std::size_t kEditorBufferCapacity = 512 * 1024;
@@ -29,6 +47,7 @@ struct EngineState
     bool has_requested_tab = false;
     bool request_open_project_dialog = false;
     bool request_new_project_dialog = false;
+    bool request_build_game_dialog = false;
     bool show_files_panel = true;
     bool show_workspace_panel = true;
     bool show_settings_panel = true;
@@ -59,10 +78,13 @@ struct EngineState
     bool play_stop_requested = false;
     bool play_restart_requested = false;
     bool is_playing = false;
+    bool has_pending_build_request = false;
     std::filesystem::path playing_scene_path;
     std::string last_play_error;
+    std::string last_build_error;
     std::string saved_file_contents;
     std::string open_file_contents;
+    EngineBuildRequest pending_build_request{};
     std::vector<char> editor_buffer = std::vector<char>(kEditorBufferCapacity, '\0');
     bool open_file_dirty = false;
     bool open_graph_dirty = false;
@@ -99,11 +121,32 @@ struct EngineState
     {
         if (!CanBuildProject())
         {
-            AddLog("Cannot build: no project is loaded");
+            SetBuildError("Cannot build: no project is loaded");
             return;
         }
 
-        AddLog("Build action is not implemented yet");
+        request_build_game_dialog = true;
+        last_build_error.clear();
+        AddLog("Opening Build Game dialog");
+    }
+
+    void SetBuildError(std::string message)
+    {
+        last_build_error = std::move(message);
+        AddLog(last_build_error);
+    }
+
+    void QueueBuildRequest(EngineBuildRequest request)
+    {
+        pending_build_request = std::move(request);
+        has_pending_build_request = true;
+        last_build_error.clear();
+
+        const std::string build_type_label = pending_build_request.build_type == EngineBuildType::Debug ? "Debug" : "Final";
+        AddLog(
+            "Queued game build request: name='" + pending_build_request.game_name +
+            "', config=" + build_type_label +
+            ", output='" + pending_build_request.GetStageDirectory().generic_string() + "'");
     }
 
     void TriggerPlayAction()
@@ -179,6 +222,7 @@ struct EngineState
     {
         project_root.clear();
         project_file_path.clear();
+        request_build_game_dialog = false;
         active_scene_path.clear();
         selected_item_path.clear();
         selected_scene_object_name.clear();
@@ -193,8 +237,11 @@ struct EngineState
         request_files_tree_refresh = false;
         ClearPlayRequests();
         is_playing = false;
+        has_pending_build_request = false;
         playing_scene_path.clear();
         last_play_error.clear();
+        last_build_error.clear();
+        pending_build_request = {};
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }

@@ -57,6 +57,15 @@ public:
         std::uint32_t source_width,
         std::uint32_t source_height);
 
+    // Present a rendered image directly to the main (engine-initialized) window
+    // without a secondary VulkanWindowContext. Used by the standalone game.
+    bool PresentImageToMainWindow(
+        SDL_Window* window,
+        VkImage source_image,
+        VkImageLayout source_layout,
+        std::uint32_t source_width,
+        std::uint32_t source_height);
+
     VkInstance GetInstance() const { return instance_; }
     VkPhysicalDevice GetPhysicalDevice() const { return physical_device_; }
     VkDevice GetDevice() const { return device_; }

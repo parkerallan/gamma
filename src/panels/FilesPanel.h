@@ -2,6 +2,7 @@
 
 #include "components/CreationMenu.h"
 #include "components/FileContextMenu.h"
+#include "dialogs/BuildGameDialog.h"
 #include "dialogs/NewProjectDialog.h"
 #include "dialogs/OpenProjectDialog.h"
 #include "state/EngineState.h"
@@ -48,6 +49,7 @@ private:
     bool open_scene_object_delete_popup_ = false;
     FileContextMenu file_context_menu_;
     CreationMenu creation_menu_;
+    BuildGameDialog build_game_dialog_;
     NewProjectDialog new_project_dialog_;
     OpenProjectDialog open_project_dialog_;
 

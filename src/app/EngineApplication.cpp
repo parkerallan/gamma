@@ -4,11 +4,21 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
+#include "pak/PakArchive.h"
 #include "ui/Codicons.h"
 
 #include <array>
+#include <cctype>
 #include <filesystem>
+#include <functional>
+#include <system_error>
 #include <string>
+#include <vector>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -143,6 +153,176 @@ void LoadUserInterfaceFonts(ImGuiIO& io, const std::filesystem::path& workspace_
         SDL_Log("Failed to merge Codicon font from %s", codicon_font_path.string().c_str());
     }
 }
+
+std::string QuoteCommandArgument(const std::string& value)
+{
+    std::string quoted = "\"";
+    for (const char character : value)
+    {
+        if (character == '"')
+        {
+            quoted += '\\';
+        }
+        quoted += character;
+    }
+    quoted += "\"";
+    return quoted;
+}
+
+// Run a command, calling line_cb for each line of combined stdout+stderr.
+// Returns the process exit code, or -1 on failure to launch.
+// On Windows uses CreateProcess with CREATE_NO_WINDOW so no console window
+// appears and the SDL/Vulkan window is not disrupted.
+int RunCommand(const std::string& command, const std::function<void(const std::string&)>& line_cb)
+{
+#ifdef _WIN32
+    HANDLE read_end = nullptr;
+    HANDLE write_end = nullptr;
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+
+    if (!CreatePipe(&read_end, &write_end, &sa, 0))
+    {
+        return -1;
+    }
+    // Read end must NOT be inherited by the child.
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(STARTUPINFOA);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = write_end;
+    si.hStdError  = write_end;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi = {};
+
+    // Route through cmd.exe so that shell redirections work correctly.
+    const std::string full_cmd = "cmd.exe /C " + command;
+    std::vector<char> cmd_buf(full_cmd.begin(), full_cmd.end());
+    cmd_buf.push_back('\0');
+
+    const BOOL launched = CreateProcessA(
+        nullptr, cmd_buf.data(),
+        nullptr, nullptr,
+        /*bInheritHandles=*/TRUE,
+        CREATE_NO_WINDOW,
+        nullptr, nullptr,
+        &si, &pi);
+
+    // Parent doesn't write to the pipe; close the write end now.
+    CloseHandle(write_end);
+
+    if (!launched)
+    {
+        CloseHandle(read_end);
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+
+    std::string line;
+    char ch = '\0';
+    DWORD bytes_read = 0;
+    while (ReadFile(read_end, &ch, 1, &bytes_read, nullptr) && bytes_read > 0)
+    {
+        if (ch == '\n' || ch == '\r')
+        {
+            if (!line.empty())
+            {
+                line_cb(line);
+                line.clear();
+            }
+        }
+        else
+        {
+            line += ch;
+        }
+    }
+    if (!line.empty())
+    {
+        line_cb(line);
+    }
+
+    CloseHandle(read_end);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(exit_code);
+
+#else
+    const std::string redirected = command + " 2>&1";
+    FILE* pipe = popen(redirected.c_str(), "r");
+    if (pipe == nullptr)
+    {
+        return -1;
+    }
+    std::string line;
+    char ch = '\0';
+    while (std::fread(&ch, 1, 1, pipe) == 1)
+    {
+        if (ch == '\n' || ch == '\r')
+        {
+            if (!line.empty())
+            {
+                line_cb(line);
+                line.clear();
+            }
+        }
+        else
+        {
+            line += ch;
+        }
+    }
+    if (!line.empty())
+    {
+        line_cb(line);
+    }
+    return pclose(pipe);
+#endif
+}
+
+bool IsPathWithin(const std::filesystem::path& parent, const std::filesystem::path& candidate)
+{
+    if (parent.empty() || candidate.empty())
+    {
+        return false;
+    }
+
+    std::error_code error;
+    const std::filesystem::path relative = std::filesystem::relative(candidate, parent, error);
+    if (error || relative.empty())
+    {
+        return false;
+    }
+
+    const std::string relative_string = relative.generic_string();
+    return relative == "." || (relative_string != ".." && relative_string.rfind("../", 0) != 0);
+}
+
+std::string BuildTypeToConfigName(EngineBuildType build_type)
+{
+    return build_type == EngineBuildType::Debug ? "Debug" : "Release";
+}
+
+bool ShouldSkipStagedProjectEntry(
+    const std::filesystem::path& entry_path,
+    const std::filesystem::path& stage_directory,
+    const std::filesystem::path& external_build_directory)
+{
+    const std::string file_name = entry_path.filename().string();
+    if (entry_path == stage_directory || entry_path == external_build_directory)
+    {
+        return true;
+    }
+
+    return file_name == "Build" ||
+        file_name == "build" ||
+        file_name == ".engine-game-build" ||
+        file_name == ".vs";
+}
 }
 
 bool EngineApplication::Init()
@@ -230,6 +410,7 @@ void EngineApplication::RunLoop()
     while (running_)
     {
         ProcessEvents();
+        HandleBuildRequests();
         HandlePlayRequests();
 
         const bool editor_minimized = (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED) != 0;
@@ -259,6 +440,12 @@ void EngineApplication::RunLoop()
 
 void EngineApplication::Shutdown()
 {
+    // Wait for any in-progress background build to finish before tearing down.
+    if (build_thread_.joinable())
+    {
+        build_thread_.join();
+    }
+
     StopRuntimeSession();
     workspace_panel_.Shutdown();
     info_panel_.Shutdown();
@@ -567,7 +754,8 @@ void EngineApplication::RenderMainMenuBar()
 
         ImGui::Separator();
 
-        if (ImGui::MenuItem("Build", "Ctrl+B", false, state_.CanBuildProject()))
+        const bool build_running = is_build_running_.load();
+        if (ImGui::MenuItem("Build", "Ctrl+B", false, state_.CanBuildProject() && !build_running))
         {
             state_.TriggerBuildAction();
         }
@@ -664,6 +852,21 @@ void EngineApplication::RenderMainMenuBar()
         ImGui::EndMenu();
     }
 
+    // Build progress indicator on the right side of the menu bar.
+    if (is_build_running_.load())
+    {
+        const float spinner_radius = 5.0f * display_scale_;
+        const float t = static_cast<float>(ImGui::GetTime());
+        const int num_dots = 4;
+        const int dot = static_cast<int>(t * 4.0f) % num_dots;
+        std::string label = "Building";
+        for (int i = 0; i < num_dots; ++i) { label += (i <= dot) ? '.' : ' '; }
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x
+                             - ImGui::CalcTextSize(label.c_str()).x - spinner_radius * 2.0f - 8.0f);
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "%s", label.c_str());
+    }
+
     ImGui::EndMenuBar();
 }
 
@@ -738,4 +941,500 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
 
     state_.dock_layout_built = true;
     state_.AddLog("Created default dock layout");
+}
+
+void EngineApplication::HandleBuildRequests()
+{
+    // Drain log lines produced by the background build thread each frame.
+    DrainBuildLog();
+
+    // If a build is already running, don't start another.
+    if (is_build_running_.load())
+    {
+        return;
+    }
+
+    // Join a finished thread before possibly starting a new one.
+    if (build_thread_.joinable())
+    {
+        build_thread_.join();
+
+        // Report the final result (success / error already in pending_build_error_).
+        const bool ok = build_succeeded_.load();
+        if (!ok)
+        {
+            std::string err;
+            {
+                std::lock_guard<std::mutex> lock(build_log_mutex_);
+                err = pending_build_error_;
+            }
+            if (!err.empty())
+            {
+                state_.SetBuildError(err);
+            }
+        }
+    }
+
+    if (!state_.has_pending_build_request)
+    {
+        return;
+    }
+
+    const EngineBuildRequest request = state_.pending_build_request;
+    state_.has_pending_build_request = false;
+
+    // Validate on the main thread before handing off.
+    if (state_.workspace_root.empty())
+    {
+        state_.SetBuildError("Cannot build game: workspace root is unavailable");
+        return;
+    }
+
+    if (state_.project_file_path.empty())
+    {
+        state_.SetBuildError("Cannot build game: project manifest is unavailable");
+        return;
+    }
+
+    const std::filesystem::path stage_directory = request.GetStageDirectory();
+    const std::filesystem::path external_build_directory = request.output_root / (request.game_name + "-build");
+
+    if (IsPathWithin(state_.workspace_root, stage_directory) || IsPathWithin(state_.workspace_root, external_build_directory))
+    {
+        state_.SetBuildError("Cannot build game: staged output and game build directory must be outside the engine workspace");
+        return;
+    }
+
+    // Capture everything the thread needs by value.
+    is_build_running_.store(true);
+    build_succeeded_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(build_log_mutex_);
+        pending_build_error_.clear();
+    }
+
+    const std::filesystem::path project_root = state_.project_root;
+    const std::filesystem::path active_scene_path = state_.active_scene_path;
+    const std::filesystem::path project_file_path = state_.project_file_path;
+
+    state_.AddLog("[Build] Starting background build for '" + request.game_name + "'...");
+
+    build_thread_ = std::thread([this, request, project_root, active_scene_path, project_file_path]()
+    {
+        try
+        {
+            ExecuteBuildRequest(request, project_root, active_scene_path, project_file_path);
+        }
+        catch (const std::exception& ex)
+        {
+            std::lock_guard<std::mutex> lock(build_log_mutex_);
+            pending_build_error_ = std::string("Build thread exception: ") + ex.what();
+            pending_build_log_.push_back("[Build] FATAL ERROR: " + pending_build_error_);
+        }
+        catch (...)
+        {
+            std::lock_guard<std::mutex> lock(build_log_mutex_);
+            pending_build_error_ = "Build thread crashed with unknown exception";
+            pending_build_log_.push_back("[Build] FATAL ERROR: " + pending_build_error_);
+        }
+        is_build_running_.store(false);
+    });
+}
+
+void EngineApplication::DrainBuildLog()
+{
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(build_log_mutex_);
+        lines.swap(pending_build_log_);
+    }
+    for (const std::string& line : lines)
+    {
+        state_.AddLog(line);
+    }
+}
+
+void EngineApplication::ExecuteBuildRequest(
+    const EngineBuildRequest& request,
+    const std::filesystem::path& project_root,
+    const std::filesystem::path& active_scene_path,
+    const std::filesystem::path& project_file_path)
+{
+    // Helper: push a log line from the build thread into the pending queue.
+    const auto log = [this](const std::string& message)
+    {
+        std::lock_guard<std::mutex> lock(build_log_mutex_);
+        pending_build_log_.push_back(message);
+    };
+
+    const auto fail = [this, &log](const std::string& message) -> bool
+    {
+        log("[Build] ERROR: " + message);
+        std::lock_guard<std::mutex> lock(build_log_mutex_);
+        pending_build_error_ = message;
+        return false;
+    };
+
+    const std::string config_name = BuildTypeToConfigName(request.build_type);
+    const std::filesystem::path external_build_directory = request.output_root / (request.game_name + "-build");
+    const std::filesystem::path built_output_directory = external_build_directory / config_name;
+    const std::filesystem::path built_game_executable_path = built_output_directory / "game.exe";
+
+    std::error_code error;
+    std::filesystem::create_directories(external_build_directory, error);
+    if (error)
+    {
+        fail("Failed to create external game build directory: " + external_build_directory.generic_string());
+        return;
+    }
+
+    // Delete stale CMakeCache.txt so changed cache variables (e.g.
+    // ASSIMP_USE_STATIC_CRT) are picked up on every configure.
+    const std::filesystem::path cmake_cache = external_build_directory / "CMakeCache.txt";
+    if (std::filesystem::exists(cmake_cache, error))
+    {
+        std::filesystem::remove(cmake_cache, error);
+        error.clear();
+    }
+
+    log("[Build] Configuring: " + external_build_directory.generic_string());
+    const std::string configure_command =
+        "cmake -S " + QuoteCommandArgument(state_.workspace_root.string()) +
+        " -B " + QuoteCommandArgument(external_build_directory.string()) +
+        " -DENGINE_BUILD_GAME=ON";
+
+    const int configure_exit_code = RunCommand(configure_command, [&log](const std::string& line)
+    {
+        log("[cmake] " + line);
+    });
+    if (configure_exit_code != 0)
+    {
+        fail("Game configure failed with exit code " + std::to_string(configure_exit_code));
+        return;
+    }
+
+    log("[Build] Compiling: config=" + config_name);
+    const std::string build_command =
+        "cmake --build " + QuoteCommandArgument(external_build_directory.string()) +
+        " --config " + config_name +
+        " --target game";
+
+    const int build_exit_code = RunCommand(build_command, [&log](const std::string& line)
+    {
+        log("[cmake] " + line);
+    });
+    if (build_exit_code != 0)
+    {
+        fail("Game build failed with exit code " + std::to_string(build_exit_code));
+        return;
+    }
+
+    if (!std::filesystem::exists(built_game_executable_path))
+    {
+        fail("Game build completed but game.exe was not found in the build output");
+        return;
+    }
+
+    std::string stage_error;
+    if (!StageBuiltGame(request, project_root, active_scene_path, project_file_path, external_build_directory, built_output_directory, built_game_executable_path, log, stage_error))
+    {
+        fail(stage_error);
+        return;
+    }
+
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(external_build_directory, cleanup_error);
+    if (cleanup_error)
+    {
+        log("[Build] Warning: failed to remove temporary build directory: " + external_build_directory.generic_string());
+    }
+    else
+    {
+        log("[Build] Removed temporary build directory: " + external_build_directory.generic_string());
+    }
+
+    build_succeeded_.store(true);
+    log("[Build] Done! Staged output: " + request.GetStageDirectory().generic_string());
+}
+
+bool EngineApplication::StageBuiltGame(
+    const EngineBuildRequest& request,
+    const std::filesystem::path& project_root,
+    const std::filesystem::path& active_scene_path,
+    const std::filesystem::path& project_file_path,
+    const std::filesystem::path& external_build_directory,
+    const std::filesystem::path& built_output_directory,
+    const std::filesystem::path& built_game_executable_path,
+    const std::function<void(const std::string&)>& log,
+    std::string& out_error)
+{
+    std::filesystem::path content_root = project_root;
+    std::error_code root_error;
+    if (content_root.empty() || !std::filesystem::exists(content_root, root_error) || !std::filesystem::is_directory(content_root, root_error))
+    {
+        root_error.clear();
+        if (!project_file_path.empty())
+        {
+            content_root = project_file_path.parent_path();
+        }
+    }
+    if (content_root.empty() || !std::filesystem::exists(content_root, root_error) || !std::filesystem::is_directory(content_root, root_error))
+    {
+        out_error = "Cannot stage game: resolved project content root is invalid";
+        return false;
+    }
+
+    const std::filesystem::path stage_directory = request.GetStageDirectory();
+    const std::filesystem::path stage_game_executable_path = stage_directory / (request.game_name + ".exe");
+    const std::filesystem::path stage_shader_directory = stage_directory / "shaders";
+    const std::filesystem::path stage_vulkan_directory = stage_directory / "Vulkan";
+    const std::filesystem::path built_shader_directory = built_output_directory / "shaders";
+    const std::filesystem::path assets_pak_path = stage_directory / "assets.pak";
+    const std::filesystem::path config_path = stage_directory / "config.ini";
+
+    if (IsPathWithin(content_root, stage_directory))
+    {
+        out_error = "Cannot stage game output inside the source project directory";
+        return false;
+    }
+
+    std::error_code relative_error;
+    const std::filesystem::path startup_scene_relative_path = std::filesystem::relative(active_scene_path, content_root, relative_error);
+    if (relative_error || startup_scene_relative_path.empty())
+    {
+        out_error = "Failed to compute startup scene path relative to the project root";
+        return false;
+    }
+
+    std::error_code error;
+    std::filesystem::remove_all(stage_directory, error);
+    error.clear();
+    std::filesystem::create_directories(stage_shader_directory, error);
+    if (error)
+    {
+        out_error = "Failed to create staged output directory: " + stage_directory.generic_string();
+        return false;
+    }
+
+    // -----------------------------------------------------------------
+    // Pack all project content into assets.pak
+    // -----------------------------------------------------------------
+    log("[Build] Project root (captured): " + project_root.generic_string());
+    log("[Build] Content root (resolved): " + content_root.generic_string());
+    log("[Build] Packing project content into assets.pak...");
+    PakArchive pak;
+
+    std::vector<std::filesystem::path> pending_directories;
+    pending_directories.push_back(content_root);
+    std::size_t packed_file_count = 0;
+
+    while (!pending_directories.empty())
+    {
+        const std::filesystem::path current_directory = pending_directories.back();
+        pending_directories.pop_back();
+
+        std::error_code dir_error;
+        std::filesystem::directory_iterator dir_it(
+            current_directory,
+            std::filesystem::directory_options::skip_permission_denied,
+            dir_error);
+        std::filesystem::directory_iterator dir_end;
+        if (dir_error)
+        {
+            continue;
+        }
+
+        while (dir_it != dir_end)
+        {
+            const std::filesystem::directory_entry entry = *dir_it;
+
+            std::error_code advance_error;
+            dir_it.increment(advance_error);
+            if (advance_error)
+            {
+                continue;
+            }
+
+            const std::filesystem::path file_path = entry.path();
+
+            std::error_code is_dir_error;
+            if (entry.is_directory(is_dir_error) && !is_dir_error)
+            {
+                if (!ShouldSkipStagedProjectEntry(file_path, stage_directory, external_build_directory))
+                {
+                    pending_directories.push_back(file_path);
+                }
+                continue;
+            }
+
+            std::error_code regular_error;
+            if (!entry.is_regular_file(regular_error) || regular_error)
+            {
+                continue;
+            }
+
+            if (ShouldSkipStagedProjectEntry(file_path, stage_directory, external_build_directory))
+            {
+                continue;
+            }
+
+            std::error_code rel_error;
+            const std::filesystem::path rel_path = std::filesystem::relative(file_path, content_root, rel_error);
+            if (rel_error || rel_path.empty())
+            {
+                continue;
+            }
+
+            // Skip build artefact directories inside the project folder
+            const std::string first_component = rel_path.begin()->string();
+            if (first_component == "Build" || first_component == "build" || first_component == ".vs")
+            {
+                continue;
+            }
+
+            if (!pak.AddFile(rel_path.generic_string(), file_path))
+            {
+                out_error = "Failed to add file to pak: " + file_path.generic_string();
+                return false;
+            }
+
+            ++packed_file_count;
+        }
+    }
+
+    if (packed_file_count == 0)
+    {
+        out_error = "Packed 0 files from content root: " + content_root.generic_string();
+        return false;
+    }
+
+    if (!pak.Write(assets_pak_path))
+    {
+        out_error = "Failed to write assets.pak: " + assets_pak_path.generic_string();
+        return false;
+    }
+
+    log("[Build] Packed " + std::to_string(packed_file_count) + " files into assets.pak");
+
+    // -----------------------------------------------------------------
+    // Game executable
+    // -----------------------------------------------------------------
+    std::filesystem::copy_file(built_game_executable_path, stage_game_executable_path, std::filesystem::copy_options::overwrite_existing, error);
+    if (error)
+    {
+        out_error = "Failed to stage game executable: " + stage_game_executable_path.generic_string();
+        return false;
+    }
+
+    // -----------------------------------------------------------------
+    // Compiled shaders
+    // -----------------------------------------------------------------
+    if (std::filesystem::exists(built_shader_directory))
+    {
+        std::filesystem::copy(
+            built_shader_directory,
+            stage_shader_directory,
+            std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing,
+            error);
+        if (error)
+        {
+            out_error = "Failed to stage shader directory: " + stage_shader_directory.generic_string();
+            return false;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // DLLs from the build output.
+    // With full static linking (SDL static, assimp static) there should
+    // be no DLLs for those libraries. Any Vulkan-related DLLs (e.g.
+    // validation layers for Debug builds) go into a Vulkan/ subfolder;
+    // all other DLLs go in the stage root.
+    // -----------------------------------------------------------------
+    std::error_code dll_iterator_error;
+    std::filesystem::directory_iterator dll_it(
+        built_output_directory,
+        std::filesystem::directory_options::skip_permission_denied,
+        dll_iterator_error);
+    std::filesystem::directory_iterator dll_end;
+    if (dll_iterator_error)
+    {
+        out_error = "Failed to enumerate build output directory: " + built_output_directory.generic_string();
+        return false;
+    }
+
+    while (dll_it != dll_end)
+    {
+        const std::filesystem::directory_entry entry = *dll_it;
+
+        std::error_code dll_advance_error;
+        dll_it.increment(dll_advance_error);
+        if (dll_advance_error)
+        {
+            dll_advance_error.clear();
+        }
+
+        std::error_code regular_error;
+        if (!entry.is_regular_file(regular_error) || regular_error)
+        {
+            continue;
+        }
+
+        const std::filesystem::path file_path = entry.path();
+        if (file_path.extension() != ".dll")
+        {
+            continue;
+        }
+
+        const std::string stem_lower = [&]()
+        {
+            std::string s = file_path.stem().string();
+            for (char& c : s) { c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+            return s;
+        }();
+
+        const bool is_vulkan_dll =
+            stem_lower.rfind("vklayer", 0) == 0 ||
+            stem_lower.rfind("vulkan", 0) == 0;
+
+        std::filesystem::path destination_path;
+        if (is_vulkan_dll)
+        {
+            std::filesystem::create_directories(stage_vulkan_directory, error);
+            error.clear();
+            destination_path = stage_vulkan_directory / file_path.filename();
+        }
+        else
+        {
+            destination_path = stage_directory / file_path.filename();
+        }
+
+        std::filesystem::copy_file(file_path, destination_path, std::filesystem::copy_options::overwrite_existing, error);
+        if (error)
+        {
+            out_error = "Failed to stage DLL: " + destination_path.generic_string();
+            return false;
+        }
+    }
+
+    std::ofstream config_output(config_path, std::ios::binary | std::ios::trunc);
+    if (!config_output)
+    {
+        out_error = "Failed to write staged runtime config: " + config_path.generic_string();
+        return false;
+    }
+
+    config_output
+        << "projectId=" << (!project_file_path.empty() ? project_file_path.stem().string() : request.game_name) << "\n"
+        << "buildId=" << BuildTypeToConfigName(request.build_type) << "\n"
+        << "windowTitle=" << request.game_name << "\n"
+        << "contentRoot=Content\n"
+        << "startupScene=" << startup_scene_relative_path.generic_string() << "\n";
+
+    if (!config_output)
+    {
+        out_error = "Failed while writing staged runtime config: " + config_path.generic_string();
+        return false;
+    }
+
+    return true;
 }

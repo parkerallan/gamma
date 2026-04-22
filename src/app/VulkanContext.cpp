@@ -504,6 +504,26 @@ void VulkanContext::CleanupWindowData(ImGui_ImplVulkanH_Window& window_data)
     }
 }
 
+bool VulkanContext::PresentImageToMainWindow(
+    SDL_Window* window,
+    VkImage source_image,
+    VkImageLayout source_layout,
+    std::uint32_t source_width,
+    std::uint32_t source_height)
+{
+    // Wrap main_window_data_ in a temporary VulkanWindowContext, delegate to the
+    // existing overload, then sync the updated frame/semaphore indices back.
+    VulkanWindowContext ctx{};
+    ctx.window_data = main_window_data_;
+    ctx.swapchain_rebuild = swapchain_rebuild_;
+
+    const bool result = PresentImageToWindow(window, ctx, source_image, source_layout, source_width, source_height);
+
+    main_window_data_ = ctx.window_data;
+    swapchain_rebuild_ = ctx.swapchain_rebuild;
+    return result;
+}
+
 bool VulkanContext::CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context)
 {
     window_context = {};
