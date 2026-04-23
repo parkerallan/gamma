@@ -4,7 +4,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
-#include "pak/PakArchive.h"
+#include "vfs/PakArchive.h"
 #include "ui/Codicons.h"
 
 #include <array>
@@ -1088,36 +1088,45 @@ void EngineApplication::ExecuteBuildRequest(
         return;
     }
 
-    // Delete stale CMakeCache.txt so changed cache variables (e.g.
-    // ASSIMP_USE_STATIC_CRT) are picked up on every configure.
+    // Only configure when no cached build exists. On subsequent builds the cache
+    // is reused, skipping the ~90s compiler/SDK detection phase. The user can
+    // force a clean configure by deleting the build directory from the engine UI.
     const std::filesystem::path cmake_cache = external_build_directory / "CMakeCache.txt";
-    if (std::filesystem::exists(cmake_cache, error))
+    const bool needs_configure = !std::filesystem::exists(cmake_cache, error);
+    error.clear();
+
+    if (needs_configure)
     {
-        std::filesystem::remove(cmake_cache, error);
-        error.clear();
+        log("[Build] Configuring: " + external_build_directory.generic_string());
+        const std::string configure_command =
+            "cmake -S " + QuoteCommandArgument(state_.workspace_root.string()) +
+            " -B " + QuoteCommandArgument(external_build_directory.string()) +
+            " -DENGINE_BUILD_GAME=ON" +
+            " --log-level=WARNING" +
+            " -Wno-dev";
+
+        const int configure_exit_code = RunCommand(configure_command, [&log](const std::string& line)
+        {
+            log("[cmake] " + line);
+        });
+        if (configure_exit_code != 0)
+        {
+            fail("Game configure failed with exit code " + std::to_string(configure_exit_code));
+            return;
+        }
     }
-
-    log("[Build] Configuring: " + external_build_directory.generic_string());
-    const std::string configure_command =
-        "cmake -S " + QuoteCommandArgument(state_.workspace_root.string()) +
-        " -B " + QuoteCommandArgument(external_build_directory.string()) +
-        " -DENGINE_BUILD_GAME=ON";
-
-    const int configure_exit_code = RunCommand(configure_command, [&log](const std::string& line)
+    else
     {
-        log("[cmake] " + line);
-    });
-    if (configure_exit_code != 0)
-    {
-        fail("Game configure failed with exit code " + std::to_string(configure_exit_code));
-        return;
+        log("[Build] Using cached configuration (skipping configure step)");
     }
 
     log("[Build] Compiling: config=" + config_name);
     const std::string build_command =
         "cmake --build " + QuoteCommandArgument(external_build_directory.string()) +
         " --config " + config_name +
-        " --target game";
+        " --target game" +
+        " --parallel" +
+        " -- /v:m /nologo";
 
     const int build_exit_code = RunCommand(build_command, [&log](const std::string& line)
     {
@@ -1142,19 +1151,9 @@ void EngineApplication::ExecuteBuildRequest(
         return;
     }
 
-    std::error_code cleanup_error;
-    std::filesystem::remove_all(external_build_directory, cleanup_error);
-    if (cleanup_error)
-    {
-        log("[Build] Warning: failed to remove temporary build directory: " + external_build_directory.generic_string());
-    }
-    else
-    {
-        log("[Build] Removed temporary build directory: " + external_build_directory.generic_string());
-    }
-
     build_succeeded_.store(true);
     log("[Build] Done! Staged output: " + request.GetStageDirectory().generic_string());
+    log("[Build] Build cache retained at: " + external_build_directory.generic_string() + " (delete to force a clean rebuild)");
 }
 
 bool EngineApplication::StageBuiltGame(

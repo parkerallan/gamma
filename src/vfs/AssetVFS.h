@@ -1,6 +1,6 @@
 #pragma once
 
-#include "pak/PakArchive.h"
+#include "vfs/PakArchive.h"
 
 #include <memory>
 #include <string>

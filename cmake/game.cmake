@@ -74,7 +74,7 @@ add_executable(game
     src/assets/ModelAsset.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp
-    src/pak/PakArchive.cpp
+    src/vfs/PakArchive.cpp
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
     src/render/RuntimeRenderer.cpp
@@ -112,7 +112,7 @@ add_dependencies(game game_shaders)
 
 if(MSVC)
     target_compile_options(game PRIVATE
-        /W4
+        /W0
         /permissive-
         /external:W0
         "/external:I${IMGUI_DIR}"
@@ -120,6 +120,10 @@ if(MSVC)
         "/external:I${assimp_SOURCE_DIR}/include"
         "/external:I${stb_SOURCE_DIR}"
     )
+    
+    # Hide console window for Release builds (Final build type) while still
+    # using the regular main() entry point.
+    target_link_options(game PRIVATE $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>)
 endif()
 
 # Post-build: copy compiled shaders next to the game executable.

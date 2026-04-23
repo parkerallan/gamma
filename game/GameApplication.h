@@ -1,7 +1,7 @@
 #pragma once
 
 #include "app/VulkanContext.h"
-#include "pak/PakArchive.h"
+#include "vfs/PakArchive.h"
 #include "render/RuntimeRenderer.h"
 
 #include <SDL3/SDL.h>

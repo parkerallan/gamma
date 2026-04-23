@@ -264,7 +264,7 @@ add_executable(engine
     src/dialogs/BuildGameDialog.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
-    src/pak/PakArchive.cpp
+    src/vfs/PakArchive.cpp
     src/graph/GraphDocument.cpp
     src/graph/NodeLibrary.cpp
     src/panels/FilesPanel.cpp

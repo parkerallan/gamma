@@ -1,7 +1,7 @@
 #include "GameApplication.h"
 
 #include "assets/SceneMetadata.h"
-#include "pak/PakArchive.h"
+#include "vfs/PakArchive.h"
 #include "vfs/AssetVFS.h"
 
 #include "imgui.h"

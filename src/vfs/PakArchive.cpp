@@ -1,4 +1,4 @@
-#include "pak/PakArchive.h"
+#include "vfs/PakArchive.h"
 
 #include <algorithm>
 #include <cstring>
