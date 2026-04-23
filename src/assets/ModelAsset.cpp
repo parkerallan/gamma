@@ -1,7 +1,10 @@
 #include "assets/ModelAsset.h"
+#include "vfs/AssetVFS.h"
 
 #include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
+#include <assimp/IOStream.hpp>
+#include <assimp/IOSystem.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -11,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <initializer_list>
 
 namespace
@@ -41,6 +45,190 @@ std::string ToDisplayString(const aiString& value)
 {
     return value.length > 0 ? std::string(value.C_Str()) : std::string();
 }
+
+std::string NormalizeAssimpPath(std::string path)
+{
+    std::replace(path.begin(), path.end(), '\\', '/');
+
+    while (path.rfind("./", 0) == 0)
+    {
+        path.erase(0, 2);
+    }
+
+    if (path.size() > 3 && std::isalpha(static_cast<unsigned char>(path[0])) != 0 && path[1] == ':' && path[2] == '/')
+    {
+        path.erase(0, 3);
+    }
+
+    if (!path.empty() && path[0] == '/')
+    {
+        path.erase(0, 1);
+    }
+
+    const std::string lowered = ToUpper(path);
+    const std::string marker = "CONTENT/";
+    if (lowered.rfind(marker, 0) == 0)
+    {
+        path = path.substr(marker.size());
+    }
+    else
+    {
+        const std::string slash_marker = "/CONTENT/";
+        const std::size_t marker_pos = lowered.find(slash_marker);
+        if (marker_pos != std::string::npos)
+        {
+            path = path.substr(marker_pos + slash_marker.size());
+        }
+    }
+
+    return path;
+}
+
+class PakMemoryIOStream : public Assimp::IOStream
+{
+public:
+    explicit PakMemoryIOStream(std::vector<std::uint8_t> bytes)
+        : bytes_(std::move(bytes))
+    {
+    }
+
+    ~PakMemoryIOStream() override = default;
+
+    size_t Read(void* pvBuffer, size_t pSize, size_t pCount) override
+    {
+        if (pSize == 0 || pCount == 0 || cursor_ >= bytes_.size())
+        {
+            return 0;
+        }
+
+        const size_t requested = pSize * pCount;
+        const size_t available = bytes_.size() - cursor_;
+        const size_t to_copy = (std::min)(requested, available);
+        std::memcpy(pvBuffer, bytes_.data() + cursor_, to_copy);
+        cursor_ += to_copy;
+        return to_copy / pSize;
+    }
+
+    size_t Write(const void*, size_t, size_t) override
+    {
+        return 0;
+    }
+
+    aiReturn Seek(size_t pOffset, aiOrigin pOrigin) override
+    {
+        size_t new_cursor = cursor_;
+        if (pOrigin == aiOrigin_SET)
+        {
+            new_cursor = pOffset;
+        }
+        else if (pOrigin == aiOrigin_CUR)
+        {
+            new_cursor = cursor_ + pOffset;
+        }
+        else if (pOrigin == aiOrigin_END)
+        {
+            if (pOffset > bytes_.size())
+            {
+                return aiReturn_FAILURE;
+            }
+            new_cursor = bytes_.size() - pOffset;
+        }
+
+        if (new_cursor > bytes_.size())
+        {
+            return aiReturn_FAILURE;
+        }
+
+        cursor_ = new_cursor;
+        return aiReturn_SUCCESS;
+    }
+
+    size_t Tell() const override
+    {
+        return cursor_;
+    }
+
+    size_t FileSize() const override
+    {
+        return bytes_.size();
+    }
+
+    void Flush() override {}
+
+private:
+    std::vector<std::uint8_t> bytes_;
+    size_t cursor_ = 0;
+};
+
+class PakAssetIOSystem : public Assimp::IOSystem
+{
+public:
+    ~PakAssetIOSystem() override = default;
+
+    bool Exists(const char* pFile) const override
+    {
+        if (!g_asset_reader || pFile == nullptr)
+        {
+            return false;
+        }
+
+        return g_asset_reader->FileExists(ResolvePath(pFile));
+    }
+
+    char getOsSeparator() const override
+    {
+        return '/';
+    }
+
+    Assimp::IOStream* Open(const char* pFile, const char* pMode = "rb") override
+    {
+        if (!g_asset_reader || pFile == nullptr)
+        {
+            return nullptr;
+        }
+
+        if (pMode != nullptr && pMode[0] != 'r')
+        {
+            return nullptr;
+        }
+
+        const std::string resolved = ResolvePath(pFile);
+        auto bytes = g_asset_reader->ReadFile(resolved);
+        if (bytes.empty())
+        {
+            return nullptr;
+        }
+
+        return new PakMemoryIOStream(std::move(bytes));
+    }
+
+    void Close(Assimp::IOStream* pFile) override
+    {
+        delete pFile;
+    }
+
+private:
+    static std::string ResolvePath(const std::string& raw_path)
+    {
+        const std::string normalized = NormalizeAssimpPath(raw_path);
+        if (!cwd_.empty())
+        {
+            const std::string combined = NormalizeAssimpPath(cwd_ + "/" + normalized);
+            if (g_asset_reader && g_asset_reader->FileExists(combined))
+            {
+                return combined;
+            }
+        }
+
+        std::filesystem::path path_obj(normalized);
+        cwd_ = NormalizeAssimpPath(path_obj.parent_path().generic_string());
+        return normalized;
+    }
+
+    static std::string cwd_;
+};
+
+std::string PakAssetIOSystem::cwd_;
 
 std::array<float, 4> ReadMaterialBaseColor(const aiMaterial* material)
 {
@@ -259,6 +447,39 @@ bool LoadTextureReference(
 
 bool LoadTextureFromFile(const std::filesystem::path& texture_path, ModelTextureAsset& texture_asset)
 {
+    if (g_asset_reader)
+    {
+        const auto bytes = g_asset_reader->ReadFile(texture_path.generic_string());
+        if (!bytes.empty())
+        {
+            int width = 0;
+            int height = 0;
+            int channels = 0;
+            unsigned char* pixels = stbi_load_from_memory(
+                bytes.data(),
+                static_cast<int>(bytes.size()),
+                &width,
+                &height,
+                &channels,
+                4);
+            if (pixels != nullptr && width > 0 && height > 0)
+            {
+                texture_asset.valid = true;
+                texture_asset.width = width;
+                texture_asset.height = height;
+                texture_asset.pixels.assign(pixels, pixels + (width * height * 4));
+                stbi_image_free(pixels);
+                FinalizeTextureAlphaMetadata(texture_asset);
+                return true;
+            }
+
+            if (pixels != nullptr)
+            {
+                stbi_image_free(pixels);
+            }
+        }
+    }
+
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -434,15 +655,23 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
     }
 
     Assimp::Importer importer;
-    const aiScene* scene = importer.ReadFile(
-        path.string(),
+    const unsigned int import_flags =
         aiProcess_Triangulate |
-            aiProcess_JoinIdenticalVertices |
-            aiProcess_ImproveCacheLocality |
-            aiProcess_CalcTangentSpace |
-            aiProcess_GenSmoothNormals |
-            aiProcess_ValidateDataStructure |
-            aiProcess_SortByPType);
+        aiProcess_JoinIdenticalVertices |
+        aiProcess_ImproveCacheLocality |
+        aiProcess_CalcTangentSpace |
+        aiProcess_GenSmoothNormals |
+        aiProcess_ValidateDataStructure |
+        aiProcess_SortByPType;
+
+    const bool use_pak = g_asset_reader != nullptr;
+    const std::string model_path = use_pak ? NormalizeAssimpPath(path.generic_string()) : path.generic_string();
+    if (use_pak)
+    {
+        importer.SetIOHandler(new PakAssetIOSystem());
+    }
+
+    const aiScene* scene = importer.ReadFile(model_path, import_flags);
 
     if (scene == nullptr)
     {

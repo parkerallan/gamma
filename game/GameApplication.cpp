@@ -2,6 +2,7 @@
 
 #include "assets/SceneMetadata.h"
 #include "pak/PakArchive.h"
+#include "vfs/AssetVFS.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -11,6 +12,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -102,45 +104,33 @@ bool GameApplication::LoadConfig(const std::filesystem::path& exe_dir)
     return true;
 }
 
-bool GameApplication::ExtractPakIfNeeded(const std::filesystem::path& exe_dir)
+bool GameApplication::InitializeAssetStreaming(const std::filesystem::path& exe_dir)
 {
+    // Runtime game builds stream from assets.pak; no extraction step.
     std::error_code ec;
-    if (std::filesystem::exists(content_root_, ec))
-    {
-        const bool empty = std::filesystem::is_empty(content_root_, ec);
-        if (!ec && !empty)
-        {
-            return true;
-        }
-    }
-
     const std::filesystem::path pak_path = exe_dir / "assets.pak";
     if (!std::filesystem::exists(pak_path, ec))
     {
-        // No PAK present — content may already be unpacked alongside the executable.
-        return true;
+        SDL_Log("assets.pak not found at: %s", pak_path.string().c_str());
+        return false;
     }
 
-    PakArchive archive;
-    if (!archive.Open(pak_path))
+    pak_archive_ = std::make_unique<PakArchive>();
+    if (!pak_archive_->Open(pak_path))
     {
         SDL_Log("Failed to open assets.pak at: %s", pak_path.string().c_str());
         return false;
     }
 
-    std::filesystem::create_directories(content_root_, ec);
-    if (ec)
+    SetGlobalAssetReader(std::make_shared<PakAssetReader>(*pak_archive_));
+
+    if (!g_asset_reader || !g_asset_reader->FileExists(startup_scene_path_.generic_string()))
     {
-        SDL_Log("Failed to create content directory: %s", content_root_.string().c_str());
+        SDL_Log("Startup scene is missing in assets.pak: %s", startup_scene_path_.generic_string().c_str());
         return false;
     }
 
-    if (!archive.ExtractAll(content_root_))
-    {
-        SDL_Log("Failed to extract assets.pak to: %s", content_root_.string().c_str());
-        return false;
-    }
-
+    SDL_Log("Opened assets.pak for streaming: %s", pak_path.string().c_str());
     return true;
 }
 
@@ -159,7 +149,7 @@ bool GameApplication::Init(int argc, char* argv[])
         return false;
     }
 
-    if (!ExtractPakIfNeeded(exe_dir))
+    if (!InitializeAssetStreaming(exe_dir))
     {
         return false;
     }
@@ -209,12 +199,12 @@ bool GameApplication::Init(int argc, char* argv[])
         return false;
     }
 
-    const std::filesystem::path scene_path = content_root_ / startup_scene_path_;
+    const std::filesystem::path scene_path = startup_scene_path_;
     const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
     const ActiveSceneCameraSelection camera = FindActiveSceneCamera(scene_metadata);
 
     std::string start_error;
-    if (!renderer_.StartSession(content_root_, scene_path, camera, &start_error))
+    if (!renderer_.StartSession({}, scene_path, camera, &start_error))
     {
         SDL_Log("RuntimeRenderer::StartSession failed: %s", start_error.c_str());
         return false;
@@ -291,6 +281,9 @@ void GameApplication::RunLoop()
 
 void GameApplication::Shutdown()
 {
+    SetGlobalAssetReader(nullptr);
+    pak_archive_.reset();
+
     renderer_.Shutdown();
 
     vulkan_context_.WaitIdle();

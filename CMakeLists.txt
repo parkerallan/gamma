@@ -114,6 +114,7 @@ set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 # the formats we actually use (FBX, GLTF, OBJ). This dramatically reduces
 # compile time and binary size.
 if(ENGINE_BUILD_GAME)
+    set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_FBX_IMPORTER  ON CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
@@ -256,6 +257,7 @@ add_executable(engine
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp
+    src/vfs/AssetVFS.cpp
     src/components/CreationMenu.cpp
     src/components/FileContextMenu.cpp
     src/components/SceneObjectAttributesEditor.cpp

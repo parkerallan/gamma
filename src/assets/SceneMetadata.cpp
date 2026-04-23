@@ -1,4 +1,5 @@
 #include "assets/SceneMetadata.h"
+#include "vfs/AssetVFS.h"
 
 #include <algorithm>
 #include <cctype>
@@ -175,6 +176,33 @@ bool ParseBool(std::string_view value, bool& result)
 
 std::vector<std::string> ReadSceneLines(const std::filesystem::path& scene_path)
 {
+    if (g_asset_reader)
+    {
+        const auto buffer = g_asset_reader->ReadFile(scene_path.generic_string());
+        if (!buffer.empty())
+        {
+            std::vector<std::string> lines;
+            std::string current_line;
+            for (unsigned char byte : buffer)
+            {
+                if (byte == '\n')
+                {
+                    lines.push_back(current_line);
+                    current_line.clear();
+                }
+                else if (byte != '\r')
+                {
+                    current_line.push_back(static_cast<char>(byte));
+                }
+            }
+            if (!current_line.empty())
+            {
+                lines.push_back(current_line);
+            }
+            return lines;
+        }
+    }
+
     std::ifstream input(scene_path, std::ios::binary);
     if (!input)
     {
@@ -946,8 +974,9 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
 {
     SceneMetadata metadata;
 
-    std::ifstream input(scene_path, std::ios::binary);
-    if (!input)
+    const std::vector<std::string> lines = ReadSceneLines(scene_path);
+    const bool exists_in_vfs = g_asset_reader && g_asset_reader->FileExists(scene_path.generic_string());
+    if (lines.empty() && !exists_in_vfs && !std::filesystem::exists(scene_path))
     {
         metadata.error_message = "Failed to open scene file.";
         return metadata;
@@ -955,8 +984,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
 
     SceneObjectMetadata* current_object = nullptr;
     SceneObjectAttribute* current_attribute = nullptr;
-    std::string line;
-    while (std::getline(input, line))
+    for (const std::string& line : lines)
     {
         const std::string trimmed = TrimCopy(line);
         if (trimmed.empty())

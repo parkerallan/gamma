@@ -1,4 +1,5 @@
 #include "render/RuntimeRenderer.h"
+#include "vfs/AssetVFS.h"
 
 #include <SDL3/SDL.h>
 
@@ -940,9 +941,17 @@ const RuntimeRenderer::CachedModelAssetEntry& RuntimeRenderer::GetModelAssetEntr
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
     CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
-    if (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded)
+
+    const bool has_filesystem_time = !error;
+    const bool exists_in_vfs = g_asset_reader && g_asset_reader->FileExists(path.generic_string());
+    const bool should_reload =
+        !cache_entry.asset.loaded ||
+        (has_filesystem_time && cache_entry.write_time != write_time) ||
+        (!has_filesystem_time && !exists_in_vfs);
+
+    if (should_reload)
     {
-        cache_entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
+        cache_entry.write_time = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
         cache_entry.asset = LoadModelAsset(path);
     }
 
@@ -959,11 +968,18 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
 
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(scene_path_, error);
-    const bool cache_valid = has_cached_scene_metadata_ && cached_scene_path_ == scene_path_ && !error && cached_scene_write_time_ == write_time;
+
+    const bool has_filesystem_time = !error;
+    const bool exists_in_vfs = g_asset_reader && g_asset_reader->FileExists(scene_path_.generic_string());
+    const bool cache_valid =
+        has_cached_scene_metadata_ &&
+        cached_scene_path_ == scene_path_ &&
+        ((has_filesystem_time && cached_scene_write_time_ == write_time) || (!has_filesystem_time && exists_in_vfs));
+
     if (!cache_valid)
     {
         cached_scene_path_ = scene_path_;
-        cached_scene_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+        cached_scene_write_time_ = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
         cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
         has_cached_scene_metadata_ = true;
     }

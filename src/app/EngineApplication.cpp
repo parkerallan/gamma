@@ -1227,6 +1227,8 @@ bool EngineApplication::StageBuiltGame(
     std::vector<std::filesystem::path> pending_directories;
     pending_directories.push_back(content_root);
     std::size_t packed_file_count = 0;
+    std::size_t packed_script_count = 0;
+    std::size_t packed_graph_count = 0;
 
     while (!pending_directories.empty())
     {
@@ -1298,6 +1300,16 @@ bool EngineApplication::StageBuiltGame(
                 return false;
             }
 
+            const std::string rel_generic = rel_path.generic_string();
+            if (rel_generic.rfind("Scripts/", 0) == 0)
+            {
+                ++packed_script_count;
+            }
+            else if (rel_generic.rfind("Graphs/", 0) == 0)
+            {
+                ++packed_graph_count;
+            }
+
             ++packed_file_count;
         }
     }
@@ -1315,6 +1327,8 @@ bool EngineApplication::StageBuiltGame(
     }
 
     log("[Build] Packed " + std::to_string(packed_file_count) + " files into assets.pak");
+    log("[Build] Included script assets: " + std::to_string(packed_script_count));
+    log("[Build] Included graph assets: " + std::to_string(packed_graph_count));
 
     // -----------------------------------------------------------------
     // Game executable
@@ -1428,6 +1442,8 @@ bool EngineApplication::StageBuiltGame(
         << "buildId=" << BuildTypeToConfigName(request.build_type) << "\n"
         << "windowTitle=" << request.game_name << "\n"
         << "contentRoot=Content\n"
+        << "scriptRoot=Scripts\n"
+        << "graphRoot=Graphs\n"
         << "startupScene=" << startup_scene_relative_path.generic_string() << "\n";
 
     if (!config_output)

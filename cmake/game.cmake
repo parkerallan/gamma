@@ -78,6 +78,7 @@ add_executable(game
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
     src/render/RuntimeRenderer.cpp
+    src/vfs/AssetVFS.cpp
 )
 
 target_include_directories(game PRIVATE
