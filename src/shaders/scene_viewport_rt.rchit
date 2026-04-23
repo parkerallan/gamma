@@ -381,19 +381,15 @@ void main()
     vec3 world_normal = normalize(mat3(gl_ObjectToWorldEXT) * shading_object_normal);
     vec3 object_geometric_normal = normalize(cross(vertex1.position - vertex0.position, vertex2.position - vertex0.position));
     vec3 world_geometric_normal = normalize(mat3(gl_ObjectToWorldEXT) * object_geometric_normal);
-    if (dot(world_normal, gl_WorldRayDirectionEXT) > 0.0)
-    {
-        world_normal = -world_normal;
-    }
-    if (dot(world_vertex_normal, gl_WorldRayDirectionEXT) > 0.0)
-    {
-        world_vertex_normal = -world_vertex_normal;
-    }
-    if (dot(world_geometric_normal, world_normal) < 0.0)
+    if (dot(world_geometric_normal, gl_WorldRayDirectionEXT) > 0.0)
     {
         world_geometric_normal = -world_geometric_normal;
     }
-    if (dot(world_vertex_normal, world_normal) < 0.0)
+    if (dot(world_normal, world_geometric_normal) < 0.0)
+    {
+        world_normal = -world_normal;
+    }
+    if (dot(world_vertex_normal, world_geometric_normal) < 0.0)
     {
         world_vertex_normal = -world_vertex_normal;
     }
@@ -402,15 +398,7 @@ void main()
     float dot_nv = max(dot(world_normal, view_direction), 0.0);
     vec3 f0 = mix(vec3(0.04), albedo.rgb, metallic);
     uint sample_seed = make_sample_seed(world_position);
-    vec3 shadow_offset_normal = world_vertex_normal;
-    if (dot(shadow_offset_normal, world_geometric_normal) < 0.0)
-    {
-        shadow_offset_normal = -shadow_offset_normal;
-    }
-    if (dot(shadow_offset_normal, world_normal) < 0.0)
-    {
-        shadow_offset_normal = -shadow_offset_normal;
-    }
+    vec3 shadow_offset_normal = dot(world_vertex_normal, world_geometric_normal) > 0.25 ? world_vertex_normal : world_geometric_normal;
 
     vec3 lighting = scene_uniforms.ambient_light.rgb * scene_uniforms.ambient_light.a * albedo.rgb * (1.0 - metallic) * ambient_occlusion;
     vec3 shadow_origin = world_position + shadow_offset_normal * 0.0015;

@@ -56,7 +56,7 @@ vec2 jittered_sample_offset(uvec2 pixel, uint sample_index, uint frame_index)
     vec2 jitter = vec2(
         hash_to_unit_float(seed),
         hash_to_unit_float(seed ^ 0x9e3779b9u));
-    return fract(base_offsets[sample_index] + jitter);
+    return base_offsets[sample_index] + jitter * 0.0625;
 }
 
 float linear_to_srgb_channel(float value)
