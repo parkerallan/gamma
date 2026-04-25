@@ -2,3 +2,4 @@
 /test*
 *.code-workspace
 *.log
+*.txt

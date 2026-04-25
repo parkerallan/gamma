@@ -87,7 +87,9 @@ struct EngineState
     bool play_stop_requested = false;
     bool play_restart_requested = false;
     bool is_playing = false;
+    bool is_build_running = false;
     bool has_pending_build_request = false;
+    bool request_build_stop = false;
     std::filesystem::path playing_scene_path;
     std::string last_play_error;
     std::string last_build_error;
@@ -104,6 +106,7 @@ struct EngineState
     bool open_graph_dirty = false;
     bool graph_reload_requested = false;
     std::vector<std::string> log_messages;
+    std::vector<std::filesystem::path> recent_projects;
 
     void AddLog(const std::string& message)
     {
@@ -114,6 +117,7 @@ struct EngineState
     void SetWorkspaceRoot(std::filesystem::path root)
     {
         workspace_root = std::move(root);
+        LoadRecentProjects();
     }
 
     bool HasOpenProject() const
@@ -142,6 +146,17 @@ struct EngineState
         request_build_game_dialog = true;
         last_build_error.clear();
         AddLog("Opening Build Game dialog");
+    }
+
+    void TriggerBuildStopAction()
+    {
+        if (!is_build_running)
+        {
+            return;
+        }
+
+        request_build_stop = true;
+        AddLog("Stopping build...");
     }
 
     void SetBuildError(std::string message)
@@ -186,6 +201,18 @@ struct EngineState
         play_restart_requested = false;
         last_play_error.clear();
         AddLog("Starting runtime session");
+    }
+
+    void TriggerPlayStopAction()
+    {
+        if (!is_playing)
+        {
+            return;
+        }
+
+        play_stop_requested = true;
+        play_restart_requested = false;
+        AddLog("Closing runtime session");
     }
 
     void ClearPlayRequests()
@@ -252,7 +279,9 @@ struct EngineState
         request_files_tree_refresh = false;
         ClearPlayRequests();
         is_playing = false;
+        is_build_running = false;
         has_pending_build_request = false;
+        request_build_stop = false;
         playing_scene_path.clear();
         last_play_error.clear();
         last_build_error.clear();
@@ -657,6 +686,104 @@ struct EngineState
         return relative == "." || (relative_string != ".." && relative_string.rfind("../", 0) != 0);
     }
 
+    static constexpr std::size_t kMaxRecentProjects = 10;
+
+    std::filesystem::path GetRecentProjectsPath() const
+    {
+        if (workspace_root.empty())
+        {
+            return {};
+        }
+        return workspace_root / "recent_projects.txt";
+    }
+
+    void AddRecentProject(const std::filesystem::path& manifest_path)
+    {
+        if (manifest_path.empty())
+        {
+            return;
+        }
+
+        const std::filesystem::path normal = manifest_path.lexically_normal();
+
+        auto it = std::find(recent_projects.begin(), recent_projects.end(), normal);
+        if (it != recent_projects.end())
+        {
+            recent_projects.erase(it);
+        }
+
+        recent_projects.insert(recent_projects.begin(), normal);
+
+        if (recent_projects.size() > kMaxRecentProjects)
+        {
+            recent_projects.resize(kMaxRecentProjects);
+        }
+
+        SaveRecentProjects();
+    }
+
+    bool LoadRecentProjects()
+    {
+        recent_projects.clear();
+
+        const std::filesystem::path path = GetRecentProjectsPath();
+        if (path.empty())
+        {
+            return false;
+        }
+
+        std::ifstream input(path);
+        if (!input)
+        {
+            return false;
+        }
+
+        std::string line;
+        while (std::getline(input, line))
+        {
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
+            {
+                line.pop_back();
+            }
+
+            if (line.empty())
+            {
+                continue;
+            }
+
+            recent_projects.emplace_back(line);
+
+            if (recent_projects.size() >= kMaxRecentProjects)
+            {
+                break;
+            }
+        }
+
+        return true;
+    }
+
+    bool SaveRecentProjects() const
+    {
+        const std::filesystem::path path = GetRecentProjectsPath();
+        if (path.empty())
+        {
+            return false;
+        }
+
+        std::ofstream output(path, std::ios::trunc);
+        if (!output)
+        {
+            return false;
+        }
+
+        for (const std::filesystem::path& p : recent_projects)
+        {
+            output << p.generic_string() << "\n";
+        }
+
+        return output.good();
+    }
+
     std::filesystem::path GetProjectSettingsPath() const
     {
         if (project_root.empty())
@@ -978,6 +1105,7 @@ struct EngineState
         project_file_path = manifest_path;
         AddLog("Opened project: " + GetDisplayPath(project_root));
         LoadProjectSettings();
+        AddRecentProject(manifest_path);
 
         if (!startup_scene.empty())
         {

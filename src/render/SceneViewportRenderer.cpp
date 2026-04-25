@@ -1834,28 +1834,50 @@ void SceneViewportRenderer::RenderUi(
     SceneViewportCameraState& camera_state)
 {
     constexpr const char* kBuildButtonLabel = ICON_CI_RUN_WITH_DEPS;
+    constexpr const char* kStopBuildButtonLabel = ICON_CI_STOP_CIRCLE;
     constexpr const char* kPlayButtonLabel = ICON_CI_PLAY;
+    constexpr const char* kCloseRuntimeButtonLabel = ICON_CI_CLOSE_ALL;
 
     ImGui::TextUnformatted("Scene Viewport");
 
     const float header_spacing = ImGui::GetStyle().ItemSpacing.x;
-    const float build_button_width = ComputeViewportHeaderButtonWidth(kBuildButtonLabel);
-    const float play_button_width = ComputeViewportHeaderButtonWidth(kPlayButtonLabel);
+    const bool build_running = state.is_build_running;
+    const bool runtime_playing = state.is_playing;
+    const char* build_button_label = build_running ? kStopBuildButtonLabel : kBuildButtonLabel;
+    const char* build_button_tooltip = build_running ? "Stop Build" : "Build";
+    const char* play_button_label = runtime_playing ? kCloseRuntimeButtonLabel : kPlayButtonLabel;
+    const char* play_button_tooltip = runtime_playing ? "Close Runtime" : "Play";
+    const float build_button_width = ComputeViewportHeaderButtonWidth(build_button_label);
+    const float play_button_width = ComputeViewportHeaderButtonWidth(play_button_label);
     const float header_toolbar_width = build_button_width + play_button_width + header_spacing;
     const float header_toolbar_x = (std::max)(
         ImGui::GetCursorPosX() + header_spacing,
         ImGui::GetWindowContentRegionMax().x - header_toolbar_width);
 
     ImGui::SameLine(header_toolbar_x);
-    if (DrawViewportHeaderButton(kBuildButtonLabel, "Build"))
+    if (DrawViewportHeaderButton(build_button_label, build_button_tooltip))
     {
-        state.TriggerBuildAction();
+        if (build_running)
+        {
+            state.TriggerBuildStopAction();
+        }
+        else
+        {
+            state.TriggerBuildAction();
+        }
     }
 
     ImGui::SameLine(0.0f, header_spacing);
-    if (DrawViewportHeaderButton(kPlayButtonLabel, "Play"))
+    if (DrawViewportHeaderButton(play_button_label, play_button_tooltip))
     {
-        state.TriggerPlayAction();
+        if (runtime_playing)
+        {
+            state.TriggerPlayStopAction();
+        }
+        else
+        {
+            state.TriggerPlayAction();
+        }
     }
 
     ImGui::Separator();

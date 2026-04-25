@@ -135,69 +135,158 @@ std::filesystem::path ShowNativeOpenDialog(bool pick_folder)
 
 void OpenProjectDialog::Open()
 {
+    is_open_ = true;
     ImGui::OpenPopup("Open Project");
 }
 
 bool OpenProjectDialog::Render(EngineState& state)
 {
-    if (!ImGui::BeginPopupModal("Open Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    if (!is_open_)
     {
         return false;
     }
 
-    ImGui::TextUnformatted("Load a project folder or a .engineproj file.");
-    ImGui::TextUnformatted("The project folder will appear in Files and the startup scene will open in Editor.");
-    ImGui::Separator();
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 0.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal("Open Project", &is_open_, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+    {
+        return false;
+    }
 
-    ImGui::TextWrapped("Selected path: %s", path_buffer_[0] == '\0' ? "None" : path_buffer_.data());
+    bool loaded = false;
+
+    // Browse buttons — selection opens the project immediately
     if (ImGui::Button("Browse Folder"))
     {
-        BrowseForProjectFolder(state);
+        loaded = BrowseAndLoadFolder(state);
+        if (loaded)
+        {
+            is_open_ = false;
+            ImGui::CloseCurrentPopup();
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Browse File"))
     {
-        BrowseForProjectFile(state);
-    }
-
-    bool loaded = false;
-    if (ImGui::Button("Open"))
-    {
-        loaded = TryLoadProject(state);
+        loaded = BrowseAndLoadFile(state);
         if (loaded)
         {
-            Reset();
+            is_open_ = false;
             ImGui::CloseCurrentPopup();
         }
     }
 
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel"))
+    // Recent projects list
+    ImGui::Spacing();
+    ImGui::SeparatorText("Recent Projects");
+
+    if (state.recent_projects.empty())
     {
-        Reset();
-        ImGui::CloseCurrentPopup();
+        ImGui::TextDisabled("No recent projects.");
+    }
+    else
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 4.0f));
+        const float line_height    = ImGui::GetTextLineHeight();
+        const float item_spacing_y = ImGui::GetStyle().ItemSpacing.y;
+        const float item_height    = line_height * 2.0f + item_spacing_y;
+        const float button_w       = ImGui::GetFrameHeight();
+        const float list_height    = (item_height + item_spacing_y) *
+            static_cast<float>((std::min)(state.recent_projects.size(), std::size_t{8})) + 8.0f;
+
+        if (ImGui::BeginChild("##recent_list", ImVec2(-FLT_MIN, list_height), ImGuiChildFlags_FrameStyle))
+        {
+            std::filesystem::path path_to_open;
+            std::size_t index_to_remove = state.recent_projects.size();
+
+            for (std::size_t i = 0; i < state.recent_projects.size(); ++i)
+            {
+                const std::filesystem::path& proj_path = state.recent_projects[i];
+                std::error_code ec;
+                const bool exists = std::filesystem::exists(proj_path, ec);
+
+                const std::string display_name = proj_path.stem().string();
+                const std::string display_path = proj_path.parent_path().generic_string();
+
+                ImGui::PushID(static_cast<int>(i));
+
+                const ImVec2 cursor_start        = ImGui::GetCursorPos();
+                const ImVec2 cursor_screen_start = ImGui::GetCursorScreenPos();
+                const float  selectable_w        = ImGui::GetContentRegionAvail().x - button_w - ImGui::GetStyle().ItemSpacing.x;
+
+                const bool clicked = ImGui::Selectable(
+                    "##sel",
+                    false,
+                    ImGuiSelectableFlags_AllowOverlap,
+                    ImVec2(selectable_w, item_height));
+
+                // Draw name + path text directly over the selectable area
+                const ImU32 text_color    = exists
+                    ? ImGui::GetColorU32(ImGuiCol_Text)
+                    : ImGui::GetColorU32(ImGuiCol_TextDisabled);
+                const ImU32 subtext_color = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+
+                ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                draw_list->AddText(
+                    ImVec2(cursor_screen_start.x + 6.0f, cursor_screen_start.y + 2.0f),
+                    text_color,
+                    display_name.c_str());
+                draw_list->AddText(
+                    ImVec2(cursor_screen_start.x + 6.0f, cursor_screen_start.y + line_height + 4.0f),
+                    subtext_color,
+                    display_path.c_str());
+
+                // x button, vertically centred
+                ImGui::SameLine();
+                ImGui::SetCursorPosY(cursor_start.y + item_height * 0.5f - ImGui::GetFrameHeight() * 0.5f);
+                if (ImGui::Button("x", ImVec2(button_w, ImGui::GetFrameHeight())))
+                {
+                    index_to_remove = i;
+                }
+
+                if (clicked && exists)
+                {
+                    path_to_open = proj_path;
+                }
+
+                ImGui::PopID();
+            }
+
+            if (index_to_remove < state.recent_projects.size())
+            {
+                state.recent_projects.erase(state.recent_projects.begin() + static_cast<std::ptrdiff_t>(index_to_remove));
+                state.SaveRecentProjects();
+            }
+
+            if (!path_to_open.empty())
+            {
+                loaded = LoadPath(path_to_open, state);
+                if (loaded)
+                {
+                    is_open_ = false;
+                    ImGui::EndChild();
+                    ImGui::PopStyleVar();
+                    ImGui::EndPopup();
+                    return true;
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
     }
 
     ImGui::EndPopup();
     return loaded;
 }
 
-bool OpenProjectDialog::TryLoadProject(EngineState& state)
+bool OpenProjectDialog::LoadPath(const std::filesystem::path& path, EngineState& state)
 {
-    std::filesystem::path requested_path(path_buffer_.data());
-    if (requested_path.empty())
+    std::filesystem::path resolved = path.lexically_normal();
+    if (resolved.is_relative() && !state.workspace_root.empty())
     {
-        state.AddLog("Cannot open project: choose a project folder or .engineproj file");
-        return false;
+        resolved = state.workspace_root / resolved;
     }
 
-    if (requested_path.is_relative() && !state.workspace_root.empty())
-    {
-        requested_path = state.workspace_root / requested_path;
-    }
-
-    requested_path = requested_path.lexically_normal();
-    const std::filesystem::path manifest_path = ResolveManifestPath(requested_path);
+    const std::filesystem::path manifest_path = ResolveManifestPath(resolved);
     if (manifest_path.empty())
     {
         state.AddLog("Cannot open project: no .engineproj file found at path");
@@ -207,7 +296,7 @@ bool OpenProjectDialog::TryLoadProject(EngineState& state)
     return state.LoadProject(manifest_path);
 }
 
-bool OpenProjectDialog::BrowseForProjectFolder(EngineState& state)
+bool OpenProjectDialog::BrowseAndLoadFolder(EngineState& state)
 {
 #ifdef _WIN32
     const std::filesystem::path selected_path = ShowNativeOpenDialog(true);
@@ -215,17 +304,14 @@ bool OpenProjectDialog::BrowseForProjectFolder(EngineState& state)
     {
         return false;
     }
-
-    SetSelectedPath(selected_path);
-    state.AddLog("Selected project folder: " + selected_path.generic_string());
-    return true;
+    return LoadPath(selected_path, state);
 #else
     state.AddLog("Folder browsing is only implemented on Windows");
     return false;
 #endif
 }
 
-bool OpenProjectDialog::BrowseForProjectFile(EngineState& state)
+bool OpenProjectDialog::BrowseAndLoadFile(EngineState& state)
 {
 #ifdef _WIN32
     const std::filesystem::path selected_path = ShowNativeOpenDialog(false);
@@ -233,25 +319,9 @@ bool OpenProjectDialog::BrowseForProjectFile(EngineState& state)
     {
         return false;
     }
-
-    SetSelectedPath(selected_path);
-    state.AddLog("Selected project file: " + selected_path.generic_string());
-    return true;
+    return LoadPath(selected_path, state);
 #else
     state.AddLog("Project file browsing is only implemented on Windows");
     return false;
 #endif
-}
-
-void OpenProjectDialog::SetSelectedPath(const std::filesystem::path& path)
-{
-    const std::string value = path.generic_string();
-    std::fill(path_buffer_.begin(), path_buffer_.end(), '\0');
-    const std::size_t length = (std::min)(value.size(), path_buffer_.size() - 1);
-    std::copy_n(value.begin(), static_cast<std::ptrdiff_t>(length), path_buffer_.begin());
-}
-
-void OpenProjectDialog::Reset()
-{
-    std::fill(path_buffer_.begin(), path_buffer_.end(), '\0');
 }

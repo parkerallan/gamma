@@ -2,8 +2,6 @@
 
 #include "state/EngineState.h"
 
-#include <array>
-
 class OpenProjectDialog
 {
 public:
@@ -11,13 +9,9 @@ public:
     bool Render(EngineState& state);
 
 private:
-    static constexpr std::size_t kPathCapacity = 512;
+    bool is_open_ = false;
 
-    std::array<char, kPathCapacity> path_buffer_{};
-
-    bool TryLoadProject(EngineState& state);
-    bool BrowseForProjectFolder(EngineState& state);
-    bool BrowseForProjectFile(EngineState& state);
-    void SetSelectedPath(const std::filesystem::path& path);
-    void Reset();
+    bool BrowseAndLoadFolder(EngineState& state);
+    bool BrowseAndLoadFile(EngineState& state);
+    bool LoadPath(const std::filesystem::path& path, EngineState& state);
 };

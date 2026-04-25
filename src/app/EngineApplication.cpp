@@ -173,7 +173,18 @@ std::string QuoteCommandArgument(const std::string& value)
 // Returns the process exit code, or -1 on failure to launch.
 // On Windows uses CreateProcess with CREATE_NO_WINDOW so no console window
 // appears and the SDL/Vulkan window is not disrupted.
-int RunCommand(const std::string& command, const std::function<void(const std::string&)>& line_cb)
+int RunCommand(
+    const std::string& command,
+    const std::function<void(const std::string&)>& line_cb,
+    std::atomic<bool>* cancel_requested = nullptr,
+#ifdef _WIN32
+    std::mutex* active_process_mutex = nullptr,
+    void** active_process = nullptr
+#else
+    void* = nullptr,
+    void* = nullptr
+#endif
+)
 {
 #ifdef _WIN32
     HANDLE read_end = nullptr;
@@ -222,22 +233,57 @@ int RunCommand(const std::string& command, const std::function<void(const std::s
     }
     CloseHandle(pi.hThread);
 
-    std::string line;
-    char ch = '\0';
-    DWORD bytes_read = 0;
-    while (ReadFile(read_end, &ch, 1, &bytes_read, nullptr) && bytes_read > 0)
+    if (active_process_mutex != nullptr && active_process != nullptr)
     {
-        if (ch == '\n' || ch == '\r')
+        std::lock_guard<std::mutex> lock(*active_process_mutex);
+        *active_process = pi.hProcess;
+    }
+
+    std::string line;
+    bool was_cancelled = false;
+    while (true)
+    {
+        if (cancel_requested != nullptr && cancel_requested->load())
         {
-            if (!line.empty())
+            TerminateProcess(pi.hProcess, ERROR_CANCELLED);
+            was_cancelled = true;
+        }
+
+        DWORD bytes_available = 0;
+        if (!PeekNamedPipe(read_end, nullptr, 0, nullptr, &bytes_available, nullptr))
+        {
+            break;
+        }
+
+        if (bytes_available > 0)
+        {
+            char ch = '\0';
+            DWORD bytes_read = 0;
+            if (!ReadFile(read_end, &ch, 1, &bytes_read, nullptr) || bytes_read == 0)
             {
-                line_cb(line);
-                line.clear();
+                break;
+            }
+
+            if (ch == '\n' || ch == '\r')
+            {
+                if (!line.empty())
+                {
+                    line_cb(line);
+                    line.clear();
+                }
+            }
+            else
+            {
+                line += ch;
             }
         }
         else
         {
-            line += ch;
+            const DWORD wait_result = WaitForSingleObject(pi.hProcess, 25);
+            if (wait_result == WAIT_OBJECT_0)
+            {
+                break;
+            }
         }
     }
     if (!line.empty())
@@ -249,7 +295,18 @@ int RunCommand(const std::string& command, const std::function<void(const std::s
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
+
+    if (active_process_mutex != nullptr && active_process != nullptr)
+    {
+        std::lock_guard<std::mutex> lock(*active_process_mutex);
+        *active_process = nullptr;
+    }
+
     CloseHandle(pi.hProcess);
+    if (was_cancelled)
+    {
+        return -2;
+    }
     return static_cast<int>(exit_code);
 
 #else
@@ -332,6 +389,21 @@ bool ShouldSkipStagedProjectEntry(
         file_name == ".engine-game-build" ||
         file_name == ".vs";
 }
+}
+
+bool EngineApplication::CancelActiveBuildProcess()
+{
+#ifdef _WIN32
+    std::lock_guard<std::mutex> lock(active_build_process_mutex_);
+    if (active_build_process_ == nullptr)
+    {
+        return false;
+    }
+
+    return TerminateProcess(static_cast<HANDLE>(active_build_process_), ERROR_CANCELLED) != 0;
+#else
+    return false;
+#endif
 }
 
 bool EngineApplication::Init()
@@ -764,9 +836,16 @@ void EngineApplication::RenderMainMenuBar()
         ImGui::Separator();
 
         const bool build_running = is_build_running_.load();
-        if (ImGui::MenuItem("Build", "Ctrl+B", false, state_.CanBuildProject() && !build_running))
+        if (ImGui::MenuItem(build_running ? "Stop Build" : "Build", "Ctrl+B", false, state_.CanBuildProject()))
         {
-            state_.TriggerBuildAction();
+            if (build_running)
+            {
+                state_.TriggerBuildStopAction();
+            }
+            else
+            {
+                state_.TriggerBuildAction();
+            }
         }
 
         if (ImGui::MenuItem("Play", "F5", false, state_.CanPlayScene()))
@@ -900,24 +979,54 @@ void EngineApplication::ApplyStyle()
     style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
 
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.11f, 0.12f, 0.15f, 1.00f);
-    colors[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.13f, 0.16f, 0.98f);
-    colors[ImGuiCol_Header] = ImVec4(0.20f, 0.26f, 0.33f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.26f, 0.34f, 0.43f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.29f, 0.38f, 0.49f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.19f, 0.24f, 0.30f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.26f, 0.33f, 0.41f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.31f, 0.40f, 0.50f, 1.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.13f, 0.16f, 0.20f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.23f, 0.29f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.22f, 0.29f, 0.36f, 1.00f);
-    colors[ImGuiCol_Tab] = ImVec4(0.15f, 0.19f, 0.24f, 1.00f);
-    colors[ImGuiCol_TabHovered] = ImVec4(0.23f, 0.30f, 0.38f, 1.00f);
-    colors[ImGuiCol_TabSelected] = ImVec4(0.28f, 0.38f, 0.47f, 1.00f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.12f, 0.14f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.15f, 0.18f, 1.00f);
-    colors[ImGuiCol_DockingPreview] = ImVec4(0.36f, 0.52f, 0.67f, 0.70f);
+    colors[ImGuiCol_Text] = ImVec4(0.49f, 0.73f, 0.00f, 1.00f);
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.35f, 0.45f, 0.20f, 1.00f);
+    colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.10f, 0.11f, 1.00f);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.13f, 0.13f, 0.14f, 1.00f);
+    colors[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.12f, 0.13f, 0.98f);
+    colors[ImGuiCol_Border] = ImVec4(0.22f, 0.23f, 0.24f, 1.00f);
+    colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_Header] = ImVec4(0.18f, 0.19f, 0.20f, 1.00f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.24f, 0.30f, 0.10f, 1.00f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.30f, 0.41f, 0.08f, 1.00f);
+    colors[ImGuiCol_Button] = ImVec4(0.17f, 0.17f, 0.18f, 1.00f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.30f, 0.10f, 1.00f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.30f, 0.41f, 0.08f, 1.00f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.15f, 0.15f, 0.16f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.22f, 0.14f, 1.00f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.24f, 0.29f, 0.12f, 1.00f);
+    colors[ImGuiCol_CheckMark] = ImVec4(0.49f, 0.73f, 0.00f, 1.00f);
+    colors[ImGuiCol_SliderGrab] = ImVec4(0.49f, 0.73f, 0.00f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.60f, 0.85f, 0.10f, 1.00f);
+    colors[ImGuiCol_Tab] = ImVec4(0.14f, 0.14f, 0.15f, 1.00f);
+    colors[ImGuiCol_TabHovered] = ImVec4(0.24f, 0.30f, 0.10f, 1.00f);
+    colors[ImGuiCol_TabSelected] = ImVec4(0.27f, 0.35f, 0.09f, 1.00f);
+    colors[ImGuiCol_TabSelectedOverline] = ImVec4(0.49f, 0.73f, 0.00f, 1.00f);
+    colors[ImGuiCol_TitleBg] = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+    colors[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.12f, 0.13f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_MenuBarBg] = ImVec4(0.11f, 0.11f, 0.12f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.24f, 0.29f, 0.12f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.38f, 0.10f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.36f, 0.46f, 0.10f, 1.00f);
+    colors[ImGuiCol_Separator] = ImVec4(0.26f, 0.31f, 0.14f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered] = ImVec4(0.35f, 0.44f, 0.11f, 1.00f);
+    colors[ImGuiCol_SeparatorActive] = ImVec4(0.43f, 0.55f, 0.10f, 1.00f);
+    colors[ImGuiCol_ResizeGrip] = ImVec4(0.30f, 0.38f, 0.10f, 0.75f);
+    colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.39f, 0.50f, 0.10f, 0.90f);
+    colors[ImGuiCol_ResizeGripActive] = ImVec4(0.49f, 0.63f, 0.10f, 1.00f);
+    colors[ImGuiCol_TabDimmed] = ImVec4(0.10f, 0.10f, 0.11f, 1.00f);
+    colors[ImGuiCol_TabDimmedSelected] = ImVec4(0.22f, 0.27f, 0.10f, 1.00f);
+    colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.49f, 0.73f, 0.00f, 1.00f);
+    colors[ImGuiCol_DockingEmptyBg] = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_DockingPreview] = ImVec4(0.49f, 0.73f, 0.00f, 0.35f);
+    colors[ImGuiCol_TextSelectedBg] = ImVec4(0.32f, 0.41f, 0.10f, 0.50f);
+    colors[ImGuiCol_DragDropTarget] = ImVec4(0.49f, 0.73f, 0.00f, 0.90f);
+    colors[ImGuiCol_NavCursor] = ImVec4(0.49f, 0.73f, 0.00f, 0.85f);
+    colors[ImGuiCol_NavWindowingHighlight] = ImVec4(0.49f, 0.73f, 0.00f, 0.70f);
+    colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.35f);
+    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
 }
 
 void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
@@ -956,6 +1065,14 @@ void EngineApplication::HandleBuildRequests()
 {
     // Drain log lines produced by the background build thread each frame.
     DrainBuildLog();
+    state_.is_build_running = is_build_running_.load();
+
+    if (state_.request_build_stop)
+    {
+        state_.request_build_stop = false;
+        build_stop_requested_.store(true);
+        CancelActiveBuildProcess();
+    }
 
     // If a build is already running, don't start another.
     if (is_build_running_.load())
@@ -983,6 +1100,7 @@ void EngineApplication::HandleBuildRequests()
             }
         }
     }
+    state_.is_build_running = is_build_running_.load();
 
     if (!state_.has_pending_build_request)
     {
@@ -1016,7 +1134,9 @@ void EngineApplication::HandleBuildRequests()
 
     // Capture everything the thread needs by value.
     is_build_running_.store(true);
+    state_.is_build_running = true;
     build_succeeded_.store(false);
+    build_stop_requested_.store(false);
     {
         std::lock_guard<std::mutex> lock(build_log_mutex_);
         pending_build_error_.clear();
@@ -1084,6 +1204,11 @@ void EngineApplication::ExecuteBuildRequest(
         return false;
     };
 
+    const auto was_cancelled = [this]()
+    {
+        return build_stop_requested_.load();
+    };
+
     const std::string config_name = BuildTypeToConfigName(request.build_type);
     const std::filesystem::path external_build_directory = request.output_root / (request.folder_name + "-build");
     const std::filesystem::path built_output_directory = external_build_directory / config_name;
@@ -1104,6 +1229,12 @@ void EngineApplication::ExecuteBuildRequest(
     const bool needs_configure = !std::filesystem::exists(cmake_cache, error);
     error.clear();
 
+    if (was_cancelled())
+    {
+        fail("Game build cancelled");
+        return;
+    }
+
     if (needs_configure)
     {
         log("[Build] Configuring: " + external_build_directory.generic_string());
@@ -1117,7 +1248,16 @@ void EngineApplication::ExecuteBuildRequest(
         const int configure_exit_code = RunCommand(configure_command, [&log](const std::string& line)
         {
             log("[cmake] " + line);
-        });
+        }, &build_stop_requested_
+#ifdef _WIN32
+        , &active_build_process_mutex_, &active_build_process_
+#endif
+        );
+        if (configure_exit_code == -2 || was_cancelled())
+        {
+            fail("Game build cancelled");
+            return;
+        }
         if (configure_exit_code != 0)
         {
             fail("Game configure failed with exit code " + std::to_string(configure_exit_code));
@@ -1140,7 +1280,16 @@ void EngineApplication::ExecuteBuildRequest(
     const int build_exit_code = RunCommand(build_command, [&log](const std::string& line)
     {
         log("[cmake] " + line);
-    });
+    }, &build_stop_requested_
+#ifdef _WIN32
+    , &active_build_process_mutex_, &active_build_process_
+#endif
+    );
+    if (build_exit_code == -2 || was_cancelled())
+    {
+        fail("Game build cancelled");
+        return;
+    }
     if (build_exit_code != 0)
     {
         fail("Game build failed with exit code " + std::to_string(build_exit_code));
@@ -1150,6 +1299,12 @@ void EngineApplication::ExecuteBuildRequest(
     if (!std::filesystem::exists(built_game_executable_path))
     {
         fail("Game build completed but game.exe was not found in the build output");
+        return;
+    }
+
+    if (was_cancelled())
+    {
+        fail("Game build cancelled");
         return;
     }
 
@@ -1176,6 +1331,11 @@ bool EngineApplication::StageBuiltGame(
     const std::function<void(const std::string&)>& log,
     std::string& out_error)
 {
+    const auto was_cancelled = [this]()
+    {
+        return build_stop_requested_.load();
+    };
+
     std::filesystem::path content_root = project_root;
     std::error_code root_error;
     if (content_root.empty() || !std::filesystem::exists(content_root, root_error) || !std::filesystem::is_directory(content_root, root_error))
@@ -1241,6 +1401,12 @@ bool EngineApplication::StageBuiltGame(
 
     while (!pending_directories.empty())
     {
+        if (was_cancelled())
+        {
+            out_error = "Game build cancelled";
+            return false;
+        }
+
         const std::filesystem::path current_directory = pending_directories.back();
         pending_directories.pop_back();
 
@@ -1257,6 +1423,12 @@ bool EngineApplication::StageBuiltGame(
 
         while (dir_it != dir_end)
         {
+            if (was_cancelled())
+            {
+                out_error = "Game build cancelled";
+                return false;
+            }
+
             const std::filesystem::directory_entry entry = *dir_it;
 
             std::error_code advance_error;
@@ -1362,6 +1534,12 @@ bool EngineApplication::StageBuiltGame(
         return false;
     }
 
+    if (was_cancelled())
+    {
+        out_error = "Game build cancelled";
+        return false;
+    }
+
     log("[Build] Packed " + std::to_string(packed_file_count) + " files into assets.pak");
     log("[Build] Included script assets: " + std::to_string(packed_script_count));
     log("[Build] Included graph assets: " + std::to_string(packed_graph_count));
@@ -1373,6 +1551,12 @@ bool EngineApplication::StageBuiltGame(
     if (error)
     {
         out_error = "Failed to stage game executable: " + stage_game_executable_path.generic_string();
+        return false;
+    }
+
+    if (was_cancelled())
+    {
+        out_error = "Game build cancelled";
         return false;
     }
 

@@ -45,9 +45,14 @@ private:
     std::thread build_thread_;
     std::atomic<bool> is_build_running_{false};
     std::atomic<bool> build_succeeded_{false};
+    std::atomic<bool> build_stop_requested_{false};
     std::mutex build_log_mutex_;
     std::vector<std::string> pending_build_log_;
     std::string pending_build_error_; // written once, under build_log_mutex_
+#ifdef _WIN32
+    std::mutex active_build_process_mutex_;
+    void* active_build_process_ = nullptr;
+#endif
 
     void ProcessEvents();
     void HandleBuildRequests();
@@ -75,4 +80,5 @@ private:
     void RenderMainMenuBar();
     void ApplyStyle();
     void BuildDefaultDockLayout(ImGuiID dockspace_id);
+    bool CancelActiveBuildProcess();
 };
