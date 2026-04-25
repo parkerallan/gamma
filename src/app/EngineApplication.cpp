@@ -307,6 +307,15 @@ std::string BuildTypeToConfigName(EngineBuildType build_type)
     return build_type == EngineBuildType::Debug ? "Debug" : "Release";
 }
 
+std::string ToLowerCopy(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
+    {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
 bool ShouldSkipStagedProjectEntry(
     const std::filesystem::path& entry_path,
     const std::filesystem::path& stage_directory,
@@ -997,7 +1006,7 @@ void EngineApplication::HandleBuildRequests()
     }
 
     const std::filesystem::path stage_directory = request.GetStageDirectory();
-    const std::filesystem::path external_build_directory = request.output_root / (request.game_name + "-build");
+    const std::filesystem::path external_build_directory = request.output_root / (request.folder_name + "-build");
 
     if (IsPathWithin(state_.workspace_root, stage_directory) || IsPathWithin(state_.workspace_root, external_build_directory))
     {
@@ -1076,7 +1085,7 @@ void EngineApplication::ExecuteBuildRequest(
     };
 
     const std::string config_name = BuildTypeToConfigName(request.build_type);
-    const std::filesystem::path external_build_directory = request.output_root / (request.game_name + "-build");
+    const std::filesystem::path external_build_directory = request.output_root / (request.folder_name + "-build");
     const std::filesystem::path built_output_directory = external_build_directory / config_name;
     const std::filesystem::path built_game_executable_path = built_output_directory / "game.exe";
 
@@ -1184,7 +1193,7 @@ bool EngineApplication::StageBuiltGame(
     }
 
     const std::filesystem::path stage_directory = request.GetStageDirectory();
-    const std::filesystem::path stage_game_executable_path = stage_directory / (request.game_name + ".exe");
+    const std::filesystem::path stage_game_executable_path = stage_directory / request.GetExecutableFileName();
     const std::filesystem::path stage_shader_directory = stage_directory / "shaders";
     const std::filesystem::path stage_vulkan_directory = stage_directory / "Vulkan";
     const std::filesystem::path built_shader_directory = built_output_directory / "shaders";
@@ -1228,6 +1237,7 @@ bool EngineApplication::StageBuiltGame(
     std::size_t packed_file_count = 0;
     std::size_t packed_script_count = 0;
     std::size_t packed_graph_count = 0;
+    std::string app_icon_rel_path;
 
     while (!pending_directories.empty())
     {
@@ -1317,6 +1327,33 @@ bool EngineApplication::StageBuiltGame(
     {
         out_error = "Packed 0 files from content root: " + content_root.generic_string();
         return false;
+    }
+
+    if (!request.app_icon_path.empty())
+    {
+        std::error_code icon_error;
+        if (!std::filesystem::exists(request.app_icon_path, icon_error) || !std::filesystem::is_regular_file(request.app_icon_path, icon_error))
+        {
+            out_error = "App icon file does not exist: " + request.app_icon_path.generic_string();
+            return false;
+        }
+
+        const std::string icon_extension = ToLowerCopy(request.app_icon_path.extension().string());
+        if (icon_extension != ".avif" && icon_extension != ".png" && icon_extension != ".ico")
+        {
+            out_error = "App icon must be .avif, .png, or .ico";
+            return false;
+        }
+
+        app_icon_rel_path = "App/icon" + icon_extension;
+        if (!pak.AddFile(app_icon_rel_path, request.app_icon_path))
+        {
+            out_error = "Failed to add app icon to pak: " + request.app_icon_path.generic_string();
+            return false;
+        }
+
+        ++packed_file_count;
+        log("[Build] Added app icon for streaming: " + app_icon_rel_path);
     }
 
     if (!pak.Write(assets_pak_path))
@@ -1439,11 +1476,16 @@ bool EngineApplication::StageBuiltGame(
     config_output
         << "projectId=" << (!project_file_path.empty() ? project_file_path.stem().string() : request.game_name) << "\n"
         << "buildId=" << BuildTypeToConfigName(request.build_type) << "\n"
-        << "windowTitle=" << request.game_name << "\n"
+        << "windowTitle=" << request.window_title << "\n"
         << "contentRoot=Content\n"
         << "scriptRoot=Scripts\n"
         << "graphRoot=Graphs\n"
         << "startupScene=" << startup_scene_relative_path.generic_string() << "\n";
+
+    if (!app_icon_rel_path.empty())
+    {
+        config_output << "appIcon=" << app_icon_rel_path << "\n";
+    }
 
     if (!config_output)
     {

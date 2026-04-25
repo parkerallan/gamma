@@ -261,6 +261,7 @@ add_executable(engine
     src/components/CreationMenu.cpp
     src/components/FileContextMenu.cpp
     src/components/SceneObjectAttributesEditor.cpp
+    src/components/BuildSettingsComponent.cpp
     src/dialogs/BuildGameDialog.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp

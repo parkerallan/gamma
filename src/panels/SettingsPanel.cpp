@@ -1,5 +1,6 @@
 #include "panels/SettingsPanel.h"
 
+#include "components/BuildSettingsComponent.h"
 #include "imgui.h"
 
 void SettingsPanel::Render(EngineState& state)
@@ -50,6 +51,11 @@ void SettingsPanel::Render(EngineState& state)
         ImGui::SliderInt("Auto-save interval", &state.auto_save_interval_minutes, 1, 30, "%d min");
         ImGui::SliderFloat("UI scale", &state.ui_scale, 0.8f, 1.5f, "%.2fx");
         ImGui::TextDisabled("UI scale is stored here for future runtime styling support.");
+    }
+
+    if (ImGui::CollapsingHeader("Build", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        BuildSettingsComponent::Render(state);
     }
 
     if (ImGui::CollapsingHeader("Session", ImGuiTreeNodeFlags_DefaultOpen))

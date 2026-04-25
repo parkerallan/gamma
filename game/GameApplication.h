@@ -27,9 +27,11 @@ private:
     std::string window_title_;
     std::filesystem::path content_root_;
     std::filesystem::path startup_scene_path_;
+    std::string app_icon_path_;
     std::unique_ptr<PakArchive> pak_archive_;
 
     std::filesystem::path ResolveExeDirectory(const char* argv0) const;
     bool LoadConfig(const std::filesystem::path& exe_dir);
     bool InitializeAssetStreaming(const std::filesystem::path& exe_dir);
+    bool ApplyWindowIconFromPak();
 };

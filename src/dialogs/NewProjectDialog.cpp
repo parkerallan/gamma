@@ -217,7 +217,12 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
             << "  \"name\": \"" << project_name << "\",\n"
             << "  \"type\": \"engine-project\",\n"
             << "  \"version\": 1,\n"
-            << "  \"startupScene\": \"Scenes/Main.scene\"\n"
+            << "  \"startupScene\": \"Scenes/Main.scene\",\n"
+            << "  \"buildExeName\": \"" << project_name << "\",\n"
+            << "  \"buildFolderName\": \"" << project_name << "\",\n"
+            << "  \"buildWindowTitle\": \"" << project_name << "\",\n"
+            << "  \"buildOutputRoot\": \"\",\n"
+            << "  \"buildAppIcon\": \"\"\n"
             << "}\n";
     }
 

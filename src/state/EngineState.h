@@ -27,12 +27,21 @@ enum class EngineBuildType
 struct EngineBuildRequest
 {
     std::string game_name;
+    std::string folder_name;
+    std::string window_title;
     std::filesystem::path output_root;
+    std::filesystem::path app_icon_path;
     EngineBuildType build_type = EngineBuildType::Debug;
 
     std::filesystem::path GetStageDirectory() const
     {
-        return output_root / game_name;
+        const std::string stage_folder = folder_name.empty() ? game_name : folder_name;
+        return output_root / stage_folder;
+    }
+
+    std::string GetExecutableFileName() const
+    {
+        return game_name + ".exe";
     }
 };
 
@@ -84,6 +93,11 @@ struct EngineState
     std::string last_build_error;
     std::string saved_file_contents;
     std::string open_file_contents;
+    std::string build_executable_name = "Game";
+    std::string build_folder_name = "Game";
+    std::string build_window_title = "Game";
+    std::filesystem::path build_output_root;
+    std::filesystem::path build_app_icon_path;
     EngineBuildRequest pending_build_request{};
     std::vector<char> editor_buffer = std::vector<char>(kEditorBufferCapacity, '\0');
     bool open_file_dirty = false;
@@ -145,6 +159,7 @@ struct EngineState
         const std::string build_type_label = pending_build_request.build_type == EngineBuildType::Debug ? "Debug" : "Final";
         AddLog(
             "Queued game build request: name='" + pending_build_request.game_name +
+            "', folder='" + pending_build_request.folder_name +
             "', config=" + build_type_label +
             ", output='" + pending_build_request.GetStageDirectory().generic_string() + "'");
     }
@@ -242,6 +257,11 @@ struct EngineState
         last_play_error.clear();
         last_build_error.clear();
         pending_build_request = {};
+        build_executable_name = "Game";
+        build_folder_name = "Game";
+        build_window_title = "Game";
+        build_output_root.clear();
+        build_app_icon_path.clear();
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }
@@ -571,6 +591,119 @@ struct EngineState
         return true;
     }
 
+    static bool UpsertProjectValue(std::string& manifest_contents, const std::string& key, const std::string& value)
+    {
+        if (ReplaceProjectValue(manifest_contents, key, value))
+        {
+            return true;
+        }
+
+        const std::size_t closing_brace = manifest_contents.rfind('}');
+        if (closing_brace == std::string::npos)
+        {
+            return false;
+        }
+
+        std::size_t non_ws_position = closing_brace;
+        while (non_ws_position > 0 && std::isspace(static_cast<unsigned char>(manifest_contents[non_ws_position - 1])) != 0)
+        {
+            --non_ws_position;
+        }
+
+        const bool has_existing_entries = non_ws_position > 0 && manifest_contents[non_ws_position - 1] != '{';
+        const std::string insertion =
+            std::string(has_existing_entries ? ",\n" : "\n") +
+            "  \"" + key + "\": \"" + value + "\"";
+
+        manifest_contents.insert(closing_brace, insertion);
+        return true;
+    }
+
+    static std::string SanitizeProjectValue(std::string value)
+    {
+        std::replace(value.begin(), value.end(), '"', '\'');
+        std::replace(value.begin(), value.end(), '\\', '/');
+        value.erase(std::remove(value.begin(), value.end(), '\r'), value.end());
+        value.erase(std::remove(value.begin(), value.end(), '\n'), value.end());
+        return value;
+    }
+
+    static bool IsPathWithin(const std::filesystem::path& parent, const std::filesystem::path& candidate)
+    {
+        if (parent.empty() || candidate.empty())
+        {
+            return false;
+        }
+
+        std::error_code error;
+        const std::filesystem::path relative = std::filesystem::relative(candidate, parent, error);
+        if (error || relative.empty())
+        {
+            return false;
+        }
+
+        const std::string relative_string = relative.generic_string();
+        return relative == "." || (relative_string != ".." && relative_string.rfind("../", 0) != 0);
+    }
+
+    bool SaveBuildSettingsToProject()
+    {
+        if (project_file_path.empty())
+        {
+            return false;
+        }
+
+        std::ifstream input(project_file_path, std::ios::binary);
+        if (!input)
+        {
+            AddLog("Failed to open project manifest for build settings update");
+            return false;
+        }
+
+        std::string manifest_contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+
+        const auto encode_path = [this](const std::filesystem::path& path_value)
+        {
+            if (path_value.empty())
+            {
+                return std::string();
+            }
+
+            std::filesystem::path encoded_path = path_value.lexically_normal();
+            std::error_code error;
+            if (!project_root.empty() && encoded_path.is_absolute() && IsPathWithin(project_root, encoded_path))
+            {
+                encoded_path = std::filesystem::relative(encoded_path, project_root, error);
+                if (error)
+                {
+                    encoded_path = path_value;
+                }
+            }
+
+            return SanitizeProjectValue(encoded_path.generic_string());
+        };
+
+        if (!UpsertProjectValue(manifest_contents, "buildExeName", SanitizeProjectValue(build_executable_name)) ||
+            !UpsertProjectValue(manifest_contents, "buildFolderName", SanitizeProjectValue(build_folder_name)) ||
+            !UpsertProjectValue(manifest_contents, "buildWindowTitle", SanitizeProjectValue(build_window_title)) ||
+            !UpsertProjectValue(manifest_contents, "buildOutputRoot", encode_path(build_output_root)) ||
+            !UpsertProjectValue(manifest_contents, "buildAppIcon", encode_path(build_app_icon_path)))
+        {
+            AddLog("Failed to update build settings in project manifest");
+            return false;
+        }
+
+        std::ofstream output(project_file_path, std::ios::binary | std::ios::trunc);
+        if (!output)
+        {
+            AddLog("Failed to write project manifest after build settings update");
+            return false;
+        }
+
+        output.write(manifest_contents.data(), static_cast<std::streamsize>(manifest_contents.size()));
+        return static_cast<bool>(output);
+    }
+
     bool SaveActiveSceneToProject()
     {
         if (project_file_path.empty())
@@ -648,6 +781,51 @@ struct EngineState
         const std::string manifest_contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
         const std::filesystem::path resolved_project_root = manifest_path.parent_path();
         const std::string startup_scene = ExtractProjectValue(manifest_contents, "startupScene");
+        const std::string manifest_name = ExtractProjectValue(manifest_contents, "name");
+
+        const std::string default_build_name = !manifest_name.empty() ? manifest_name : manifest_path.stem().string();
+
+        build_executable_name = ExtractProjectValue(manifest_contents, "buildExeName");
+        if (build_executable_name.empty())
+        {
+            build_executable_name = default_build_name.empty() ? "Game" : default_build_name;
+        }
+
+        build_folder_name = ExtractProjectValue(manifest_contents, "buildFolderName");
+        if (build_folder_name.empty())
+        {
+            build_folder_name = build_executable_name;
+        }
+
+        build_window_title = ExtractProjectValue(manifest_contents, "buildWindowTitle");
+        if (build_window_title.empty())
+        {
+            build_window_title = build_executable_name;
+        }
+
+        build_output_root.clear();
+        const std::string build_output_root_value = ExtractProjectValue(manifest_contents, "buildOutputRoot");
+        if (!build_output_root_value.empty())
+        {
+            std::filesystem::path output_root_path(build_output_root_value);
+            if (output_root_path.is_relative())
+            {
+                output_root_path = resolved_project_root / output_root_path;
+            }
+            build_output_root = output_root_path.lexically_normal();
+        }
+
+        build_app_icon_path.clear();
+        const std::string build_app_icon_value = ExtractProjectValue(manifest_contents, "buildAppIcon");
+        if (!build_app_icon_value.empty())
+        {
+            std::filesystem::path app_icon_path(build_app_icon_value);
+            if (app_icon_path.is_relative())
+            {
+                app_icon_path = resolved_project_root / app_icon_path;
+            }
+            build_app_icon_path = app_icon_path.lexically_normal();
+        }
 
         project_root = resolved_project_root;
         project_file_path = manifest_path;
