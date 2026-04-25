@@ -262,6 +262,17 @@ struct EngineState
         build_window_title = "Game";
         build_output_root.clear();
         build_app_icon_path.clear();
+        auto_open_startup_scene = true;
+        confirm_before_delete = true;
+        highlight_drop_targets = true;
+        show_grid_overlay = true;
+        snap_to_grid = true;
+        grid_size = 1.0f;
+        grid_extent = 64.0f;
+        wrap_editor_text = false;
+        auto_save_on_focus_loss = false;
+        auto_save_interval_minutes = 5;
+        ui_scale = 1.0f;
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }
@@ -646,6 +657,142 @@ struct EngineState
         return relative == "." || (relative_string != ".." && relative_string.rfind("../", 0) != 0);
     }
 
+    std::filesystem::path GetProjectSettingsPath() const
+    {
+        if (project_root.empty())
+        {
+            return {};
+        }
+        return project_root / "Config" / "settings.ini";
+    }
+
+    bool LoadProjectSettings()
+    {
+        const std::filesystem::path settings_path = GetProjectSettingsPath();
+        if (settings_path.empty())
+        {
+            return false;
+        }
+
+        std::ifstream input(settings_path);
+        if (!input)
+        {
+            return false;
+        }
+
+        const auto parse_bool = [](const std::string& value) -> bool
+        {
+            return value == "true" || value == "1";
+        };
+
+        const auto parse_float = [](const std::string& value, float fallback) -> float
+        {
+            if (value.empty())
+            {
+                return fallback;
+            }
+            try { return std::stof(value); }
+            catch (...) { return fallback; }
+        };
+
+        const auto parse_int = [](const std::string& value, int fallback) -> int
+        {
+            if (value.empty())
+            {
+                return fallback;
+            }
+            try { return std::stoi(value); }
+            catch (...) { return fallback; }
+        };
+
+        std::string line;
+        while (std::getline(input, line))
+        {
+            // Strip inline comments and trailing whitespace
+            const auto comment_pos = line.find('#');
+            if (comment_pos != std::string::npos)
+            {
+                line.erase(comment_pos);
+            }
+
+            while (!line.empty() && (line.back() == ' ' || line.back() == '\r' || line.back() == '\n' || line.back() == '\t'))
+            {
+                line.pop_back();
+            }
+
+            const auto eq_pos = line.find('=');
+            if (eq_pos == std::string::npos || eq_pos == 0)
+            {
+                continue;
+            }
+
+            const std::string key = line.substr(0, eq_pos);
+            const std::string value = line.substr(eq_pos + 1);
+
+            if (key == "autoOpenStartupScene") auto_open_startup_scene = parse_bool(value);
+            else if (key == "confirmBeforeDelete") confirm_before_delete = parse_bool(value);
+            else if (key == "highlightDropTargets") highlight_drop_targets = parse_bool(value);
+            else if (key == "showGridOverlay") show_grid_overlay = parse_bool(value);
+            else if (key == "snapToGrid") snap_to_grid = parse_bool(value);
+            else if (key == "gridSize") grid_size = parse_float(value, 1.0f);
+            else if (key == "gridExtent") grid_extent = parse_float(value, 64.0f);
+            else if (key == "wrapEditorText") wrap_editor_text = parse_bool(value);
+            else if (key == "autoSaveOnFocusLoss") auto_save_on_focus_loss = parse_bool(value);
+            else if (key == "autoSaveIntervalMinutes") auto_save_interval_minutes = parse_int(value, 5);
+            else if (key == "uiScale") ui_scale = parse_float(value, 1.0f);
+        }
+
+        return true;
+    }
+
+    bool SaveProjectSettings() const
+    {
+        const std::filesystem::path settings_path = GetProjectSettingsPath();
+        if (settings_path.empty())
+        {
+            return false;
+        }
+
+        std::error_code error;
+        std::filesystem::create_directories(settings_path.parent_path(), error);
+        if (error)
+        {
+            return false;
+        }
+
+        std::ofstream output(settings_path, std::ios::trunc);
+        if (!output)
+        {
+            return false;
+        }
+
+        const auto write_bool = [](bool value) -> const char*
+        {
+            return value ? "true" : "false";
+        };
+
+        output << "# Project settings — auto-saved by the editor. Do not edit manually.\n";
+        output << "\n";
+        output << "# Project\n";
+        output << "autoOpenStartupScene=" << write_bool(auto_open_startup_scene) << "\n";
+        output << "confirmBeforeDelete=" << write_bool(confirm_before_delete) << "\n";
+        output << "highlightDropTargets=" << write_bool(highlight_drop_targets) << "\n";
+        output << "\n";
+        output << "# Viewport\n";
+        output << "showGridOverlay=" << write_bool(show_grid_overlay) << "\n";
+        output << "snapToGrid=" << write_bool(snap_to_grid) << "\n";
+        output << "gridSize=" << grid_size << "\n";
+        output << "gridExtent=" << grid_extent << "\n";
+        output << "\n";
+        output << "# Editor\n";
+        output << "wrapEditorText=" << write_bool(wrap_editor_text) << "\n";
+        output << "autoSaveOnFocusLoss=" << write_bool(auto_save_on_focus_loss) << "\n";
+        output << "autoSaveIntervalMinutes=" << auto_save_interval_minutes << "\n";
+        output << "uiScale=" << ui_scale << "\n";
+
+        return output.good();
+    }
+
     bool SaveBuildSettingsToProject()
     {
         if (project_file_path.empty())
@@ -830,6 +977,7 @@ struct EngineState
         project_root = resolved_project_root;
         project_file_path = manifest_path;
         AddLog("Opened project: " + GetDisplayPath(project_root));
+        LoadProjectSettings();
 
         if (!startup_scene.empty())
         {

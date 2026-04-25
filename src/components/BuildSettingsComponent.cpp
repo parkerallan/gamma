@@ -178,13 +178,15 @@ std::filesystem::path ShowIconFileDialog()
 #endif
 }
 
-void BuildSettingsComponent::Render(EngineState& state)
+bool BuildSettingsComponent::Render(EngineState& state)
 {
-    EditStringField("Exe name", state.build_executable_name, kNameCapacity);
-    EditStringField("Folder name", state.build_folder_name, kNameCapacity);
-    EditStringField("Window title", state.build_window_title, kTitleCapacity);
+    bool changed = false;
 
-    EditPathField("Build location", state.build_output_root);
+    changed |= EditStringField("Exe name", state.build_executable_name, kNameCapacity);
+    changed |= EditStringField("Folder name", state.build_folder_name, kNameCapacity);
+    changed |= EditStringField("Window title", state.build_window_title, kTitleCapacity);
+
+    changed |= EditPathField("Build location", state.build_output_root);
     ImGui::SameLine();
     if (ImGui::Button("Browse Folder"))
     {
@@ -194,13 +196,14 @@ void BuildSettingsComponent::Render(EngineState& state)
         {
             state.build_output_root = selected_path.lexically_normal();
             state.AddLog("Selected game build output folder: " + state.GetDisplayPath(selected_path));
+            changed = true;
         }
 #else
         state.SetBuildError("Build output folder browsing is only implemented on Windows");
 #endif
     }
 
-    EditPathField("App icon", state.build_app_icon_path);
+    changed |= EditPathField("App icon", state.build_app_icon_path);
     ImGui::SameLine();
     if (ImGui::Button("Browse Icon"))
     {
@@ -210,6 +213,7 @@ void BuildSettingsComponent::Render(EngineState& state)
         {
             state.build_app_icon_path = selected_path.lexically_normal();
             state.AddLog("Selected app icon: " + state.GetDisplayPath(selected_path));
+            changed = true;
         }
 #else
         state.SetBuildError("App icon browsing is only implemented on Windows");
@@ -219,7 +223,9 @@ void BuildSettingsComponent::Render(EngineState& state)
     if (ImGui::Button("Clear Icon"))
     {
         state.build_app_icon_path.clear();
+        changed = true;
     }
 
     ImGui::TextDisabled("Supported icon formats: .avif, .png, .ico");
+    return changed;
 }

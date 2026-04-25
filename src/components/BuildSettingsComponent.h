@@ -5,5 +5,6 @@
 class BuildSettingsComponent
 {
 public:
-    static void Render(EngineState& state);
+    // Returns true if any field was modified this frame.
+    static bool Render(EngineState& state);
 };
