@@ -65,6 +65,7 @@ struct EngineState
     bool request_new_project_dialog = false;
     bool request_build_game_dialog = false;
     bool show_files_panel = true;
+    bool show_version_control_panel = true;
     bool show_workspace_panel = true;
     bool show_settings_panel = true;
     bool show_info_panel = true;
@@ -75,6 +76,7 @@ struct EngineState
     std::filesystem::path active_scene_path;
     std::filesystem::path selected_item_path;
     std::string selected_scene_object_name;
+    std::string version_control_remote_url;
     std::filesystem::path open_file_path;
     std::filesystem::path requested_graph_path;
     std::filesystem::path open_graph_path;
@@ -278,6 +280,7 @@ struct EngineState
         active_scene_path.clear();
         selected_item_path.clear();
         selected_scene_object_name.clear();
+        version_control_remote_url.clear();
         open_file_path.clear();
         requested_graph_path.clear();
         open_graph_path.clear();
@@ -878,6 +881,7 @@ struct EngineState
             else if (key == "autoSaveOnFocusLoss") auto_save_on_focus_loss = parse_bool(value);
             else if (key == "autoSaveIntervalMinutes") auto_save_interval_minutes = parse_int(value, 5);
             else if (key == "uiScale") ui_scale = parse_float(value, 1.0f);
+            else if (key == "versionControlRemoteUrl") version_control_remote_url = value;
         }
 
         return true;
@@ -927,6 +931,9 @@ struct EngineState
         output << "autoSaveOnFocusLoss=" << write_bool(auto_save_on_focus_loss) << "\n";
         output << "autoSaveIntervalMinutes=" << auto_save_interval_minutes << "\n";
         output << "uiScale=" << ui_scale << "\n";
+        output << "\n";
+        output << "# Version Control\n";
+        output << "versionControlRemoteUrl=" << version_control_remote_url << "\n";
 
         return output.good();
     }

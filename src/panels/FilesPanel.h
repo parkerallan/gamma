@@ -54,6 +54,8 @@ private:
     OpenProjectDialog open_project_dialog_;
 
     void RebuildTree(const std::filesystem::path& root);
+    void RenderFilesTab(EngineState& state, bool& file_tree_changed);
+    static std::string TrimCopy(std::string value);
     FileTreeNode BuildNode(const std::filesystem::path& path) const;
     std::vector<FileTreeNode> BuildSceneObjectNodes(const std::filesystem::path& scene_path) const;
     void RenderNode(

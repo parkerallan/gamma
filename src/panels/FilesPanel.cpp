@@ -58,24 +58,6 @@ std::string ToLowerCopy(std::string_view value)
     return lowered;
 }
 
-std::string TrimCopy(std::string value)
-{
-    const auto is_space = [](unsigned char character)
-    {
-        return std::isspace(character) != 0;
-    };
-
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char character)
-    {
-        return !is_space(character);
-    }));
-    value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char character)
-    {
-        return !is_space(character);
-    }).base(), value.end());
-    return value;
-}
-
 bool CanMutateSceneObject(const EngineState& state, const std::filesystem::path& scene_path)
 {
     return !(state.HasOpenFile() && state.open_file_path == scene_path && state.open_file_dirty);
@@ -125,16 +107,6 @@ FilesPanel::FilesPanel() = default;
 
 void FilesPanel::Render(EngineState& state)
 {
-    if (!state.show_files_panel)
-    {
-        return;
-    }
-
-    if (!ImGui::Begin("Files", &state.show_files_panel))
-    {
-        ImGui::End();
-        return;
-    }
     refresh_requested_ = false;
 
     if (current_root_ != state.project_root)
@@ -171,37 +143,52 @@ void FilesPanel::Render(EngineState& state)
         RebuildTree(state.project_root);
     }
 
-    if (state.workspace_root.empty())
+    if (state.show_files_panel)
     {
-        ImGui::TextUnformatted("Workspace root not resolved.");
-        ImGui::End();
-        return;
-    }
-
-    if (!state.HasOpenProject())
-    {
-        ImGui::TextUnformatted("No project loaded.");
-        ImGui::TextWrapped("Use Open Project to load a .engineproj file or project folder, or create a new one.");
-        if (ImGui::Button("Open Project"))
+        if (ImGui::Begin("Files", &state.show_files_panel))
         {
-            state.request_open_project_dialog = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("New Project"))
-        {
-            state.request_new_project_dialog = true;
+            if (state.workspace_root.empty())
+            {
+                ImGui::TextUnformatted("Workspace root not resolved.");
+            }
+            else if (!state.HasOpenProject())
+            {
+                ImGui::TextUnformatted("No project loaded.");
+                ImGui::TextWrapped("Use Open Project to load a .engineproj file or project folder, or create a new one.");
+                if (ImGui::Button("Open Project"))
+                {
+                    state.request_open_project_dialog = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("New Project"))
+                {
+                    state.request_new_project_dialog = true;
+                }
+            }
+            else if (state.project_root.empty())
+            {
+                ImGui::TextUnformatted("Project root is unavailable.");
+            }
+            else
+            {
+                RenderFilesTab(state, file_tree_changed);
+
+                file_tree_changed = file_context_menu_.Render(state) || file_tree_changed;
+                file_tree_changed = RenderSceneObjectPopups(state) || file_tree_changed;
+                file_tree_changed = creation_menu_.Render(state) || file_tree_changed;
+                if (file_tree_changed || refresh_requested_)
+                {
+                    RebuildTree(state.project_root);
+                }
+            }
         }
         ImGui::End();
-        return;
     }
 
-    if (state.project_root.empty())
-    {
-        ImGui::TextUnformatted("Project root is unavailable.");
-        ImGui::End();
-        return;
-    }
+}
 
+void FilesPanel::RenderFilesTab(EngineState& state, bool& file_tree_changed)
+{
     file_tree_changed = creation_menu_.RenderButton(state, state.project_root, "Add", false) || file_tree_changed;
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -217,16 +204,23 @@ void FilesPanel::Render(EngineState& state)
     }
 
     RenderProjectRootDropTarget(state);
-
-    file_tree_changed = file_context_menu_.Render(state) || file_tree_changed;
-    file_tree_changed = RenderSceneObjectPopups(state) || file_tree_changed;
-    file_tree_changed = creation_menu_.Render(state) || file_tree_changed;
-    if (file_tree_changed || refresh_requested_)
+}
+std::string FilesPanel::TrimCopy(std::string value)
+{
+    const auto is_space = [](unsigned char character)
     {
-        RebuildTree(state.project_root);
-    }
+        return std::isspace(character) != 0;
+    };
 
-    ImGui::End();
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char character)
+    {
+        return !is_space(character);
+    }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char character)
+    {
+        return !is_space(character);
+    }).base(), value.end());
+    return value;
 }
 
 void FilesPanel::RebuildTree(const std::filesystem::path& root)

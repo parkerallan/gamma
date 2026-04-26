@@ -6,6 +6,7 @@
 #include "panels/InfoPanel.h"
 #include "panels/LogPanel.h"
 #include "panels/SettingsPanel.h"
+#include "panels/VersionControlPanel.h"
 #include "panels/WorkspacePanel.h"
 #include "render/RuntimeRenderer.h"
 
@@ -36,6 +37,7 @@ private:
 
     EngineState state_;
     FilesPanel files_panel_;
+    VersionControlPanel version_control_panel_;
     WorkspacePanel workspace_panel_;
     SettingsPanel settings_panel_;
     InfoPanel info_panel_;

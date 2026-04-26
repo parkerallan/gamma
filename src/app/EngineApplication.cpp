@@ -884,6 +884,7 @@ void EngineApplication::RenderUI()
     ImGui::End();
 
     files_panel_.Render(state_);
+    version_control_panel_.Render(state_);
     workspace_panel_.Render(state_);
     settings_panel_.Render(state_);
     info_panel_.Render(state_, &vulkan_context_);
@@ -1042,6 +1043,7 @@ void EngineApplication::RenderMainMenuBar()
     if (ImGui::BeginMenu("Panels"))
     {
         ImGui::MenuItem("Files", nullptr, &state_.show_files_panel);
+        ImGui::MenuItem("Version Control", nullptr, &state_.show_version_control_panel);
         ImGui::MenuItem("Workspace", nullptr, &state_.show_workspace_panel);
         ImGui::MenuItem("Settings", nullptr, &state_.show_settings_panel);
         ImGui::MenuItem("Info", nullptr, &state_.show_info_panel);
@@ -1159,6 +1161,7 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
     right_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Right, 0.24f, nullptr, &center_id);
     bottom_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Down, 0.25f, nullptr, &center_id);
 
+    ImGui::DockBuilderDockWindow("Version Control", left_id);
     ImGui::DockBuilderDockWindow("Files", left_id);
     ImGui::DockBuilderDockWindow("Workspace", center_id);
     ImGui::DockBuilderDockWindow("Settings", center_id);

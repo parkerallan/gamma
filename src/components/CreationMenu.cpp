@@ -582,9 +582,10 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
             OpenCreateDialog(directory_path, CreateTarget::Folder);
         }
 
+        const std::filesystem::path script_directory = directory_path == state.project_root ? state.project_root / "Scripts" : directory_path;
         if (ImGui::MenuItem("New Script (.cpp)"))
         {
-            OpenCreateDialog(directory_path, CreateTarget::Script);
+            OpenCreateDialog(script_directory, CreateTarget::Script);
         }
 
         const std::filesystem::path graph_directory = directory_path == state.project_root ? state.project_root / "Graphs" : directory_path;
