@@ -37,15 +37,27 @@ set(GAME_SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
 set(GAME_SHADER_FLAGS --target-env=vulkan1.2 --target-spv=spv1.4)
 
 function(add_game_shader source_name shader_stage)
-    add_custom_command(
-        OUTPUT ${GAME_SHADER_BINARY_DIR}/${source_name}.spv
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${GAME_SHADER_BINARY_DIR}
-        COMMAND ${GLSLC_EXECUTABLE} ${GAME_SHADER_FLAGS} -fshader-stage=${shader_stage}
-            -o ${GAME_SHADER_BINARY_DIR}/${source_name}.spv
-            ${GAME_SHADER_SOURCE_DIR}/${source_name}
-        DEPENDS ${GAME_SHADER_SOURCE_DIR}/${source_name}
-        VERBATIM
-    )
+    if(SHADER_COMPILER_IS_GLSLANGVALIDATOR)
+        add_custom_command(
+            OUTPUT ${GAME_SHADER_BINARY_DIR}/${source_name}.spv
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${GAME_SHADER_BINARY_DIR}
+            COMMAND ${GLSLC_EXECUTABLE} -V --target-env vulkan1.2 -S ${shader_stage}
+                -o ${GAME_SHADER_BINARY_DIR}/${source_name}.spv
+                ${GAME_SHADER_SOURCE_DIR}/${source_name}
+            DEPENDS ${GAME_SHADER_SOURCE_DIR}/${source_name}
+            VERBATIM
+        )
+    else()
+        add_custom_command(
+            OUTPUT ${GAME_SHADER_BINARY_DIR}/${source_name}.spv
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${GAME_SHADER_BINARY_DIR}
+            COMMAND ${GLSLC_EXECUTABLE} ${GAME_SHADER_FLAGS} -fshader-stage=${shader_stage}
+                -o ${GAME_SHADER_BINARY_DIR}/${source_name}.spv
+                ${GAME_SHADER_SOURCE_DIR}/${source_name}
+            DEPENDS ${GAME_SHADER_SOURCE_DIR}/${source_name}
+            VERBATIM
+        )
+    endif()
     list(APPEND GAME_SHADER_OUTPUTS ${GAME_SHADER_BINARY_DIR}/${source_name}.spv)
     set(GAME_SHADER_OUTPUTS ${GAME_SHADER_OUTPUTS} PARENT_SCOPE)
 endfunction()
@@ -124,6 +136,13 @@ if(MSVC)
     # Hide console window for Release builds (Final build type) while still
     # using the regular main() entry point.
     target_link_options(game PRIVATE $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>)
+elseif(UNIX)
+    # Linux/GCC build path.
+    target_compile_options(game PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
 endif()
 
 # Post-build: copy compiled shaders next to the game executable.

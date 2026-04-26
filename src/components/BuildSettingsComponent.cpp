@@ -146,7 +146,7 @@ std::filesystem::path ShowIconFileDialog()
         dialog->SetTitle(L"Choose App Icon");
 
         COMDLG_FILTERSPEC filters[] = {
-            {L"App Icon (*.avif;*.png;*.ico)", L"*.avif;*.png;*.ico"},
+            {L"App Icon (*.png;*.ico)", L"*.png;*.ico"},
             {L"All Files", L"*.*"},
         };
         dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
@@ -185,6 +185,14 @@ bool BuildSettingsComponent::Render(EngineState& state)
     changed |= EditStringField("Exe name", state.build_executable_name, kNameCapacity);
     changed |= EditStringField("Folder name", state.build_folder_name, kNameCapacity);
     changed |= EditStringField("Window title", state.build_window_title, kTitleCapacity);
+
+    int platform_index = state.build_target_platform == EngineBuildPlatform::Windows ? 0 : 1;
+    const char* platform_labels[] = {"Windows (MSVC)", "Linux (GCC)"};
+    if (ImGui::Combo("Build platform", &platform_index, platform_labels, IM_ARRAYSIZE(platform_labels)))
+    {
+        state.build_target_platform = platform_index == 0 ? EngineBuildPlatform::Windows : EngineBuildPlatform::Linux;
+        changed = true;
+    }
 
     changed |= EditPathField("Build location", state.build_output_root);
     ImGui::SameLine();
@@ -226,6 +234,6 @@ bool BuildSettingsComponent::Render(EngineState& state)
         changed = true;
     }
 
-    ImGui::TextDisabled("Supported icon formats: .avif, .png, .ico");
+    ImGui::TextDisabled("Supported icon formats: .png, .ico");
     return changed;
 }

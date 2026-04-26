@@ -10,6 +10,7 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <system_error>
 #include <string>
@@ -362,6 +363,114 @@ bool IsPathWithin(const std::filesystem::path& parent, const std::filesystem::pa
 std::string BuildTypeToConfigName(EngineBuildType build_type)
 {
     return build_type == EngineBuildType::Debug ? "Debug" : "Release";
+}
+
+std::string BuildTypeToFolderSuffix(EngineBuildType build_type)
+{
+    return build_type == EngineBuildType::Debug ? "debug" : "release";
+}
+
+std::string BuildPlatformToFolderSuffix(EngineBuildPlatform build_platform)
+{
+    return build_platform == EngineBuildPlatform::Windows ? "windows" : "linux";
+}
+
+std::string BuildPlatformToLogLabel(EngineBuildPlatform build_platform)
+{
+    return build_platform == EngineBuildPlatform::Windows ? "Windows (MSVC)" : "Linux (GCC)";
+}
+
+std::filesystem::path GetExternalBuildDirectory(const EngineBuildRequest& request)
+{
+    std::string build_folder_name = request.folder_name + "-build-" + BuildPlatformToFolderSuffix(request.build_platform);
+    if (request.build_platform == EngineBuildPlatform::Linux)
+    {
+        // Linux builds are single-config, so keep separate caches per config.
+        build_folder_name += "-" + BuildTypeToFolderSuffix(request.build_type);
+    }
+
+    return request.output_root / build_folder_name;
+}
+
+std::filesystem::path GetBuiltOutputDirectory(
+    EngineBuildPlatform build_platform,
+    const std::filesystem::path& external_build_directory,
+    const std::string& config_name)
+{
+    if (build_platform == EngineBuildPlatform::Windows)
+    {
+        return external_build_directory / config_name;
+    }
+
+    return external_build_directory;
+}
+
+std::filesystem::path GetBuiltGameExecutablePath(
+    EngineBuildPlatform build_platform,
+    const std::filesystem::path& built_output_directory)
+{
+    return built_output_directory / (build_platform == EngineBuildPlatform::Windows ? "game.exe" : "game");
+}
+
+bool ReadTextFile(const std::filesystem::path& path, std::string& out_contents)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+    {
+        return false;
+    }
+
+    out_contents.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    return true;
+}
+
+bool LinuxBuildCacheNeedsRefresh(const std::filesystem::path& external_build_directory)
+{
+    const std::filesystem::path cmake_cache = external_build_directory / "CMakeCache.txt";
+    const std::filesystem::path makefile_path = external_build_directory / "Makefile";
+    std::string cache_contents;
+    if (!ReadTextFile(cmake_cache, cache_contents))
+    {
+        return true;
+    }
+
+    return !std::filesystem::exists(makefile_path) ||
+        cache_contents.find("CMAKE_GENERATOR:INTERNAL=Unix Makefiles") == std::string::npos ||
+        cache_contents.find("CMAKE_MAKE_PROGRAM:FILEPATH=CMAKE_MAKE_PROGRAM-NOTFOUND") != std::string::npos;
+}
+
+// Convert an absolute Windows path to the equivalent WSL path under /mnt/<drive>/...
+// e.g.  E:\Projects\engine  ->  /mnt/e/Projects/engine
+std::string WindowsPathToWsl(const std::filesystem::path& windows_path)
+{
+    const std::string generic = windows_path.lexically_normal().generic_string();
+    if (generic.size() >= 2 && std::isalpha(static_cast<unsigned char>(generic[0])) && generic[1] == ':')
+    {
+        std::string wsl_path = "/mnt/";
+        wsl_path += static_cast<char>(std::tolower(static_cast<unsigned char>(generic[0])));
+        wsl_path += generic.substr(2);
+        return wsl_path;
+    }
+    return generic;
+}
+
+// Quote a path for use inside a wsl bash -lc '...' command.
+std::string QuoteWslPath(const std::filesystem::path& path)
+{
+    std::string quoted = "'";
+    for (const char c : WindowsPathToWsl(path))
+    {
+        if (c == '\'')
+        {
+            quoted += "'\\''";
+        }
+        else
+        {
+            quoted += c;
+        }
+    }
+    quoted += "'";
+    return quoted;
 }
 
 std::string ToLowerCopy(std::string value)
@@ -1124,7 +1233,7 @@ void EngineApplication::HandleBuildRequests()
     }
 
     const std::filesystem::path stage_directory = request.GetStageDirectory();
-    const std::filesystem::path external_build_directory = request.output_root / (request.folder_name + "-build");
+    const std::filesystem::path external_build_directory = GetExternalBuildDirectory(request);
 
     if (IsPathWithin(state_.workspace_root, stage_directory) || IsPathWithin(state_.workspace_root, external_build_directory))
     {
@@ -1210,9 +1319,9 @@ void EngineApplication::ExecuteBuildRequest(
     };
 
     const std::string config_name = BuildTypeToConfigName(request.build_type);
-    const std::filesystem::path external_build_directory = request.output_root / (request.folder_name + "-build");
-    const std::filesystem::path built_output_directory = external_build_directory / config_name;
-    const std::filesystem::path built_game_executable_path = built_output_directory / "game.exe";
+    const std::filesystem::path external_build_directory = GetExternalBuildDirectory(request);
+    const std::filesystem::path built_output_directory = GetBuiltOutputDirectory(request.build_platform, external_build_directory, config_name);
+    const std::filesystem::path built_game_executable_path = GetBuiltGameExecutablePath(request.build_platform, built_output_directory);
 
     std::error_code error;
     std::filesystem::create_directories(external_build_directory, error);
@@ -1226,8 +1335,22 @@ void EngineApplication::ExecuteBuildRequest(
     // is reused, skipping the ~90s compiler/SDK detection phase. The user can
     // force a clean configure by deleting the build directory from the engine UI.
     const std::filesystem::path cmake_cache = external_build_directory / "CMakeCache.txt";
-    const bool needs_configure = !std::filesystem::exists(cmake_cache, error);
+    bool needs_configure = !std::filesystem::exists(cmake_cache, error);
     error.clear();
+
+    if (!needs_configure && request.build_platform == EngineBuildPlatform::Linux && LinuxBuildCacheNeedsRefresh(external_build_directory))
+    {
+        log("[Build] Linux build cache is stale or incomplete; recreating build directory");
+        std::filesystem::remove_all(external_build_directory, error);
+        error.clear();
+        std::filesystem::create_directories(external_build_directory, error);
+        if (error)
+        {
+            fail("Failed to recreate external game build directory: " + external_build_directory.generic_string());
+            return;
+        }
+        needs_configure = true;
+    }
 
     if (was_cancelled())
     {
@@ -1238,12 +1361,31 @@ void EngineApplication::ExecuteBuildRequest(
     if (needs_configure)
     {
         log("[Build] Configuring: " + external_build_directory.generic_string());
-        const std::string configure_command =
-            "cmake -S " + QuoteCommandArgument(state_.workspace_root.string()) +
-            " -B " + QuoteCommandArgument(external_build_directory.string()) +
-            " -DENGINE_BUILD_GAME=ON" +
-            " --log-level=WARNING" +
-            " -Wno-dev";
+        std::string configure_command;
+        if (request.build_platform == EngineBuildPlatform::Linux)
+        {
+            // Route through WSL so Linux toolchain commands run in the Linux environment.
+            std::string inner =
+                "cmake -S " + QuoteWslPath(state_.workspace_root) +
+                " -B " + QuoteWslPath(external_build_directory) +
+                " -DENGINE_BUILD_GAME=ON" +
+                " --log-level=WARNING" +
+                " -Wno-dev" +
+                " -G \"Unix Makefiles\"" +
+                " -DCMAKE_BUILD_TYPE=" + config_name +
+                " -DCMAKE_C_COMPILER=gcc" +
+                " -DCMAKE_CXX_COMPILER=g++";
+            configure_command = "wsl bash -lc " + QuoteCommandArgument(inner);
+        }
+        else
+        {
+            configure_command =
+                "cmake -S " + QuoteCommandArgument(state_.workspace_root.string()) +
+                " -B " + QuoteCommandArgument(external_build_directory.string()) +
+                " -DENGINE_BUILD_GAME=ON" +
+                " --log-level=WARNING" +
+                " -Wno-dev";
+        }
 
         const int configure_exit_code = RunCommand(configure_command, [&log](const std::string& line)
         {
@@ -1269,13 +1411,25 @@ void EngineApplication::ExecuteBuildRequest(
         log("[Build] Using cached configuration (skipping configure step)");
     }
 
-    log("[Build] Compiling: config=" + config_name);
-    const std::string build_command =
-        "cmake --build " + QuoteCommandArgument(external_build_directory.string()) +
-        " --config " + config_name +
-        " --target game" +
-        " --parallel" +
-        " -- /v:m /nologo";
+    log("[Build] Compiling: platform=" + BuildPlatformToLogLabel(request.build_platform) + ", config=" + config_name);
+    std::string build_command;
+    if (request.build_platform == EngineBuildPlatform::Linux)
+    {
+        std::string inner =
+            "cmake --build " + QuoteWslPath(external_build_directory) +
+            " --target game" +
+            " --parallel";
+        build_command = "wsl bash -lc " + QuoteCommandArgument(inner);
+    }
+    else
+    {
+        build_command =
+            "cmake --build " + QuoteCommandArgument(external_build_directory.string()) +
+            " --config " + config_name +
+            " --target game" +
+            " --parallel" +
+            " -- /v:m /nologo";
+    }
 
     const int build_exit_code = RunCommand(build_command, [&log](const std::string& line)
     {
@@ -1298,7 +1452,7 @@ void EngineApplication::ExecuteBuildRequest(
 
     if (!std::filesystem::exists(built_game_executable_path))
     {
-        fail("Game build completed but game.exe was not found in the build output");
+        fail("Game build completed but " + built_game_executable_path.filename().generic_string() + " was not found in the build output");
         return;
     }
 
@@ -1511,9 +1665,9 @@ bool EngineApplication::StageBuiltGame(
         }
 
         const std::string icon_extension = ToLowerCopy(request.app_icon_path.extension().string());
-        if (icon_extension != ".avif" && icon_extension != ".png" && icon_extension != ".ico")
+        if (icon_extension != ".png" && icon_extension != ".ico")
         {
-            out_error = "App icon must be .avif, .png, or .ico";
+            out_error = "App icon must be .png or .ico";
             return false;
         }
 

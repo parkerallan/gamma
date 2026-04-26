@@ -24,6 +24,8 @@ find_program(GLSLC_EXECUTABLE
         "$ENV{VULKAN_SDK}/Bin32"
 )
 
+set(SHADER_COMPILER_IS_GLSLANGVALIDATOR OFF)
+
 if(NOT GLSLC_EXECUTABLE)
     file(GLOB VULKAN_SDK_GLSLC "C:/VulkanSDK/*/Bin/glslc.exe")
     if(VULKAN_SDK_GLSLC)
@@ -34,32 +36,40 @@ if(NOT GLSLC_EXECUTABLE)
 endif()
 
 if(NOT GLSLC_EXECUTABLE)
-    message(FATAL_ERROR "glslc was not found. Install the Vulkan SDK or add glslc to PATH.")
+    find_program(GLSLC_EXECUTABLE NAMES glslangValidator)
+    if(GLSLC_EXECUTABLE)
+        set(SHADER_COMPILER_IS_GLSLANGVALIDATOR ON)
+    endif()
+endif()
+
+if(NOT GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "No supported shader compiler was found. Install glslc or glslangValidator and add it to PATH.")
 endif()
 
 include(FetchContent)
 
 # SDL3: shared for the engine editor, static for the standalone game so that
 # no SDL3.dll needs to be distributed with the game.
-# For game builds, disable unused subsystems to reduce compile time and size.
 if(ENGINE_BUILD_GAME)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON  CACHE BOOL "" FORCE)
-    # Disable unused SDL3 subsystems for game builds
-    set(SDL_AUDIO      OFF CACHE BOOL "" FORCE)
-    set(SDL_JOYSTICK   OFF CACHE BOOL "" FORCE)
-    set(SDL_HAPTIC     OFF CACHE BOOL "" FORCE)
-    set(SDL_HIDAPI     OFF CACHE BOOL "" FORCE)
-    set(SDL_SENSOR     OFF CACHE BOOL "" FORCE)
-    set(SDL_POWER      OFF CACHE BOOL "" FORCE)
-    set(SDL_TRAY       OFF CACHE BOOL "" FORCE)
-    set(SDL_DIALOG     OFF CACHE BOOL "" FORCE)
-    set(SDL_CAMERA     OFF CACHE BOOL "" FORCE)
-    set(SDL_RENDER     OFF CACHE BOOL "" FORCE)
 else()
     set(SDL_SHARED ON  CACHE BOOL "" FORCE)
     set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 endif()
+
+# Disable unused SDL3 subsystems for both editor and game builds to reduce
+# dependency compile time and binary size.
+set(SDL_AUDIO      OFF CACHE BOOL "" FORCE)
+set(SDL_JOYSTICK   ON  CACHE BOOL "" FORCE)
+set(SDL_HAPTIC     OFF CACHE BOOL "" FORCE)
+set(SDL_HIDAPI     OFF CACHE BOOL "" FORCE)
+set(SDL_SENSOR     OFF CACHE BOOL "" FORCE)
+set(SDL_POWER      OFF CACHE BOOL "" FORCE)
+set(SDL_TRAY       OFF CACHE BOOL "" FORCE)
+set(SDL_DIALOG     OFF CACHE BOOL "" FORCE)
+set(SDL_CAMERA     OFF CACHE BOOL "" FORCE)
+set(SDL_RENDER     OFF CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS        OFF CACHE BOOL "" FORCE)
 set(SDL_EXAMPLES     OFF CACHE BOOL "" FORCE)
@@ -109,17 +119,17 @@ set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+# Build zlib from Assimp's bundled sources so Linux/WSL does not require
+# a preinstalled system zlib development package.
+set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
 
-# For game builds: disable all assimp importers by default, then enable only
-# the formats we actually use (FBX, GLTF, OBJ). This dramatically reduces
-# compile time and binary size.
-if(ENGINE_BUILD_GAME)
-    set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_FBX_IMPORTER  ON CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_OBJ_IMPORTER  ON CACHE BOOL "" FORCE)
-endif()
+# Disable all assimp importers/exporters by default, then enable only the
+# formats we actually use. This keeps both editor and game build times lower.
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_FBX_IMPORTER  ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER  ON CACHE BOOL "" FORCE)
 
 # Force assimp to produce a static library when building the game so the
 # final staged output requires no assimp DLL.
@@ -174,13 +184,23 @@ set(ENGINE_UI_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/ui)
 set(ENGINE_SHADER_FLAGS --target-env=vulkan1.2 --target-spv=spv1.4)
 
 function(add_engine_shader source_name shader_stage)
-    add_custom_command(
-        OUTPUT ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
-        COMMAND ${GLSLC_EXECUTABLE} ${ENGINE_SHADER_FLAGS} -fshader-stage=${shader_stage} -o ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
-        DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
-        VERBATIM
-    )
+    if(SHADER_COMPILER_IS_GLSLANGVALIDATOR)
+        add_custom_command(
+            OUTPUT ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
+            COMMAND ${GLSLC_EXECUTABLE} -V --target-env vulkan1.2 -S ${shader_stage} -o ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
+            DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
+            VERBATIM
+        )
+    else()
+        add_custom_command(
+            OUTPUT ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${ENGINE_SHADER_BINARY_DIR}
+            COMMAND ${GLSLC_EXECUTABLE} ${ENGINE_SHADER_FLAGS} -fshader-stage=${shader_stage} -o ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
+            DEPENDS ${ENGINE_SHADER_SOURCE_DIR}/${source_name}
+            VERBATIM
+        )
+    endif()
 
     list(APPEND ENGINE_SHADER_OUTPUTS ${ENGINE_SHADER_BINARY_DIR}/${source_name}.spv)
     set(ENGINE_SHADER_OUTPUTS ${ENGINE_SHADER_OUTPUTS} PARENT_SCOPE)
@@ -339,6 +359,10 @@ if(MSVC)
         "/external:I${assimp_SOURCE_DIR}/include"
         "/external:I${stb_SOURCE_DIR}"
     )
+
+    # Hide console window for engine Release builds while keeping Debug
+    # attached to a console for development logs.
+    target_link_options(engine PRIVATE $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>)
 else()
     target_compile_options(engine PRIVATE -Wall -Wextra -Wpedantic)
 endif()

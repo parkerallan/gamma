@@ -38,7 +38,7 @@ bool IsSupportedIconExtension(const std::filesystem::path& path)
 	std::string extension = path.extension().string();
 	std::transform(extension.begin(), extension.end(), extension.begin(),
 		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-	return extension == ".avif" || extension == ".png" || extension == ".ico";
+	return extension == ".png" || extension == ".ico";
 }
 
 std::filesystem::path ResolveInputPath(const EngineState& state, const std::filesystem::path& input_path)
@@ -64,6 +64,21 @@ std::filesystem::path ResolveInputPath(const EngineState& state, const std::file
 	}
 
 	return input_path.lexically_normal();
+}
+
+const char* GetBuildPlatformLabel(EngineBuildPlatform platform)
+{
+    return platform == EngineBuildPlatform::Windows ? "Windows (MSVC)" : "Linux (GCC)";
+}
+
+std::string GetBuildCacheFolderName(const std::string& folder_name, EngineBuildPlatform platform, int build_type_index)
+{
+	std::string cache_folder_name = folder_name + "-build-" + (platform == EngineBuildPlatform::Windows ? std::string("windows") : std::string("linux"));
+	if (platform == EngineBuildPlatform::Linux)
+	{
+		cache_folder_name += build_type_index == 0 ? "-debug" : "-release";
+	}
+	return cache_folder_name;
 }
 
 const char* GetBuildTypeLabel(int build_type_index)
@@ -107,15 +122,24 @@ bool BuildGameDialog::Render(EngineState& state)
 	std::filesystem::path build_cache_root;
 	if (!state.build_output_root.empty() && !trimmed_folder_name.empty())
 	{
-		build_cache_root = std::filesystem::path(state.build_output_root) / (trimmed_folder_name + "-build");
+		build_cache_root = std::filesystem::path(state.build_output_root) /
+			GetBuildCacheFolderName(trimmed_folder_name, state.build_target_platform, build_type_index_);
 	}
 	ImGui::Separator();
 	ImGui::TextWrapped("Staged output folder: %s", stage_root.empty() ? "Pending folder name and build location" : stage_root.generic_string().c_str());
 	ImGui::TextWrapped("Build cache folder: %s", build_cache_root.empty() ? "Pending folder name and build location" : build_cache_root.generic_string().c_str());
-	ImGui::TextWrapped("Executable name: %s.exe", trimmed_game_name.empty() ? "<game name required>" : trimmed_game_name.c_str());
+	const std::string executable_file_name = trimmed_game_name.empty()
+		? std::string("<game name required>")
+		: (state.build_target_platform == EngineBuildPlatform::Windows ? trimmed_game_name + ".exe" : trimmed_game_name);
+	ImGui::TextWrapped("Executable name: %s", executable_file_name.c_str());
 	ImGui::TextWrapped("Window title: %s", state.build_window_title.empty() ? "<defaults to executable name>" : state.build_window_title.c_str());
 	ImGui::TextWrapped("App icon: %s", state.build_app_icon_path.empty() ? "None" : state.build_app_icon_path.generic_string().c_str());
+	ImGui::TextWrapped("Platform: %s", GetBuildPlatformLabel(state.build_target_platform));
 	ImGui::TextWrapped("Configuration: %s", GetBuildTypeLabel(build_type_index_));
+	if (state.build_target_platform == EngineBuildPlatform::Linux && build_type_index_ == 0)
+	{
+		ImGui::TextWrapped("Debug build keeps terminal output visible when launched from a terminal.");
+	}
 
 	bool submitted = false;
 	if (ImGui::Button("Queue Build"))
@@ -202,7 +226,7 @@ bool BuildGameDialog::SubmitBuildRequest(EngineState& state)
 
         if (!IsSupportedIconExtension(app_icon_path))
         {
-            state.SetBuildError("Cannot build game: app icon must be .avif, .png, or .ico");
+			state.SetBuildError("Cannot build game: app icon must be .png or .ico");
             return false;
         }
 
@@ -223,6 +247,7 @@ bool BuildGameDialog::SubmitBuildRequest(EngineState& state)
 	request.output_root = output_root;
 	request.app_icon_path = app_icon_path;
 	request.build_type = build_type_index_ == 0 ? EngineBuildType::Debug : EngineBuildType::Final;
+	request.build_platform = state.build_target_platform;
 	state.QueueBuildRequest(std::move(request));
 	return true;
 }

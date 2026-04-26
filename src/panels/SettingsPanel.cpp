@@ -94,6 +94,7 @@ void SettingsPanel::Render(EngineState& state)
             state.build_executable_name = project_name;
             state.build_folder_name = project_name;
             state.build_window_title = project_name;
+            state.build_target_platform = EngineBuildPlatform::Windows;
             state.build_output_root.clear();
             state.build_app_icon_path.clear();
             build_changed = true;

@@ -24,6 +24,12 @@ enum class EngineBuildType
     Final,
 };
 
+enum class EngineBuildPlatform
+{
+    Windows,
+    Linux,
+};
+
 struct EngineBuildRequest
 {
     std::string game_name;
@@ -32,6 +38,7 @@ struct EngineBuildRequest
     std::filesystem::path output_root;
     std::filesystem::path app_icon_path;
     EngineBuildType build_type = EngineBuildType::Debug;
+    EngineBuildPlatform build_platform = EngineBuildPlatform::Windows;
 
     std::filesystem::path GetStageDirectory() const
     {
@@ -41,7 +48,7 @@ struct EngineBuildRequest
 
     std::string GetExecutableFileName() const
     {
-        return game_name + ".exe";
+        return build_platform == EngineBuildPlatform::Windows ? game_name + ".exe" : game_name;
     }
 };
 
@@ -98,6 +105,7 @@ struct EngineState
     std::string build_executable_name = "Game";
     std::string build_folder_name = "Game";
     std::string build_window_title = "Game";
+    EngineBuildPlatform build_target_platform = EngineBuildPlatform::Windows;
     std::filesystem::path build_output_root;
     std::filesystem::path build_app_icon_path;
     EngineBuildRequest pending_build_request{};
@@ -172,10 +180,12 @@ struct EngineState
         last_build_error.clear();
 
         const std::string build_type_label = pending_build_request.build_type == EngineBuildType::Debug ? "Debug" : "Final";
+        const std::string build_platform_label = pending_build_request.build_platform == EngineBuildPlatform::Windows ? "Windows" : "Linux";
         AddLog(
             "Queued game build request: name='" + pending_build_request.game_name +
             "', folder='" + pending_build_request.folder_name +
-            "', config=" + build_type_label +
+            "', platform=" + build_platform_label +
+            ", config=" + build_type_label +
             ", output='" + pending_build_request.GetStageDirectory().generic_string() + "'");
     }
 
@@ -289,6 +299,7 @@ struct EngineState
         build_executable_name = "Game";
         build_folder_name = "Game";
         build_window_title = "Game";
+        build_target_platform = EngineBuildPlatform::Windows;
         build_output_root.clear();
         build_app_icon_path.clear();
         auto_open_startup_scene = true;
@@ -960,6 +971,7 @@ struct EngineState
         if (!UpsertProjectValue(manifest_contents, "buildExeName", SanitizeProjectValue(build_executable_name)) ||
             !UpsertProjectValue(manifest_contents, "buildFolderName", SanitizeProjectValue(build_folder_name)) ||
             !UpsertProjectValue(manifest_contents, "buildWindowTitle", SanitizeProjectValue(build_window_title)) ||
+            !UpsertProjectValue(manifest_contents, "buildPlatform", build_target_platform == EngineBuildPlatform::Linux ? "Linux" : "Windows") ||
             !UpsertProjectValue(manifest_contents, "buildOutputRoot", encode_path(build_output_root)) ||
             !UpsertProjectValue(manifest_contents, "buildAppIcon", encode_path(build_app_icon_path)))
         {
@@ -1075,6 +1087,15 @@ struct EngineState
         if (build_window_title.empty())
         {
             build_window_title = build_executable_name;
+        }
+
+        build_target_platform = EngineBuildPlatform::Windows;
+        std::string build_platform_value = ExtractProjectValue(manifest_contents, "buildPlatform");
+        std::transform(build_platform_value.begin(), build_platform_value.end(), build_platform_value.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (build_platform_value == "linux")
+        {
+            build_target_platform = EngineBuildPlatform::Linux;
         }
 
         build_output_root.clear();
