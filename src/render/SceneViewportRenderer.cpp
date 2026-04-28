@@ -425,6 +425,17 @@ void BuildLookAtMatrix(const Vec3& eye, const Vec3& center, const Vec3& up, floa
 void BuildModelMatrix(const SceneViewportRenderer::QueuedSceneObject& object, float* matrix)
 {
     std::memcpy(matrix, object.model_matrix.data(), sizeof(float) * 16);
+
+    // Apply model-only local translation without changing object or physics transforms.
+    const SceneVector3& offset = object.model_visual_offset;
+    if (std::abs(offset[0]) <= 0.000001f && std::abs(offset[1]) <= 0.000001f && std::abs(offset[2]) <= 0.000001f)
+    {
+        return;
+    }
+
+    matrix[12] += offset[0];
+    matrix[13] += offset[1];
+    matrix[14] += offset[2];
 }
 
 Vec3 TransformDirectionByRotation(const SceneVector3& rotation, const Vec3& direction)
@@ -745,6 +756,50 @@ void DrawWireCircle(
     }
 }
 
+void DrawWireArc(
+    ImDrawList* draw_list,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const Vec3& center,
+    const Vec3& axis_a,
+    const Vec3& axis_b,
+    float radius,
+    float start_angle,
+    float end_angle,
+    ImU32 color,
+    float thickness)
+{
+    if (radius <= 0.0001f)
+    {
+        return;
+    }
+
+    constexpr int kArcSegments = 24;
+    Vec3 previous = Add(
+        center,
+        Add(Multiply(axis_a, std::cos(start_angle) * radius), Multiply(axis_b, std::sin(start_angle) * radius)));
+
+    for (int segment = 1; segment <= kArcSegments; ++segment)
+    {
+        const float t = static_cast<float>(segment) / static_cast<float>(kArcSegments);
+        const float angle = start_angle + (end_angle - start_angle) * t;
+        const Vec3 current = Add(
+            center,
+            Add(Multiply(axis_a, std::cos(angle) * radius), Multiply(axis_b, std::sin(angle) * radius)));
+        DrawProjectedSegment(
+            draw_list,
+            view_projection_matrix,
+            viewport_min,
+            viewport_max,
+            previous,
+            current,
+            color,
+            thickness);
+        previous = current;
+    }
+}
+
 void DrawPhysicsBoxColliderGizmo(
     ImDrawList* draw_list,
     const float* view_projection_matrix,
@@ -845,6 +900,62 @@ void DrawPhysicsSphereColliderGizmo(
         thickness);
 }
 
+void DrawPhysicsCapsuleColliderGizmo(
+    ImDrawList* draw_list,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const float* model_matrix,
+    float local_radius,
+    float local_half_height,
+    ImU32 color,
+    float thickness)
+{
+    const Vec3 axis_x = Vec3{model_matrix[0], model_matrix[1], model_matrix[2]};
+    const Vec3 axis_y = Vec3{model_matrix[4], model_matrix[5], model_matrix[6]};
+    const Vec3 axis_z = Vec3{model_matrix[8], model_matrix[9], model_matrix[10]};
+
+    const float scale_x = Length(axis_x);
+    const float scale_y = Length(axis_y);
+    const float scale_z = Length(axis_z);
+    const float world_radius = (std::max)(0.01f, local_radius * (std::max)(scale_x, scale_z));
+    const float world_half_height = (std::max)(0.0f, local_half_height * scale_y);
+
+    const Vec3 up = Normalize(axis_y);
+    const Vec3 right = Normalize(axis_x);
+    const Vec3 forward = Normalize(axis_z);
+    const Vec3 center = TransformPoint(model_matrix, Vec3{0.0f, 0.0f, 0.0f});
+    const Vec3 top_center = Add(center, Multiply(up, world_half_height));
+    const Vec3 bottom_center = Add(center, Multiply(up, -world_half_height));
+
+    DrawWireCircle(draw_list, view_projection_matrix, viewport_min, viewport_max, top_center, right, forward, world_radius, color, thickness);
+    DrawWireCircle(draw_list, view_projection_matrix, viewport_min, viewport_max, bottom_center, right, forward, world_radius, color, thickness);
+
+    DrawWireArc(draw_list, view_projection_matrix, viewport_min, viewport_max, top_center, right, up, world_radius, 0.0f, kPi, color, thickness);
+    DrawWireArc(draw_list, view_projection_matrix, viewport_min, viewport_max, top_center, forward, up, world_radius, 0.0f, kPi, color, thickness);
+    DrawWireArc(draw_list, view_projection_matrix, viewport_min, viewport_max, bottom_center, right, up, world_radius, kPi, kPi * 2.0f, color, thickness);
+    DrawWireArc(draw_list, view_projection_matrix, viewport_min, viewport_max, bottom_center, forward, up, world_radius, kPi, kPi * 2.0f, color, thickness);
+
+    const Vec3 side_offsets[4] = {
+        Multiply(right, world_radius),
+        Multiply(right, -world_radius),
+        Multiply(forward, world_radius),
+        Multiply(forward, -world_radius),
+    };
+    for (const Vec3& side_offset : side_offsets)
+    {
+        DrawProjectedSegment(
+            draw_list,
+            view_projection_matrix,
+            viewport_min,
+            viewport_max,
+            Add(bottom_center, side_offset),
+            Add(top_center, side_offset),
+            color,
+            thickness);
+    }
+}
+
 void DrawPhysicsColliderGizmos(
     ImDrawList* draw_list,
     const SceneMetadata& scene_metadata,
@@ -902,6 +1013,19 @@ void DrawPhysicsColliderGizmos(
                 viewport_max,
                 model_matrix,
                 object.physics_radius,
+                color,
+                thickness);
+        }
+        else if (object.physics_shape == SceneObjectPhysicsShape::Capsule)
+        {
+            DrawPhysicsCapsuleColliderGizmo(
+                draw_list,
+                view_projection_matrix,
+                viewport_min,
+                viewport_max,
+                model_matrix,
+                object.physics_radius,
+                object.physics_capsule_half_height,
                 color,
                 thickness);
         }
@@ -2244,7 +2368,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
-        instance_input.transform = object.model_matrix;
+        BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
 
@@ -2425,6 +2549,7 @@ void SceneViewportRenderer::RenderUi(
         QueuedSceneObject queued_object;
         queued_object.model_path = model_path;
         queued_object.name = object.name;
+        queued_object.model_visual_offset = object.model_visual_offset;
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;
@@ -2458,6 +2583,7 @@ void SceneViewportRenderer::RenderUi(
     if (selected_scene_object_metadata != nullptr)
     {
         fallback_gizmo_object.name = selected_scene_object_metadata->name;
+        fallback_gizmo_object.model_visual_offset = selected_scene_object_metadata->model_visual_offset;
         fallback_gizmo_object.local_position = selected_scene_object_metadata->position;
         fallback_gizmo_object.local_rotation = selected_scene_object_metadata->rotation;
         fallback_gizmo_object.local_scale = selected_scene_object_metadata->scale;
@@ -2624,7 +2750,7 @@ void SceneViewportRenderer::RenderUi(
     {
         float gizmo_matrix[16];
         float delta_matrix[16];
-        BuildModelMatrix(*gizmo_object, gizmo_matrix);
+        std::memcpy(gizmo_matrix, gizmo_object->model_matrix.data(), sizeof(gizmo_matrix));
         SetIdentity(delta_matrix);
 
         ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
@@ -2869,6 +2995,7 @@ void SceneViewportRenderer::RenderCameraPreview(
         QueuedSceneObject queued_object;
         queued_object.model_path = model_path;
         queued_object.name = object.name;
+        queued_object.model_visual_offset = object.model_visual_offset;
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;

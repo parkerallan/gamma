@@ -296,10 +296,10 @@ bool RenderAttributeSection(
             ImGui::TextUnformatted("Settings");
 
             const SceneObjectPhysicsShape current_shape = attribute.rigidbody.shape;
-            const char* shape_names[] = {"None", "Box", "Sphere"};
-            const SceneObjectPhysicsShape shape_values[] = {SceneObjectPhysicsShape::None, SceneObjectPhysicsShape::Box, SceneObjectPhysicsShape::Sphere};
+            const char* shape_names[] = {"None", "Box", "Sphere", "Capsule", "Mesh"};
+            const SceneObjectPhysicsShape shape_values[] = {SceneObjectPhysicsShape::None, SceneObjectPhysicsShape::Box, SceneObjectPhysicsShape::Sphere, SceneObjectPhysicsShape::Capsule, SceneObjectPhysicsShape::Mesh};
             int current_shape_index = 0;
-            for (int i = 0; i < 3; ++i)
+            for (int i = 0; i < 5; ++i)
             {
                 if (shape_values[i] == current_shape)
                 {
@@ -310,7 +310,7 @@ bool RenderAttributeSection(
 
             if (ImGui::BeginCombo("Shape", shape_names[current_shape_index]))
             {
-                for (int i = 0; i < 3; ++i)
+                for (int i = 0; i < 5; ++i)
                 {
                     const bool selected = i == current_shape_index;
                     if (ImGui::Selectable(shape_names[i], selected))
@@ -319,6 +319,14 @@ bool RenderAttributeSection(
                         {
                             return SetSceneObjectAttributePhysicsShape(state.selected_item_path, object.name, attribute_index, shape_values[i]);
                         }) || changed;
+
+                        if (shape_values[i] == SceneObjectPhysicsShape::Mesh && attribute.rigidbody.is_dynamic)
+                        {
+                            changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody dynamic", [&]()
+                            {
+                                return SetSceneObjectAttributePhysicsDynamic(state.selected_item_path, object.name, attribute_index, false);
+                            }) || changed;
+                        }
                     }
                     if (selected)
                     {
@@ -330,12 +338,46 @@ bool RenderAttributeSection(
 
             if (current_shape != SceneObjectPhysicsShape::None)
             {
-                bool is_dynamic = attribute.rigidbody.is_dynamic;
-                if (ImGui::Checkbox("Dynamic", &is_dynamic))
+                const bool supports_dynamic = current_shape != SceneObjectPhysicsShape::Mesh;
+                bool is_dynamic = supports_dynamic ? attribute.rigidbody.is_dynamic : false;
+                ImGui::BeginDisabled(!supports_dynamic);
+                if (ImGui::Checkbox("Dynamic", &is_dynamic) && supports_dynamic)
                 {
                     changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody dynamic", [&]()
                     {
                         return SetSceneObjectAttributePhysicsDynamic(state.selected_item_path, object.name, attribute_index, is_dynamic);
+                    }) || changed;
+                }
+                ImGui::EndDisabled();
+                if (!supports_dynamic)
+                {
+                    ImGui::TextDisabled("Mesh colliders are static-only.");
+                }
+
+                bool lock_rotation_x = attribute.rigidbody.lock_rotation_x;
+                if (ImGui::Checkbox("Lock Rotation X", &lock_rotation_x))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody rotation lock x", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsLockRotationX(state.selected_item_path, object.name, attribute_index, lock_rotation_x);
+                    }) || changed;
+                }
+
+                bool lock_rotation_y = attribute.rigidbody.lock_rotation_y;
+                if (ImGui::Checkbox("Lock Rotation Y", &lock_rotation_y))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody rotation lock y", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsLockRotationY(state.selected_item_path, object.name, attribute_index, lock_rotation_y);
+                    }) || changed;
+                }
+
+                bool lock_rotation_z = attribute.rigidbody.lock_rotation_z;
+                if (ImGui::Checkbox("Lock Rotation Z", &lock_rotation_z))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody rotation lock z", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsLockRotationZ(state.selected_item_path, object.name, attribute_index, lock_rotation_z);
                     }) || changed;
                 }
 
@@ -359,7 +401,7 @@ bool RenderAttributeSection(
                     }) || changed;
                 }
 
-                if (current_shape == SceneObjectPhysicsShape::Sphere)
+                if (current_shape == SceneObjectPhysicsShape::Sphere || current_shape == SceneObjectPhysicsShape::Capsule)
                 {
                     float radius = attribute.rigidbody.radius;
                     if (ImGui::DragFloat("Radius", &radius, 0.01f, 0.01f, 10000.0f, "%.3f"))
@@ -369,6 +411,19 @@ bool RenderAttributeSection(
                         {
                             return SetSceneObjectAttributePhysicsRadius(state.selected_item_path, object.name, attribute_index, clamped);
                         }) || changed;
+                    }
+
+                    if (current_shape == SceneObjectPhysicsShape::Capsule)
+                    {
+                        float capsule_half_height = attribute.rigidbody.capsule_half_height;
+                        if (ImGui::DragFloat("Capsule Half Height", &capsule_half_height, 0.01f, 0.0f, 10000.0f, "%.3f"))
+                        {
+                            const float clamped = (std::max)(0.0f, capsule_half_height);
+                            changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody capsule half height", [&]()
+                            {
+                                return SetSceneObjectAttributePhysicsCapsuleHalfHeight(state.selected_item_path, object.name, attribute_index, clamped);
+                            }) || changed;
+                        }
                     }
                 }
                 else if (current_shape == SceneObjectPhysicsShape::Box)

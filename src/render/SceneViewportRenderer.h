@@ -101,6 +101,7 @@ public:
     {
         std::filesystem::path model_path;
         std::string name;
+        SceneVector3 model_visual_offset = {0.0f, 0.0f, 0.0f};
         SceneVector3 local_position = {0.0f, 0.0f, 0.0f};
         SceneVector3 local_rotation = {0.0f, 0.0f, 0.0f};
         SceneVector3 local_scale = {1.0f, 1.0f, 1.0f};

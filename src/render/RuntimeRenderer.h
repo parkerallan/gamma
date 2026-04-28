@@ -88,6 +88,7 @@ public:
     {
         std::filesystem::path model_path;
         std::string name;
+        SceneVector3 model_visual_offset = {0.0f, 0.0f, 0.0f};
         std::array<float, 16> model_matrix{};
         std::vector<std::filesystem::path> script_paths;
     };
@@ -118,6 +119,7 @@ public:
         std::string name;
         std::string model_path;
         std::string script_path;
+        SceneVector3 model_visual_offset = {0.0f, 0.0f, 0.0f};
         SceneVector3 position = {0.0f, 0.0f, 0.0f};
         SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
         SceneVector3 scale = {1.0f, 1.0f, 1.0f};
@@ -229,6 +231,7 @@ private:
     std::unordered_set<std::uint64_t> script_timer_pending_clear_;
     std::unordered_map<std::string, RuntimeSpawnedObject> runtime_spawned_objects_;
     std::unordered_set<std::string> runtime_destroyed_objects_;
+    std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_;
     std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_rotation_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_scale_overrides_;

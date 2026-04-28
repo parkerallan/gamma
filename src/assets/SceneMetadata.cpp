@@ -187,6 +187,16 @@ SceneObjectPhysicsShape ParseSceneObjectPhysicsShape(std::string_view value)
         return SceneObjectPhysicsShape::Sphere;
     }
 
+    if (normalized == "capsule")
+    {
+        return SceneObjectPhysicsShape::Capsule;
+    }
+
+    if (normalized == "mesh")
+    {
+        return SceneObjectPhysicsShape::Mesh;
+    }
+
     return SceneObjectPhysicsShape::None;
 }
 
@@ -384,9 +394,13 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeActive:") ||
     StartsWith(line, "AttributePhysicsShape:") ||
     StartsWith(line, "AttributePhysicsDynamic:") ||
+    StartsWith(line, "AttributePhysicsLockRotationX:") ||
+    StartsWith(line, "AttributePhysicsLockRotationY:") ||
+    StartsWith(line, "AttributePhysicsLockRotationZ:") ||
     StartsWith(line, "AttributePhysicsMass:") ||
     StartsWith(line, "AttributePhysicsFriction:") ||
     StartsWith(line, "AttributePhysicsRadius:") ||
+    StartsWith(line, "AttributePhysicsCapsuleHalfHeight:") ||
     StartsWith(line, "AttributePhysicsHalfExtent:") ||
     StartsWith(line, "AttributePhysicsLinearDamping:") ||
     StartsWith(line, "AttributePhysicsAngularDamping:");
@@ -1013,7 +1027,7 @@ bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::st
                 break;
             }
 
-            if (StartsWith(trimmed, "Position:") || StartsWith(trimmed, "Rotation:") || StartsWith(trimmed, "Scale:") || StartsWith(trimmed, "PhysicsShape:") || StartsWith(trimmed, "PhysicsDynamic:") || StartsWith(trimmed, "PhysicsMass:") || StartsWith(trimmed, "PhysicsFriction:") || StartsWith(trimmed, "PhysicsRadius:") || StartsWith(trimmed, "PhysicsHalfExtent:") || StartsWith(trimmed, "PhysicsLinearDamping:") || StartsWith(trimmed, "PhysicsAngularDamping:") || StartsWith(trimmed, "Attributes:") || StartsWith(trimmed, "Model:") || StartsWith(trimmed, "Script:") || StartsWith(trimmed, "Graph:"))
+            if (StartsWith(trimmed, "Position:") || StartsWith(trimmed, "Rotation:") || StartsWith(trimmed, "Scale:") || StartsWith(trimmed, "PhysicsShape:") || StartsWith(trimmed, "PhysicsDynamic:") || StartsWith(trimmed, "PhysicsMass:") || StartsWith(trimmed, "PhysicsFriction:") || StartsWith(trimmed, "PhysicsRadius:") || StartsWith(trimmed, "PhysicsHalfExtent:") || StartsWith(trimmed, "PhysicsLinearDamping:") || StartsWith(trimmed, "PhysicsAngularDamping:") || StartsWith(trimmed, "Attributes:") || StartsWith(trimmed, "Model:") || StartsWith(trimmed, "ModelVisualOffset:") || StartsWith(trimmed, "Script:") || StartsWith(trimmed, "Graph:"))
             {
                 existing_parent_index = index;
                 break;
@@ -1109,6 +1123,18 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseBool(ExtractValue(trimmed, "PhysicsDynamic:"), current_object->physics_is_dynamic);
         }
+        else if (StartsWith(trimmed, "PhysicsLockRotationX:"))
+        {
+            ParseBool(ExtractValue(trimmed, "PhysicsLockRotationX:"), current_object->physics_lock_rotation_x);
+        }
+        else if (StartsWith(trimmed, "PhysicsLockRotationY:"))
+        {
+            ParseBool(ExtractValue(trimmed, "PhysicsLockRotationY:"), current_object->physics_lock_rotation_y);
+        }
+        else if (StartsWith(trimmed, "PhysicsLockRotationZ:"))
+        {
+            ParseBool(ExtractValue(trimmed, "PhysicsLockRotationZ:"), current_object->physics_lock_rotation_z);
+        }
         else if (StartsWith(trimmed, "PhysicsMass:"))
         {
             ParseScalar(ExtractValue(trimmed, "PhysicsMass:"), current_object->physics_mass);
@@ -1120,6 +1146,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "PhysicsRadius:"))
         {
             ParseScalar(ExtractValue(trimmed, "PhysicsRadius:"), current_object->physics_radius);
+        }
+        else if (StartsWith(trimmed, "PhysicsCapsuleHalfHeight:"))
+        {
+            ParseScalar(ExtractValue(trimmed, "PhysicsCapsuleHalfHeight:"), current_object->physics_capsule_half_height);
         }
         else if (StartsWith(trimmed, "PhysicsHalfExtent:"))
         {
@@ -1196,6 +1226,21 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             ParseBool(ExtractValue(trimmed, "AttributePhysicsDynamic:"), current_attribute->rigidbody.is_dynamic);
             current_object->physics_is_dynamic = current_attribute->rigidbody.is_dynamic;
         }
+        else if (StartsWith(trimmed, "AttributePhysicsLockRotationX:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributePhysicsLockRotationX:"), current_attribute->rigidbody.lock_rotation_x);
+            current_object->physics_lock_rotation_x = current_attribute->rigidbody.lock_rotation_x;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsLockRotationY:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributePhysicsLockRotationY:"), current_attribute->rigidbody.lock_rotation_y);
+            current_object->physics_lock_rotation_y = current_attribute->rigidbody.lock_rotation_y;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsLockRotationZ:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributePhysicsLockRotationZ:"), current_attribute->rigidbody.lock_rotation_z);
+            current_object->physics_lock_rotation_z = current_attribute->rigidbody.lock_rotation_z;
+        }
         else if (StartsWith(trimmed, "AttributePhysicsMass:") && current_attribute != nullptr)
         {
             ParseScalar(ExtractValue(trimmed, "AttributePhysicsMass:"), current_attribute->rigidbody.mass);
@@ -1210,6 +1255,11 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseScalar(ExtractValue(trimmed, "AttributePhysicsRadius:"), current_attribute->rigidbody.radius);
             current_object->physics_radius = current_attribute->rigidbody.radius;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsCapsuleHalfHeight:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributePhysicsCapsuleHalfHeight:"), current_attribute->rigidbody.capsule_half_height);
+            current_object->physics_capsule_half_height = current_attribute->rigidbody.capsule_half_height;
         }
         else if (StartsWith(trimmed, "AttributePhysicsHalfExtent:") && current_attribute != nullptr)
         {
@@ -1230,6 +1280,11 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             current_attribute = nullptr;
             current_object->model_path = ExtractValue(trimmed, "Model:");
+        }
+        else if (StartsWith(trimmed, "ModelVisualOffset:"))
+        {
+            current_attribute = nullptr;
+            ParseVector3(ExtractValue(trimmed, "ModelVisualOffset:"), current_object->model_visual_offset);
         }
         else if (StartsWith(trimmed, "Script:"))
         {
@@ -1292,6 +1347,11 @@ bool SetSceneObjectScale(const std::filesystem::path& scene_path, const std::str
     return SetSceneObjectVector3(scene_path, object_name, "Scale", scale);
 }
 
+bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset)
+{
+    return SetSceneObjectVector3(scene_path, object_name, "ModelVisualOffset", model_visual_offset);
+}
+
 bool SetSceneObjectPhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectPhysicsShape shape)
 {
     const char* shape_name = "None";
@@ -1302,6 +1362,14 @@ bool SetSceneObjectPhysicsShape(const std::filesystem::path& scene_path, const s
     else if (shape == SceneObjectPhysicsShape::Sphere)
     {
         shape_name = "Sphere";
+    }
+    else if (shape == SceneObjectPhysicsShape::Capsule)
+    {
+        shape_name = "Capsule";
+    }
+    else if (shape == SceneObjectPhysicsShape::Mesh)
+    {
+        shape_name = "Mesh";
     }
 
     return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
@@ -1595,12 +1663,35 @@ bool SetSceneObjectAttributePhysicsShape(const std::filesystem::path& scene_path
     {
         shape_string = "Sphere";
     }
+    else if (shape == SceneObjectPhysicsShape::Capsule)
+    {
+        shape_string = "Capsule";
+    }
+    else if (shape == SceneObjectPhysicsShape::Mesh)
+    {
+        shape_string = "Mesh";
+    }
     return SetSceneObjectAttributeStringValue("AttributePhysicsShape", scene_path, object_name, attribute_index, shape_string);
 }
 
 bool SetSceneObjectAttributePhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool is_dynamic)
 {
     return SetSceneObjectAttributeBoolean("AttributePhysicsDynamic", scene_path, object_name, attribute_index, is_dynamic);
+}
+
+bool SetSceneObjectAttributePhysicsLockRotationX(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked)
+{
+    return SetSceneObjectAttributeBoolean("AttributePhysicsLockRotationX", scene_path, object_name, attribute_index, locked);
+}
+
+bool SetSceneObjectAttributePhysicsLockRotationY(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked)
+{
+    return SetSceneObjectAttributeBoolean("AttributePhysicsLockRotationY", scene_path, object_name, attribute_index, locked);
+}
+
+bool SetSceneObjectAttributePhysicsLockRotationZ(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked)
+{
+    return SetSceneObjectAttributeBoolean("AttributePhysicsLockRotationZ", scene_path, object_name, attribute_index, locked);
 }
 
 bool SetSceneObjectAttributePhysicsMass(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float mass)
@@ -1616,6 +1707,11 @@ bool SetSceneObjectAttributePhysicsFriction(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributePhysicsRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float radius)
 {
     return SetSceneObjectAttributeScalar("AttributePhysicsRadius", scene_path, object_name, attribute_index, radius);
+}
+
+bool SetSceneObjectAttributePhysicsCapsuleHalfHeight(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float capsule_half_height)
+{
+    return SetSceneObjectAttributeScalar("AttributePhysicsCapsuleHalfHeight", scene_path, object_name, attribute_index, capsule_half_height);
 }
 
 bool SetSceneObjectAttributePhysicsHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent)
@@ -1644,7 +1740,8 @@ bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::s
     {
         for (std::size_t index = object_start + 1; index < object_end;)
         {
-            if (StartsWith(TrimCopy(lines[index]), "Model:"))
+            const std::string trimmed = TrimCopy(lines[index]);
+            if (StartsWith(trimmed, "Model:") || StartsWith(trimmed, "ModelVisualOffset:"))
             {
                 lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(index));
                 --object_end;

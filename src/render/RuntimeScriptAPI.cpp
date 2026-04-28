@@ -554,6 +554,7 @@ int RuntimeRenderer::LuaWorldSpawnFromObject(lua_State* lua_state)
     {
         object.model_path = spawned_it->second.model_path;
         object.script_path = spawned_it->second.script_path;
+        object.model_visual_offset = spawned_it->second.model_visual_offset;
         object.rotation = spawned_it->second.rotation;
         object.scale = spawned_it->second.scale;
         source_found = true;
@@ -568,6 +569,7 @@ int RuntimeRenderer::LuaWorldSpawnFromObject(lua_State* lua_state)
             }
 
             object.model_path = scene_object.model_path;
+            object.model_visual_offset = scene_object.model_visual_offset;
             object.rotation = scene_object.rotation;
             object.scale = scene_object.scale;
             if (!scene_object.script_paths.empty())

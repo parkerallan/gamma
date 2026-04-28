@@ -557,7 +557,28 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         {
             ImGui::Spacing();
             ImGui::TextUnformatted("Settings");
-            ImGui::TextDisabled("Transform source: Position / Rotation / Scale");
+
+            float model_visual_offset[3] = {
+                object_it->model_visual_offset[0],
+                object_it->model_visual_offset[1],
+                object_it->model_visual_offset[2],
+            };
+            if (ImGui::DragFloat3("Visual Offset", model_visual_offset, 0.01f))
+            {
+                if (SaveSceneObjectVector3Edit(
+                        state,
+                        *object_it,
+                        "model visual offset",
+                        {model_visual_offset[0], model_visual_offset[1], model_visual_offset[2]},
+                        SetSceneObjectModelVisualOffset))
+                {
+                    has_cached_scene_metadata_ = false;
+                    ImGui::PopID();
+                    return;
+                }
+            }
+
+            ImGui::TextDisabled("Applies to rendering only. Rigidbody collisions use object transform.");
         }
         if (!keep_model_attachment)
         {

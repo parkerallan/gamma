@@ -13,6 +13,8 @@ enum class SceneObjectPhysicsShape
     None,
     Box,
     Sphere,
+    Capsule,
+    Mesh,
 };
 
 enum class SceneObjectAttributeKind
@@ -58,9 +60,13 @@ struct SceneObjectRigidbodyAttributes
 {
     SceneObjectPhysicsShape shape = SceneObjectPhysicsShape::None;
     bool is_dynamic = false;
+    bool lock_rotation_x = false;
+    bool lock_rotation_y = false;
+    bool lock_rotation_z = false;
     float mass = 1.0f;
     float friction = 0.0f;
     float radius = 0.5f;
+    float capsule_half_height = 0.5f;
     SceneVector3 half_extent = {0.5f, 0.5f, 0.5f};
     float linear_damping = 0.05f;
     float angular_damping = 0.05f;
@@ -85,14 +91,19 @@ struct SceneObjectMetadata
     SceneVector3 scale = {1.0f, 1.0f, 1.0f};
     std::vector<SceneObjectAttribute> attributes;
     std::string model_path;
+    SceneVector3 model_visual_offset = {0.0f, 0.0f, 0.0f};
     std::vector<std::string> script_paths;
     std::vector<std::string> graph_paths;
     // Physics
     SceneObjectPhysicsShape physics_shape = SceneObjectPhysicsShape::None;
     bool physics_is_dynamic = false;
+    bool physics_lock_rotation_x = false;
+    bool physics_lock_rotation_y = false;
+    bool physics_lock_rotation_z = false;
     float physics_mass = 1.0f;
     float physics_friction = 0.0f;
     float physics_radius = 0.5f;
+    float physics_capsule_half_height = 0.5f;
     SceneVector3 physics_half_extent = {0.5f, 0.5f, 0.5f};
     float physics_linear_damping = 0.05f;
     float physics_angular_damping = 0.05f;
@@ -150,13 +161,18 @@ bool SetSceneObjectAttributeFarClip(const std::filesystem::path& scene_path, con
 bool SetSceneObjectCameraActive(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool active);
 bool SetSceneObjectAttributePhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectPhysicsShape shape);
 bool SetSceneObjectAttributePhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool is_dynamic);
+bool SetSceneObjectAttributePhysicsLockRotationX(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked);
+bool SetSceneObjectAttributePhysicsLockRotationY(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked);
+bool SetSceneObjectAttributePhysicsLockRotationZ(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked);
 bool SetSceneObjectAttributePhysicsMass(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float mass);
 bool SetSceneObjectAttributePhysicsFriction(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float friction);
 bool SetSceneObjectAttributePhysicsRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float radius);
+bool SetSceneObjectAttributePhysicsCapsuleHalfHeight(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float capsule_half_height);
 bool SetSceneObjectAttributePhysicsHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent);
 bool SetSceneObjectAttributePhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float linear_damping);
 bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float angular_damping);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
+bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);
 bool AddSceneObjectScript(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& script_path);
 bool RemoveSceneObjectScript(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& script_path);

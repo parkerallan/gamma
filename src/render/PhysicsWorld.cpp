@@ -1,4 +1,5 @@
 #include "render/PhysicsWorld.h"
+#include "assets/ModelAsset.h"
 
 // Jolt headers — order matters
 #include <Jolt/Jolt.h>
@@ -12,6 +13,8 @@
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -169,6 +172,70 @@ static BroadPhaseLayerInterfaceImpl      g_broad_phase_layer_interface;
 static ObjectVsBroadPhaseLayerFilterImpl g_object_vs_broad_phase_filter;
 static ObjectLayerPairFilterImpl         g_object_layer_pair_filter;
 
+namespace
+{
+JPH::Quat BuildQuaternionFromRotationBasis(const JPH::Vec3& axis_x, const JPH::Vec3& axis_y, const JPH::Vec3& axis_z)
+{
+    const float m00 = axis_x.GetX();
+    const float m01 = axis_y.GetX();
+    const float m02 = axis_z.GetX();
+    const float m10 = axis_x.GetY();
+    const float m11 = axis_y.GetY();
+    const float m12 = axis_z.GetY();
+    const float m20 = axis_x.GetZ();
+    const float m21 = axis_y.GetZ();
+    const float m22 = axis_z.GetZ();
+
+    float qw = 1.0f;
+    float qx = 0.0f;
+    float qy = 0.0f;
+    float qz = 0.0f;
+
+    const float trace = m00 + m11 + m22;
+    if (trace > 0.0f)
+    {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        qw = 0.25f * s;
+        qx = (m21 - m12) / s;
+        qy = (m02 - m20) / s;
+        qz = (m10 - m01) / s;
+    }
+    else if (m00 > m11 && m00 > m22)
+    {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        qw = (m21 - m12) / s;
+        qx = 0.25f * s;
+        qy = (m01 + m10) / s;
+        qz = (m02 + m20) / s;
+    }
+    else if (m11 > m22)
+    {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        qw = (m02 - m20) / s;
+        qx = (m01 + m10) / s;
+        qy = 0.25f * s;
+        qz = (m12 + m21) / s;
+    }
+    else
+    {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        qw = (m10 - m01) / s;
+        qx = (m02 + m20) / s;
+        qy = (m12 + m21) / s;
+        qz = 0.25f * s;
+    }
+
+    const float length = std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+    if (length <= 0.000001f)
+    {
+        return JPH::Quat::sIdentity();
+    }
+
+    const float inv_length = 1.0f / length;
+    return JPH::Quat(qx * inv_length, qy * inv_length, qz * inv_length, qw * inv_length);
+}
+}
+
 // ---------------------------------------------------------------------------
 // PhysicsWorld
 // ---------------------------------------------------------------------------
@@ -262,7 +329,8 @@ void PhysicsWorld::Shutdown()
 
 void PhysicsWorld::BuildFromScene(
     const SceneMetadata& scene_metadata,
-    const std::unordered_map<std::string, std::array<float, 16>>& world_matrices)
+    const std::unordered_map<std::string, std::array<float, 16>>& world_matrices,
+    const std::filesystem::path& project_root)
 {
     if (!initialized_)
     {
@@ -295,33 +363,131 @@ void PhysicsWorld::BuildFromScene(
             continue;
         }
 
-        // Extract translation from world matrix or fall back to object position
+        // Extract translation, rotation, and scale from world matrix when available.
         SceneVector3 position = object.position;
+        JPH::Quat rotation = JPH::Quat::sIdentity();
+        SceneVector3 world_scale = object.scale;
         const auto mat_it = world_matrices.find(object.name);
         if (mat_it != world_matrices.end())
         {
-            position = {mat_it->second[12], mat_it->second[13], mat_it->second[14]};
+            const std::array<float, 16>& matrix = mat_it->second;
+            position = {matrix[12], matrix[13], matrix[14]};
+
+            const JPH::Vec3 axis_x(matrix[0], matrix[1], matrix[2]);
+            const JPH::Vec3 axis_y(matrix[4], matrix[5], matrix[6]);
+            const JPH::Vec3 axis_z(matrix[8], matrix[9], matrix[10]);
+
+            const float scale_x = (std::max)(0.0001f, std::sqrt(axis_x.GetX() * axis_x.GetX() + axis_x.GetY() * axis_x.GetY() + axis_x.GetZ() * axis_x.GetZ()));
+            const float scale_y = (std::max)(0.0001f, std::sqrt(axis_y.GetX() * axis_y.GetX() + axis_y.GetY() * axis_y.GetY() + axis_y.GetZ() * axis_y.GetZ()));
+            const float scale_z = (std::max)(0.0001f, std::sqrt(axis_z.GetX() * axis_z.GetX() + axis_z.GetY() * axis_z.GetY() + axis_z.GetZ() * axis_z.GetZ()));
+
+            world_scale = {scale_x, scale_y, scale_z};
+            rotation = BuildQuaternionFromRotationBasis(
+                JPH::Vec3(axis_x.GetX() / scale_x, axis_x.GetY() / scale_x, axis_x.GetZ() / scale_x),
+                JPH::Vec3(axis_y.GetX() / scale_y, axis_y.GetY() / scale_y, axis_y.GetZ() / scale_y),
+                JPH::Vec3(axis_z.GetX() / scale_z, axis_z.GetY() / scale_z, axis_z.GetZ() / scale_z));
         }
 
         JPH::RefConst<JPH::Shape> shape;
         if (object.physics_shape == SceneObjectPhysicsShape::Box)
         {
             const JPH::Vec3 half_extent(
-                std::max(0.01f, object.physics_half_extent[0]),
-                std::max(0.01f, object.physics_half_extent[1]),
-                std::max(0.01f, object.physics_half_extent[2]));
+                std::max(0.01f, object.physics_half_extent[0] * std::abs(world_scale[0])),
+                std::max(0.01f, object.physics_half_extent[1] * std::abs(world_scale[1])),
+                std::max(0.01f, object.physics_half_extent[2] * std::abs(world_scale[2])));
             shape = new JPH::BoxShape(half_extent);
         }
         else if (object.physics_shape == SceneObjectPhysicsShape::Sphere)
         {
-            shape = new JPH::SphereShape(std::max(0.01f, object.physics_radius));
+            const float uniform_scale = (std::max)(std::abs(world_scale[0]), (std::max)(std::abs(world_scale[1]), std::abs(world_scale[2])));
+            shape = new JPH::SphereShape(std::max(0.01f, object.physics_radius * uniform_scale));
+        }
+        else if (object.physics_shape == SceneObjectPhysicsShape::Capsule)
+        {
+            const float radius_scale = (std::max)(std::abs(world_scale[0]), std::abs(world_scale[2]));
+            const float scaled_radius = std::max(0.01f, object.physics_radius * radius_scale);
+            const float scaled_half_height = std::max(0.0f, object.physics_capsule_half_height * std::abs(world_scale[1]));
+            shape = new JPH::CapsuleShape(scaled_half_height, scaled_radius);
+        }
+        else if (object.physics_shape == SceneObjectPhysicsShape::Mesh)
+        {
+            if (object.model_path.empty())
+            {
+                continue;
+            }
+
+            ModelAsset model_asset = LoadModelAsset(object.model_path);
+            if (!model_asset.loaded)
+            {
+                const std::filesystem::path rooted_model_path = project_root.empty()
+                    ? std::filesystem::path(object.model_path)
+                    : (project_root / object.model_path);
+                model_asset = LoadModelAsset(rooted_model_path);
+            }
+            if (!model_asset.loaded)
+            {
+                continue;
+            }
+
+            const float sx = std::abs(world_scale[0]);
+            const float sy = std::abs(world_scale[1]);
+            const float sz = std::abs(world_scale[2]);
+
+            JPH::VertexList vertices;
+            JPH::IndexedTriangleList triangles;
+            std::uint32_t total_vertex_count = 0;
+            std::uint32_t total_triangle_count = 0;
+            for (const ModelMeshAsset& mesh_asset : model_asset.meshes)
+            {
+                total_vertex_count += static_cast<std::uint32_t>(mesh_asset.vertices.size());
+                total_triangle_count += static_cast<std::uint32_t>(mesh_asset.indices.size() / 3);
+            }
+            vertices.reserve(total_vertex_count);
+            triangles.reserve(total_triangle_count);
+
+            for (const ModelMeshAsset& mesh_asset : model_asset.meshes)
+            {
+                const std::uint32_t base_index = static_cast<std::uint32_t>(vertices.size());
+
+                for (const ModelVertex& vertex : mesh_asset.vertices)
+                {
+                    vertices.emplace_back(
+                        vertex.position[0] * sx,
+                        vertex.position[1] * sy,
+                        vertex.position[2] * sz);
+                }
+
+                const std::size_t index_count = mesh_asset.indices.size();
+                for (std::size_t index = 0; index + 2 < index_count; index += 3)
+                {
+                    triangles.emplace_back(
+                        base_index + mesh_asset.indices[index],
+                        base_index + mesh_asset.indices[index + 1],
+                        base_index + mesh_asset.indices[index + 2]);
+                }
+            }
+
+            if (triangles.empty())
+            {
+                continue;
+            }
+
+            JPH::MeshShapeSettings mesh_settings(std::move(vertices), std::move(triangles));
+            JPH::Shape::ShapeResult mesh_shape_result = mesh_settings.Create();
+            if (!mesh_shape_result.IsValid())
+            {
+                continue;
+            }
+
+            shape = mesh_shape_result.Get();
         }
         else
         {
             continue;
         }
 
-        const bool is_dynamic = object.physics_is_dynamic;
+        const bool is_mesh_shape = object.physics_shape == SceneObjectPhysicsShape::Mesh;
+        const bool is_dynamic = object.physics_is_dynamic && !is_mesh_shape;
         const JPH::ObjectLayer layer = is_dynamic ? Layers::MOVING : Layers::NON_MOVING;
         const JPH::EMotionType motion = is_dynamic
             ? JPH::EMotionType::Dynamic
@@ -330,9 +496,31 @@ void PhysicsWorld::BuildFromScene(
         JPH::BodyCreationSettings settings(
             shape,
             JPH::RVec3(position[0], position[1], position[2]),
-            JPH::Quat::sIdentity(),
+            rotation,
             motion,
             layer);
+        if (is_dynamic)
+        {
+            settings.mAllowedDOFs =
+                JPH::EAllowedDOFs::TranslationX |
+                JPH::EAllowedDOFs::TranslationY |
+                JPH::EAllowedDOFs::TranslationZ;
+            if (!object.physics_lock_rotation_x)
+            {
+                settings.mAllowedDOFs |= JPH::EAllowedDOFs::RotationX;
+            }
+            if (!object.physics_lock_rotation_y)
+            {
+                settings.mAllowedDOFs |= JPH::EAllowedDOFs::RotationY;
+            }
+            if (!object.physics_lock_rotation_z)
+            {
+                settings.mAllowedDOFs |= JPH::EAllowedDOFs::RotationZ;
+            }
+        }
+        settings.mMotionQuality = is_dynamic
+            ? JPH::EMotionQuality::LinearCast
+            : JPH::EMotionQuality::Discrete;
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
         settings.mMassPropertiesOverride.mMass = std::max(0.001f, object.physics_mass);
         settings.mLinearDamping  = object.physics_linear_damping;
@@ -370,7 +558,8 @@ void PhysicsWorld::Step(float delta_time)
     }
 
     const float clamped = std::min(delta_time, 0.1f);
-    constexpr int collision_steps = 1;
+    constexpr float target_step = 1.0f / 120.0f;
+    const int collision_steps = (std::max)(1, (std::min)(4, static_cast<int>(std::ceil(clamped / target_step))));
     physics_system_->Update(clamped, collision_steps, temp_allocator_, job_system_);
 }
 
@@ -537,6 +726,38 @@ std::unordered_map<std::string, SceneVector3> PhysicsWorld::GetSimulatedPosition
             static_cast<float>(pos.GetY()),
             static_cast<float>(pos.GetZ())};
     }
+    return result;
+}
+
+std::unordered_map<std::string, PhysicsBodyTransform> PhysicsWorld::GetSimulatedTransforms() const
+{
+    std::unordered_map<std::string, PhysicsBodyTransform> result;
+    if (!initialized_)
+    {
+        return result;
+    }
+
+    const JPH::BodyInterface& body_interface = physics_system_->GetBodyInterface();
+    for (const auto& [name, record] : body_records_)
+    {
+        if (!record.is_dynamic)
+        {
+            continue;
+        }
+
+        const JPH::BodyID id(record.body_id_value);
+        if (id.IsInvalid())
+        {
+            continue;
+        }
+
+        const JPH::RVec3 pos = body_interface.GetPosition(id);
+        const JPH::Quat rot = body_interface.GetRotation(id);
+        result[name] = PhysicsBodyTransform{
+            {static_cast<float>(pos.GetX()), static_cast<float>(pos.GetY()), static_cast<float>(pos.GetZ())},
+            {rot.GetX(), rot.GetY(), rot.GetZ(), rot.GetW()}};
+    }
+
     return result;
 }
 

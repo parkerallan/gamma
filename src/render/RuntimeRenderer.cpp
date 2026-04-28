@@ -191,6 +191,62 @@ void BuildTransformMatrix(const SceneVector3& position, const SceneVector3& rota
     MultiplyMatrix(translation_matrix, temp_a, matrix);
 }
 
+void ApplyLocalModelOffset(float* matrix, const SceneVector3& offset)
+{
+    if (std::abs(offset[0]) <= 0.000001f && std::abs(offset[1]) <= 0.000001f && std::abs(offset[2]) <= 0.000001f)
+    {
+        return;
+    }
+
+    matrix[12] += offset[0];
+    matrix[13] += offset[1];
+    matrix[14] += offset[2];
+}
+
+SceneVector3 ExtractScaleFromMatrix(const float* matrix)
+{
+    return SceneVector3{
+        Length(Vec3{matrix[0], matrix[1], matrix[2]}),
+        Length(Vec3{matrix[4], matrix[5], matrix[6]}),
+        Length(Vec3{matrix[8], matrix[9], matrix[10]}),
+    };
+}
+
+void BuildTransformMatrixFromPhysicsTransform(const PhysicsBodyTransform& transform, const SceneVector3& scale, float* matrix)
+{
+    const float x = transform.rotation[0];
+    const float y = transform.rotation[1];
+    const float z = transform.rotation[2];
+    const float w = transform.rotation[3];
+
+    const float xx = x * x;
+    const float yy = y * y;
+    const float zz = z * z;
+    const float xy = x * y;
+    const float xz = x * z;
+    const float yz = y * z;
+    const float wx = w * x;
+    const float wy = w * y;
+    const float wz = w * z;
+
+    SetIdentity(matrix);
+    matrix[0] = (1.0f - 2.0f * (yy + zz)) * scale[0];
+    matrix[1] = (2.0f * (xy + wz)) * scale[0];
+    matrix[2] = (2.0f * (xz - wy)) * scale[0];
+
+    matrix[4] = (2.0f * (xy - wz)) * scale[1];
+    matrix[5] = (1.0f - 2.0f * (xx + zz)) * scale[1];
+    matrix[6] = (2.0f * (yz + wx)) * scale[1];
+
+    matrix[8] = (2.0f * (xz + wy)) * scale[2];
+    matrix[9] = (2.0f * (yz - wx)) * scale[2];
+    matrix[10] = (1.0f - 2.0f * (xx + yy)) * scale[2];
+
+    matrix[12] = transform.position[0];
+    matrix[13] = transform.position[1];
+    matrix[14] = transform.position[2];
+}
+
 Vec3 TransformPoint(const float* matrix, const Vec3& point)
 {
     return Vec3{
@@ -957,6 +1013,7 @@ void RuntimeRenderer::Shutdown()
     ClearScriptTimers();
     runtime_spawned_objects_.clear();
     runtime_destroyed_objects_.clear();
+    physics_object_transforms_.clear();
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
@@ -1013,6 +1070,7 @@ bool RuntimeRenderer::StartSession(
     ClearScriptTimers();
     runtime_spawned_objects_.clear();
     runtime_destroyed_objects_.clear();
+    physics_object_transforms_.clear();
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
@@ -1071,10 +1129,17 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
 
     if (!cache_valid)
     {
+        const bool scene_changed = has_cached_scene_metadata_ && cached_scene_path_ == scene_path_;
         cached_scene_path_ = scene_path_;
         cached_scene_write_time_ = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
         cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
         has_cached_scene_metadata_ = true;
+
+        if (scene_changed)
+        {
+            physics_world_built_ = false;
+            physics_object_transforms_.clear();
+        }
     }
 
     return cached_scene_metadata_;
@@ -2242,6 +2307,7 @@ bool RuntimeRenderer::BuildQueuedScene(
         }
 
         const auto pose_it = resolved_object_poses.find(object.name);
+        queued_object.model_visual_offset = object.model_visual_offset;
         if (pose_it != resolved_object_poses.end())
         {
             queued_object.model_matrix = pose_it->second.world_matrix;
@@ -2254,8 +2320,16 @@ bool RuntimeRenderer::BuildQueuedScene(
         const bool has_position_override = script_object_position_overrides_.count(queued_object.name) > 0;
         const bool has_rotation_override = script_object_rotation_overrides_.count(queued_object.name) > 0;
         const bool has_scale_override    = script_object_scale_overrides_.count(queued_object.name) > 0;
+        const auto physics_transform_it = physics_object_transforms_.find(queued_object.name);
 
-        if (has_rotation_override || has_scale_override)
+        if (physics_transform_it != physics_object_transforms_.end())
+        {
+            BuildTransformMatrixFromPhysicsTransform(
+                physics_transform_it->second,
+                ExtractScaleFromMatrix(queued_object.model_matrix.data()),
+                queued_object.model_matrix.data());
+        }
+        else if (has_rotation_override || has_scale_override)
         {
             const SceneVector3& pos = has_position_override
                 ? script_object_position_overrides_[queued_object.name]
@@ -2288,6 +2362,7 @@ bool RuntimeRenderer::BuildQueuedScene(
 
         QueuedSceneObject queued_object;
         queued_object.name = spawned.name;
+        queued_object.model_visual_offset = spawned.model_visual_offset;
 
         if (!spawned.model_path.empty())
         {
@@ -2423,6 +2498,7 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
         instance_input.transform = object.model_matrix;
+        ApplyLocalModelOffset(instance_input.transform.data(), object.model_visual_offset);
         instance_inputs.push_back(std::move(instance_input));
     }
 
@@ -2507,12 +2583,18 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     // Build physics world once per session (after the first BuildQueuedScene).
     if (!physics_world_built_ && physics_world_.IsInitialized())
     {
+        const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
         std::unordered_map<std::string, std::array<float, 16>> world_matrices;
-        for (const QueuedSceneObject& obj : queued_objects_)
+        world_matrices.reserve(scene_metadata.objects.size());
+        for (const SceneObjectMetadata& object : scene_metadata.objects)
         {
-            world_matrices[obj.name] = obj.model_matrix;
+            const auto pose_it = resolved_object_poses.find(object.name);
+            if (pose_it != resolved_object_poses.end())
+            {
+                world_matrices[object.name] = pose_it->second.world_matrix;
+            }
         }
-        physics_world_.BuildFromScene(scene_metadata, world_matrices);
+        physics_world_.BuildFromScene(scene_metadata, world_matrices, project_root_);
         physics_world_built_ = true;
     }
 
@@ -2524,6 +2606,7 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
             ? static_cast<float>(now_ms - script_last_tick_ms_) / 1000.0f
             : 0.0f;
         physics_world_.Step(phys_dt);
+        physics_object_transforms_ = physics_world_.GetSimulatedTransforms();
         const auto simulated = physics_world_.GetSimulatedPositions();
         for (const auto& [name, pos] : simulated)
         {

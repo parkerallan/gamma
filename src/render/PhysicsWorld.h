@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -36,6 +37,12 @@ struct PhysicsCollisionEvent
     std::string phase; // enter | stay | exit
 };
 
+struct PhysicsBodyTransform
+{
+    SceneVector3 position = {};
+    std::array<float, 4> rotation = {0.0f, 0.0f, 0.0f, 1.0f};
+};
+
 class PhysicsWorld
 {
 public:
@@ -51,7 +58,8 @@ public:
 
     // Called at the start of a play session — populates bodies from scene metadata
     void BuildFromScene(const SceneMetadata& scene_metadata,
-                        const std::unordered_map<std::string, std::array<float, 16>>& world_matrices);
+                        const std::unordered_map<std::string, std::array<float, 16>>& world_matrices,
+                        const std::filesystem::path& project_root = {});
 
     // Step the simulation. delta_time is clamped to a sane maximum.
     void Step(float delta_time);
@@ -71,6 +79,7 @@ public:
     // Reads simulated positions back into the override maps each frame.
     // Returns a map of object_name -> new world position for dynamic bodies.
     std::unordered_map<std::string, SceneVector3> GetSimulatedPositions() const;
+    std::unordered_map<std::string, PhysicsBodyTransform> GetSimulatedTransforms() const;
 
     // Returns queued collision events and clears the queue.
     std::vector<PhysicsCollisionEvent> ConsumeCollisionEvents();
