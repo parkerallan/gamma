@@ -1,0 +1,297 @@
+# Developer API
+
+This document will list every Lua function exposed by the runtime, this will be used for scripting a game rather than using node graph system. **All of these functions are subject to change**
+
+## Packages Used
+
+- `Lua` (`v5.4.7`): Scripting runtime used by all `Engine`, `Input`, `World`, `Time`, and `Physics` Lua calls.
+- `SDL3` (`release-3.4.4`): Provides key/mouse input polling, frame timing (`Time.DeltaTime` / `Time.TotalTime`), and runtime log output.
+- `Jolt Physics` (`v5.3.0`): Powers rigidbody simulation, raycasts, velocity/force APIs, and collision events exposed through `World` and `Physics`.
+
+### Notes
+
+- The developer API is a Lua layer over engine-side C++ systems; package upgrades can affect behavior and signatures.
+- Current implementation focuses on runtime gameplay scripting. Editor-specific UI packages (ImGui/ImNodeFlow/ImGuizmo) are not directly part of Lua API calls.
+
+## Globals
+
+### `Engine`
+
+#### `Engine.Log(message)`
+Quick summary: Writes a message to the engine log.
+
+```lua
+Engine.Log("Hello from Lua")
+```
+
+#### `Engine.SetObjectPosition(name, x, y, z)`
+Quick summary: Sets an object's position.
+
+```lua
+Engine.SetObjectPosition("Player", 0.0, 1.0, 0.0)
+```
+
+#### `Engine.GetObjectPosition(name)`
+Quick summary: Gets an object's position. Returns `x, y, z` or `nil` if not found.
+
+```lua
+local x, y, z = Engine.GetObjectPosition("Player")
+```
+
+#### `Engine.SetObjectRotation(name, x, y, z)`
+Quick summary: Sets an object's Euler rotation.
+
+```lua
+Engine.SetObjectRotation("Player", 0.0, 90.0, 0.0)
+```
+
+#### `Engine.GetObjectRotation(name)`
+Quick summary: Gets an object's Euler rotation. Returns `x, y, z` or `nil` if not found.
+
+```lua
+local rx, ry, rz = Engine.GetObjectRotation("Player")
+```
+
+#### `Engine.SetObjectScale(name, x, y, z)`
+Quick summary: Sets an object's scale.
+
+```lua
+Engine.SetObjectScale("Crate", 1.2, 1.2, 1.2)
+```
+
+#### `Engine.GetObjectScale(name)`
+Quick summary: Gets an object's scale. Returns `x, y, z` or `nil` if not found.
+
+```lua
+local sx, sy, sz = Engine.GetObjectScale("Crate")
+```
+
+### `Time`
+
+`Time` exposes fields, not functions.
+
+#### `Time.DeltaTime`
+Quick summary: Seconds elapsed since the previous frame.
+
+```lua
+local dt = Time.DeltaTime
+```
+
+#### `Time.TotalTime`
+Quick summary: Seconds elapsed since Play started (or since a scene load).
+
+```lua
+local t = Time.TotalTime
+```
+
+### `Input`
+
+#### `Input.IsKeyDown(keyName)`
+Quick summary: Returns `true` while a key is held.
+
+```lua
+if Input.IsKeyDown("W") then
+    Engine.Log("Moving forward")
+end
+```
+
+#### `Input.WasKeyPressed(keyName)`
+Quick summary: Returns `true` on the transition frame when a key is pressed.
+
+```lua
+if Input.WasKeyPressed("Space") then
+    Engine.Log("Jump")
+end
+```
+
+#### `Input.MousePosition()`
+Quick summary: Returns current mouse position as `x, y`.
+
+```lua
+local mx, my = Input.MousePosition()
+```
+
+#### `Input.MouseDelta()`
+Quick summary: Returns relative mouse movement this frame as `dx, dy`.
+
+```lua
+local dx, dy = Input.MouseDelta()
+```
+
+### `World`
+
+#### `World.Subscribe(eventName, handler)`
+Quick summary: Subscribes the current script instance to a named event.
+
+```lua
+World.Subscribe("Damage", function(self, sender, payload)
+    Engine.Log("Damage from " .. tostring(sender))
+end)
+```
+
+#### `World.Emit(eventName, payload)`
+Quick summary: Emits an event to all subscribers.
+
+```lua
+World.Emit("Damage", "10")
+```
+
+#### `World.Spawn(name, modelPath, x, y, z, scriptPath)`
+Quick summary: Spawns a runtime object and optionally attaches a script.
+
+```lua
+World.Spawn("Enemy_01", "Models/Enemy.glb", 4.0, 0.0, -2.0, "Scripts/Enemy.lua")
+```
+
+#### `World.SpawnFromObject(sourceName, newName, x, y, z, scriptOverride)`
+Quick summary: Spawns from an existing object template.
+
+```lua
+World.SpawnFromObject("EnemyTemplate", "Enemy_02", 6.0, 0.0, -2.0)
+```
+
+#### `World.Destroy(name)`
+Quick summary: Marks an object for runtime destruction.
+
+```lua
+World.Destroy("Enemy_01")
+```
+
+#### `World.DestroyByPrefix(prefix)`
+Quick summary: Destroys all objects whose names start with the prefix. Returns count.
+
+```lua
+local removed = World.DestroyByPrefix("Bullet_")
+```
+
+#### `World.Exists(name)`
+Quick summary: Returns `true` if an object currently exists.
+
+```lua
+if World.Exists("Boss") then
+    Engine.Log("Boss is alive")
+end
+```
+
+#### `World.GetAll()`
+Quick summary: Returns an array of all current object names.
+
+```lua
+for i, name in ipairs(World.GetAll()) do
+    Engine.Log(name)
+end
+```
+
+#### `World.FindByPrefix(prefix)`
+Quick summary: Returns object names that start with the prefix.
+
+```lua
+local enemies = World.FindByPrefix("Enemy_")
+```
+
+#### `World.GetCollisions([objectName], [phase])`
+Quick summary: Returns collision events for the current frame, optionally filtered.
+
+```lua
+local hits = World.GetCollisions("Player", "Enter")
+for i, hit in ipairs(hits) do
+    Engine.Log("Hit " .. tostring(hit.other))
+end
+```
+
+#### `World.GetCollisionsFor(objectName, [phase])`
+Quick summary: Returns collision events for one object.
+
+```lua
+local hits = World.GetCollisionsFor("Player")
+```
+
+#### `World.GetCollisionsByPhase(phase)`
+Quick summary: Returns collision events filtered by phase only.
+
+```lua
+local exits = World.GetCollisionsByPhase("Exit")
+```
+
+#### `World.SetTimeout(seconds, callback)`
+Quick summary: Runs callback once after delay. Returns timer id.
+
+```lua
+local timerId = World.SetTimeout(1.5, function(self)
+    Engine.Log("Timer fired")
+end)
+```
+
+#### `World.SetInterval(seconds, callback)`
+Quick summary: Runs callback repeatedly. Returns timer id.
+
+```lua
+local timerId = World.SetInterval(0.25, function(self)
+    Engine.Log("Tick")
+end)
+```
+
+#### `World.ClearTimer(timerId)`
+Quick summary: Stops a timeout/interval by id. Returns `true` if found.
+
+```lua
+local ok = World.ClearTimer(timerId)
+```
+
+#### `World.LoadScene(sceneNameOrPath)`
+Quick summary: Queues loading another scene on the next frame.
+
+```lua
+World.LoadScene("Level2.scene")
+```
+
+Notes:
+- If no extension is provided, `.scene` is appended automatically.
+- Relative paths are resolved from the project's `Scenes` folder.
+- Scene load resets runtime script/physics state and uses the new scene's first active camera.
+
+### `Physics`
+
+#### `Physics.Raycast(ox, oy, oz, dx, dy, dz[, maxDistance])`
+Quick summary: Casts a ray. Returns hit table or `nil`.
+
+```lua
+local hit = Physics.Raycast(0, 2, 0, 0, -1, 0, 100)
+if hit then
+    Engine.Log("Hit " .. hit.object)
+end
+```
+
+#### `Physics.SetVelocity(name, x, y, z)`
+Quick summary: Sets linear velocity for an object with a dynamic rigidbody.
+
+```lua
+Physics.SetVelocity("Player", 0.0, 5.0, 0.0)
+```
+
+#### `Physics.GetVelocity(name)`
+Quick summary: Gets linear velocity. Returns `x, y, z` or `nil`.
+
+```lua
+local vx, vy, vz = Physics.GetVelocity("Player")
+```
+
+#### `Physics.AddImpulse(name, x, y, z)`
+Quick summary: Applies an impulse to an object.
+
+```lua
+Physics.AddImpulse("Player", 0.0, 3.0, 0.0)
+```
+
+#### `Physics.AddForce(name, x, y, z)`
+Quick summary: Applies force to an object for this step.
+
+```lua
+Physics.AddForce("Player", 10.0, 0.0, 0.0)
+```
+
+## Callback Notes
+
+Typical script callbacks are `OnStart(self)` and `OnUpdate(self, dt)`.
+
+`World.Subscribe`, `World.SetTimeout`, and `World.SetInterval` must be called from an active script callback.

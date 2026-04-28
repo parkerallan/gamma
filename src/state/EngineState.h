@@ -554,6 +554,7 @@ struct EngineState
             extension == ".toml" ||
             extension == ".yml" ||
             extension == ".yaml" ||
+            extension == ".lua" ||
             extension == ".graph" ||
                 extension == ".engineproj" ||
             extension == ".scene" ||

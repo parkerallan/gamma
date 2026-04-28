@@ -4,7 +4,7 @@ if(POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
 endif()
 
-project(EngineSkeleton LANGUAGES CXX)
+project(EngineSkeleton LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -107,8 +107,7 @@ endif()
 FetchContent_Declare(
     imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    GIT_TAG a15acd87a3f3241a29ea1363ceafc680dca3a96b
 )
 FetchContent_GetProperties(imguizmo)
 if(NOT imguizmo_POPULATED)
@@ -163,6 +162,86 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
+    lua_runtime
+    GIT_REPOSITORY https://github.com/lua/lua.git
+    GIT_TAG v5.4.7
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(lua_runtime)
+if(NOT lua_runtime_POPULATED)
+    FetchContent_Populate(lua_runtime)
+endif()
+
+set(LUA_RUNTIME_SOURCE_DIR ${lua_runtime_SOURCE_DIR})
+add_library(lua_runtime STATIC
+    ${LUA_RUNTIME_SOURCE_DIR}/lapi.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lauxlib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lbaselib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lcode.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lcorolib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lctype.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ldblib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ldebug.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ldo.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ldump.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lfunc.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lgc.c
+    ${LUA_RUNTIME_SOURCE_DIR}/linit.c
+    ${LUA_RUNTIME_SOURCE_DIR}/liolib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/llex.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lmathlib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lmem.c
+    ${LUA_RUNTIME_SOURCE_DIR}/loadlib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lobject.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lopcodes.c
+    ${LUA_RUNTIME_SOURCE_DIR}/loslib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lparser.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lstate.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lstring.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lstrlib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ltable.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ltablib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/ltm.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lundump.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lutf8lib.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lvm.c
+    ${LUA_RUNTIME_SOURCE_DIR}/lzio.c
+)
+
+target_include_directories(lua_runtime PUBLIC
+    ${LUA_RUNTIME_SOURCE_DIR}
+)
+
+FetchContent_Declare(
+    joltphysics
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG v5.3.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(joltphysics)
+if(NOT joltphysics_POPULATED)
+    FetchContent_Populate(joltphysics)
+endif()
+
+set(JOLT_SOURCE_DIR ${joltphysics_SOURCE_DIR})
+file(GLOB_RECURSE JOLT_SOURCES "${JOLT_SOURCE_DIR}/Jolt/*.cpp")
+add_library(joltphysics STATIC ${JOLT_SOURCES})
+target_include_directories(joltphysics PUBLIC ${JOLT_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(joltphysics PRIVATE /W0)
+    target_compile_definitions(joltphysics PUBLIC
+        JPH_PROFILE_DISABLED
+        JPH_DEBUG_RENDERER_DISABLED
+    )
+else()
+    target_compile_options(joltphysics PRIVATE -w)
+    target_compile_definitions(joltphysics PUBLIC
+        JPH_PROFILE_DISABLED
+        JPH_DEBUG_RENDERER_DISABLED
+    )
+endif()
 
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
 set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
@@ -295,6 +374,8 @@ add_executable(engine
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
     src/render/RuntimeRenderer.cpp
+    src/render/RuntimeScriptAPI.cpp
+    src/render/PhysicsWorld.cpp
     src/render/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/render/FontInfoRenderer.cpp
@@ -316,6 +397,8 @@ target_link_libraries(engine PRIVATE
     imgui
     imguizmo
     imnodeflow
+    lua_runtime
+    joltphysics
     nlohmann_json::nlohmann_json
 )
 

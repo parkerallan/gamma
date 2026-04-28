@@ -19,14 +19,14 @@ bool IsSceneFile(const std::filesystem::path& path)
     return path.extension() == ".scene";
 }
 
-bool IsCppFile(const std::filesystem::path& path)
+bool IsScriptFile(const std::filesystem::path& path)
 {
     std::string extension = path.extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value)
     {
         return static_cast<char>(std::tolower(value));
     });
-    return extension == ".cpp";
+    return extension == ".lua";
 }
 
 bool ShouldSkipPath(const std::filesystem::path& path)
@@ -511,7 +511,7 @@ void FilesPanel::RenderNode(
             {
                 state.RequestTab(WorkspaceTab::Scene);
             }
-            else if (IsCppFile(node.path))
+            else if (IsScriptFile(node.path))
             {
                 state.RequestTab(WorkspaceTab::Editor);
             }

@@ -65,11 +65,24 @@ std::string SanitizeName(std::string value)
 
 std::string BuildScriptStub(const std::string& file_stem)
 {
-    return std::string("#include <iostream>\n\n") +
-        "void " + file_stem + "()\n" +
-        "{\n" +
-        "    std::cout << \"" + file_stem + " running\\n\";\n" +
-        "}\n";
+    return std::string("-- Script: ") + file_stem + "\n" +
+        "local script = {}\n\n" +
+        "function script:OnCreate(entity)\n" +
+    "    Engine.Log(\"" + file_stem + " created for \" .. tostring(entity))\n" +
+        "    World.Subscribe(\"Ping\", self.OnPing)\n" +
+        "end\n\n" +
+        "function script:OnPing(sender, payload)\n" +
+        "    Engine.Log(\"Ping from \" .. tostring(sender) .. \" payload=\" .. tostring(payload))\n" +
+        "end\n\n" +
+        "function script:OnUpdate(entity, delta_time)\n" +
+        "    if Input.WasKeyPressed(\"P\") then\n" +
+        "        World.Emit(\"Ping\", \"time=\" .. tostring(Time.TotalTime))\n" +
+        "    end\n" +
+        "end\n\n" +
+        "function script:OnDestroy(entity)\n" +
+        "    Engine.Log(\"" + file_stem + " destroyed for \" .. tostring(entity))\n" +
+        "end\n\n" +
+        "return script\n";
 }
 
 std::string BuildGraphStub(const std::string& graph_name)
@@ -583,7 +596,7 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
         }
 
         const std::filesystem::path script_directory = directory_path == state.project_root ? state.project_root / "Scripts" : directory_path;
-        if (ImGui::MenuItem("New Script (.cpp)"))
+        if (ImGui::MenuItem("New Script (.lua)"))
         {
             OpenCreateDialog(script_directory, CreateTarget::Script);
         }
@@ -743,9 +756,9 @@ bool CreationMenu::CreateItem(EngineState& state)
     }
 
     std::filesystem::path target_path = target_directory_ / item_name;
-    if (create_target_ == CreateTarget::Script && target_path.extension() != ".cpp")
+    if (create_target_ == CreateTarget::Script && target_path.extension() != ".lua")
     {
-        target_path += ".cpp";
+        target_path += ".lua";
     }
     else if (create_target_ == CreateTarget::Graph && target_path.extension() != ".graph")
     {

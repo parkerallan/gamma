@@ -15,6 +15,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::DirectionalLight,
     SceneObjectAttributeKind::SpotLight,
     SceneObjectAttributeKind::Camera,
+    SceneObjectAttributeKind::Rigidbody,
 };
 
 bool RefreshOpenSceneBuffer(EngineState& state)
@@ -180,10 +181,13 @@ bool RenderAttributeSection(
     bool keep_attribute = true;
     if (ImGui::CollapsingHeader(ToDisplayName(attribute.kind), &keep_attribute, ImGuiTreeNodeFlags_DefaultOpen))
     {
-        if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
+        if (attribute.kind != SceneObjectAttributeKind::Rigidbody)
         {
-            ImGui::PopID();
-            return true;
+            if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
+            {
+                ImGui::PopID();
+                return true;
+            }
         }
 
         bool changed = false;
@@ -282,6 +286,123 @@ bool RenderAttributeSection(
             if (render_camera_preview)
             {
                 render_camera_preview(state, object, attribute_index, attribute);
+            }
+            break;
+        }
+
+        case SceneObjectAttributeKind::Rigidbody:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const SceneObjectPhysicsShape current_shape = attribute.rigidbody.shape;
+            const char* shape_names[] = {"None", "Box", "Sphere"};
+            const SceneObjectPhysicsShape shape_values[] = {SceneObjectPhysicsShape::None, SceneObjectPhysicsShape::Box, SceneObjectPhysicsShape::Sphere};
+            int current_shape_index = 0;
+            for (int i = 0; i < 3; ++i)
+            {
+                if (shape_values[i] == current_shape)
+                {
+                    current_shape_index = i;
+                    break;
+                }
+            }
+
+            if (ImGui::BeginCombo("Shape", shape_names[current_shape_index]))
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    const bool selected = i == current_shape_index;
+                    if (ImGui::Selectable(shape_names[i], selected))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody shape", [&]()
+                        {
+                            return SetSceneObjectAttributePhysicsShape(state.selected_item_path, object.name, attribute_index, shape_values[i]);
+                        }) || changed;
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            if (current_shape != SceneObjectPhysicsShape::None)
+            {
+                bool is_dynamic = attribute.rigidbody.is_dynamic;
+                if (ImGui::Checkbox("Dynamic", &is_dynamic))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody dynamic", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsDynamic(state.selected_item_path, object.name, attribute_index, is_dynamic);
+                    }) || changed;
+                }
+
+                float mass = attribute.rigidbody.mass;
+                if (ImGui::DragFloat("Mass", &mass, 0.01f, 0.001f, 10000.0f, "%.3f"))
+                {
+                    const float clamped = (std::max)(0.001f, mass);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody mass", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsMass(state.selected_item_path, object.name, attribute_index, clamped);
+                    }) || changed;
+                }
+
+                float friction = attribute.rigidbody.friction;
+                if (ImGui::DragFloat("Friction", &friction, 0.005f, 0.0f, 10.0f, "%.3f"))
+                {
+                    const float clamped = (std::max)(0.0f, friction);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody friction", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsFriction(state.selected_item_path, object.name, attribute_index, clamped);
+                    }) || changed;
+                }
+
+                if (current_shape == SceneObjectPhysicsShape::Sphere)
+                {
+                    float radius = attribute.rigidbody.radius;
+                    if (ImGui::DragFloat("Radius", &radius, 0.01f, 0.01f, 10000.0f, "%.3f"))
+                    {
+                        const float clamped = (std::max)(0.01f, radius);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody radius", [&]()
+                        {
+                            return SetSceneObjectAttributePhysicsRadius(state.selected_item_path, object.name, attribute_index, clamped);
+                        }) || changed;
+                    }
+                }
+                else if (current_shape == SceneObjectPhysicsShape::Box)
+                {
+                    float half_extent[3] = {attribute.rigidbody.half_extent[0], attribute.rigidbody.half_extent[1], attribute.rigidbody.half_extent[2]};
+                    if (ImGui::DragFloat3("Half Extent", half_extent, 0.01f, 0.01f, 10000.0f, "%.3f"))
+                    {
+                        const SceneVector3 clamped = {(std::max)(0.01f, half_extent[0]), (std::max)(0.01f, half_extent[1]), (std::max)(0.01f, half_extent[2])};
+                        changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody half extent", [&]()
+                        {
+                            return SetSceneObjectAttributePhysicsHalfExtent(state.selected_item_path, object.name, attribute_index, clamped);
+                        }) || changed;
+                    }
+                }
+
+                float linear_damping = attribute.rigidbody.linear_damping;
+                if (ImGui::DragFloat("Linear Damping", &linear_damping, 0.005f, 0.0f, 10.0f, "%.3f"))
+                {
+                    const float clamped = (std::max)(0.0f, linear_damping);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody linear damping", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsLinearDamping(state.selected_item_path, object.name, attribute_index, clamped);
+                    }) || changed;
+                }
+
+                float angular_damping = attribute.rigidbody.angular_damping;
+                if (ImGui::DragFloat("Angular Damping", &angular_damping, 0.005f, 0.0f, 10.0f, "%.3f"))
+                {
+                    const float clamped = (std::max)(0.0f, angular_damping);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rigidbody angular damping", [&]()
+                    {
+                        return SetSceneObjectAttributePhysicsAngularDamping(state.selected_item_path, object.name, attribute_index, clamped);
+                    }) || changed;
+                }
             }
             break;
         }

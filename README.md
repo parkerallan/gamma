@@ -89,6 +89,10 @@ wsl bash -lc "cd /mnt/e/Projects/test2 && chmod +x linuxapp && ./linuxapp"
 Path conversion rule:
 - `C:/...` -> `/mnt/c/...` 
 
+## Developer API
+
+See `docs/developer-api.md` for a quick reference of all Lua developer functions, summaries, examples, and package notes. **Disclaimer these function are WIP and all subject to change!**
+
 ## Troubleshooting
 
 - `glslc was not found`

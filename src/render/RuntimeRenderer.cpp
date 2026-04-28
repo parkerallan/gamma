@@ -3,12 +3,21 @@
 
 #include <SDL3/SDL.h>
 
+extern "C"
+{
+#include <lua.h>
+#include <lauxlib.h>
+#include <lualib.h>
+}
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <limits>
+#include <unordered_set>
 
 namespace
 {
@@ -809,6 +818,40 @@ SceneGpuVertex BuildSceneGpuVertex(const ModelVertex& vertex, const ModelMateria
     gpu_vertex.tangent[3] = vertex.tangent[3];
     return gpu_vertex;
 }
+
+bool ReadFileBytes(const std::filesystem::path& path, std::vector<std::uint8_t>& bytes)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+    {
+        return false;
+    }
+
+    input.seekg(0, std::ios::end);
+    const std::streampos length = input.tellg();
+    if (length < 0)
+    {
+        return false;
+    }
+
+    input.seekg(0, std::ios::beg);
+    bytes.resize(static_cast<std::size_t>(length));
+    if (!bytes.empty())
+    {
+        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!input)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::string BuildScriptInstanceKey(const std::string& object_name, const std::filesystem::path& script_path)
+{
+    return object_name + "|" + script_path.generic_string();
+}
 }
 
 bool RuntimeRenderer::Initialize(VulkanContext* context)
@@ -819,7 +862,25 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
         return false;
     }
 
-    return ray_tracing_.Initialize(context);
+    if (!InitializeScriptRuntime(nullptr))
+    {
+        return false;
+    }
+
+    if (!physics_world_.Initialize(nullptr))
+    {
+        ShutdownScriptRuntime();
+        return false;
+    }
+
+    if (!ray_tracing_.Initialize(context))
+    {
+        physics_world_.Shutdown();
+        ShutdownScriptRuntime();
+        return false;
+    }
+
+    return true;
 }
 
 void RuntimeRenderer::ReleaseBuffer(GpuBuffer& buffer)
@@ -882,6 +943,8 @@ void RuntimeRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 
 void RuntimeRenderer::Shutdown()
 {
+    ShutdownScriptRuntime();
+    physics_world_.Shutdown();
     ray_tracing_.Shutdown();
     for (auto& [path, entry] : mesh_cache_)
     {
@@ -889,6 +952,18 @@ void RuntimeRenderer::Shutdown()
     }
 
     mesh_cache_.clear();
+    script_cache_.clear();
+    ClearScriptEventSubscriptions();
+    ClearScriptTimers();
+    runtime_spawned_objects_.clear();
+    runtime_destroyed_objects_.clear();
+    script_object_position_overrides_.clear();
+    script_object_rotation_overrides_.clear();
+    script_object_scale_overrides_.clear();
+    script_active_instance_key_.clear();
+    script_active_object_name_.clear();
+    script_prev_keys_down_.clear();
+    script_frame_collision_events_.clear();
     model_asset_cache_.clear();
     queued_objects_.clear();
     cached_scene_path_.clear();
@@ -933,6 +1008,24 @@ bool RuntimeRenderer::StartSession(
     cached_scene_metadata_ = SceneMetadata{};
     has_cached_scene_metadata_ = false;
     queued_objects_.clear();
+    DestroyAllScriptInstances();
+    ClearScriptEventSubscriptions();
+    ClearScriptTimers();
+    runtime_spawned_objects_.clear();
+    runtime_destroyed_objects_.clear();
+    script_object_position_overrides_.clear();
+    script_object_rotation_overrides_.clear();
+    script_object_scale_overrides_.clear();
+    script_active_instance_key_.clear();
+    script_active_object_name_.clear();
+    script_prev_keys_down_.clear();
+    script_frame_collision_events_.clear();
+    script_next_timer_id_ = 1;
+    script_timer_pending_clear_.clear();
+    const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+    script_last_tick_ms_ = now_ms;
+    script_session_start_ms_ = now_ms;
+    physics_world_built_ = false;
     return true;
 }
 
@@ -1115,6 +1208,980 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
     return true;
 }
 
+bool RuntimeRenderer::EnsureScriptCacheEntry(const std::filesystem::path& script_path, std::string* error_message)
+{
+    CachedScriptSourceEntry& cache_entry = script_cache_[script_path];
+
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(script_path, error);
+    const bool has_filesystem_time = !error;
+    const bool exists_in_vfs = g_asset_reader && g_asset_reader->FileExists(script_path.generic_string());
+    if (!has_filesystem_time && !exists_in_vfs)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Missing script asset: " + script_path.generic_string();
+        }
+        return false;
+    }
+
+    const bool should_reload =
+        !cache_entry.loaded ||
+        (has_filesystem_time && cache_entry.write_time != write_time);
+    if (!should_reload)
+    {
+        return true;
+    }
+
+    std::vector<std::uint8_t> source_bytes;
+    if (has_filesystem_time)
+    {
+        if (!ReadFileBytes(script_path, source_bytes))
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Failed to read script: " + script_path.generic_string();
+            }
+            return false;
+        }
+    }
+    else
+    {
+        source_bytes = g_asset_reader->ReadFile(script_path.generic_string());
+    }
+
+    cache_entry.write_time = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
+    cache_entry.source_bytes = std::move(source_bytes);
+    cache_entry.loaded = true;
+    return true;
+}
+
+bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
+{
+    if (script_lua_state_ != nullptr)
+    {
+        return true;
+    }
+
+    script_lua_state_ = luaL_newstate();
+    if (script_lua_state_ == nullptr)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Failed to initialize Lua runtime";
+        }
+        return false;
+    }
+
+    luaL_openlibs(script_lua_state_);
+
+    lua_newtable(script_lua_state_);
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaLog, 1);
+    lua_setfield(script_lua_state_, -2, "Log");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetObjectPosition, 1);
+    lua_setfield(script_lua_state_, -2, "SetObjectPosition");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectPosition, 1);
+    lua_setfield(script_lua_state_, -2, "GetObjectPosition");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetObjectRotation, 1);
+    lua_setfield(script_lua_state_, -2, "SetObjectRotation");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectRotation, 1);
+    lua_setfield(script_lua_state_, -2, "GetObjectRotation");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetObjectScale, 1);
+    lua_setfield(script_lua_state_, -2, "SetObjectScale");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectScale, 1);
+    lua_setfield(script_lua_state_, -2, "GetObjectScale");
+
+    lua_setglobal(script_lua_state_, "Engine");
+
+    // Time table — fields updated each frame in UpdateScriptsForFrame
+    lua_newtable(script_lua_state_);
+    lua_pushnumber(script_lua_state_, 0.0);
+    lua_setfield(script_lua_state_, -2, "DeltaTime");
+    lua_pushnumber(script_lua_state_, 0.0);
+    lua_setfield(script_lua_state_, -2, "TotalTime");
+    lua_setglobal(script_lua_state_, "Time");
+
+    // Input table
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaInputIsKeyDown, 1);
+    lua_setfield(script_lua_state_, -2, "IsKeyDown");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaInputWasKeyPressed, 1);
+    lua_setfield(script_lua_state_, -2, "WasKeyPressed");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaInputMousePosition, 1);
+    lua_setfield(script_lua_state_, -2, "MousePosition");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaInputMouseDelta, 1);
+    lua_setfield(script_lua_state_, -2, "MouseDelta");
+    lua_setglobal(script_lua_state_, "Input");
+
+    // World table for script-to-script events.
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSubscribe, 1);
+    lua_setfield(script_lua_state_, -2, "Subscribe");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldEmit, 1);
+    lua_setfield(script_lua_state_, -2, "Emit");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSpawn, 1);
+    lua_setfield(script_lua_state_, -2, "Spawn");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSpawnFromObject, 1);
+    lua_setfield(script_lua_state_, -2, "SpawnFromObject");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldDestroy, 1);
+    lua_setfield(script_lua_state_, -2, "Destroy");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldDestroyByPrefix, 1);
+    lua_setfield(script_lua_state_, -2, "DestroyByPrefix");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldExists, 1);
+    lua_setfield(script_lua_state_, -2, "Exists");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldGetAll, 1);
+    lua_setfield(script_lua_state_, -2, "GetAll");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldFindByPrefix, 1);
+    lua_setfield(script_lua_state_, -2, "FindByPrefix");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldGetCollisions, 1);
+    lua_setfield(script_lua_state_, -2, "GetCollisions");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldGetCollisionsFor, 1);
+    lua_setfield(script_lua_state_, -2, "GetCollisionsFor");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldGetCollisionsByPhase, 1);
+    lua_setfield(script_lua_state_, -2, "GetCollisionsByPhase");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSetTimeout, 1);
+    lua_setfield(script_lua_state_, -2, "SetTimeout");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSetInterval, 1);
+    lua_setfield(script_lua_state_, -2, "SetInterval");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldClearTimer, 1);
+    lua_setfield(script_lua_state_, -2, "ClearTimer");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldLoadScene, 1);
+    lua_setfield(script_lua_state_, -2, "LoadScene");
+    lua_setglobal(script_lua_state_, "World");
+
+    // Physics table
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaPhysicsRaycast, 1);
+    lua_setfield(script_lua_state_, -2, "Raycast");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaPhysicsSetVelocity, 1);
+    lua_setfield(script_lua_state_, -2, "SetVelocity");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaPhysicsGetVelocity, 1);
+    lua_setfield(script_lua_state_, -2, "GetVelocity");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaPhysicsAddImpulse, 1);
+    lua_setfield(script_lua_state_, -2, "AddImpulse");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaPhysicsAddForce, 1);
+    lua_setfield(script_lua_state_, -2, "AddForce");
+    lua_setglobal(script_lua_state_, "Physics");
+
+    const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+    script_last_tick_ms_ = now_ms;
+    script_session_start_ms_ = now_ms;
+    return true;
+}
+
+void RuntimeRenderer::ShutdownScriptRuntime()
+{
+    if (script_lua_state_ == nullptr)
+    {
+        return;
+    }
+
+    DestroyAllScriptInstances();
+    ClearScriptTimers();
+    script_active_instance_key_.clear();
+    script_active_object_name_.clear();
+    script_frame_collision_events_.clear();
+    lua_close(script_lua_state_);
+    script_lua_state_ = nullptr;
+    script_last_tick_ms_ = 0;
+}
+
+void RuntimeRenderer::DestroyAllScriptInstances()
+{
+    if (script_lua_state_ == nullptr)
+    {
+        script_event_subscriptions_.clear();
+        script_timers_.clear();
+        script_instances_.clear();
+        return;
+    }
+
+    std::string ignored_error;
+    for (auto& [key, instance] : script_instances_)
+    {
+        CallScriptMethod(instance, "OnDestroy", 0.0f, false, &ignored_error);
+        RemoveScriptEventSubscriptionsForInstance(instance.instance_key);
+        RemoveScriptTimersForInstance(instance.instance_key);
+        if (instance.table_ref != LUA_NOREF && instance.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, instance.table_ref);
+            instance.table_ref = LUA_NOREF;
+        }
+    }
+
+    script_instances_.clear();
+}
+
+bool RuntimeRenderer::LoadScriptInstance(const std::string& object_name, const std::filesystem::path& script_path, std::string* error_message)
+{
+    if (script_lua_state_ == nullptr && !InitializeScriptRuntime(error_message))
+    {
+        return false;
+    }
+
+    if (!EnsureScriptCacheEntry(script_path, error_message))
+    {
+        return false;
+    }
+
+    const auto cache_it = script_cache_.find(script_path);
+    if (cache_it == script_cache_.end())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Missing script cache entry: " + script_path.generic_string();
+        }
+        return false;
+    }
+
+    const CachedScriptSourceEntry& cache_entry = cache_it->second;
+    if (cache_entry.source_bytes.empty())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Script is empty: " + script_path.generic_string();
+        }
+        return false;
+    }
+
+    lua_State* const lua_state = script_lua_state_;
+    const int load_result = luaL_loadbuffer(
+        lua_state,
+        reinterpret_cast<const char*>(cache_entry.source_bytes.data()),
+        cache_entry.source_bytes.size(),
+        script_path.generic_string().c_str());
+    if (load_result != LUA_OK)
+    {
+        if (error_message != nullptr)
+        {
+            const char* message = lua_tostring(lua_state, -1);
+            *error_message = "Failed to load script " + script_path.generic_string() + ": " + (message != nullptr ? message : "unknown error");
+        }
+        lua_pop(lua_state, 1);
+        return false;
+    }
+
+    const int run_result = lua_pcall(lua_state, 0, 1, 0);
+    if (run_result != LUA_OK)
+    {
+        if (error_message != nullptr)
+        {
+            const char* message = lua_tostring(lua_state, -1);
+            *error_message = "Failed to execute script " + script_path.generic_string() + ": " + (message != nullptr ? message : "unknown error");
+        }
+        lua_pop(lua_state, 1);
+        return false;
+    }
+
+    if (!lua_istable(lua_state, -1))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Script must return a table: " + script_path.generic_string();
+        }
+        lua_pop(lua_state, 1);
+        return false;
+    }
+
+    RuntimeScriptInstance instance;
+    instance.instance_key = BuildScriptInstanceKey(object_name, script_path);
+    instance.object_name = object_name;
+    instance.script_path = script_path;
+    instance.table_ref = luaL_ref(lua_state, LUA_REGISTRYINDEX);
+
+    const std::string instance_key = instance.instance_key;
+    auto it = script_instances_.find(instance_key);
+    if (it != script_instances_.end())
+    {
+        RemoveScriptEventSubscriptionsForInstance(instance_key);
+        RemoveScriptTimersForInstance(instance_key);
+        if (it->second.table_ref != LUA_NOREF && it->second.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(lua_state, LUA_REGISTRYINDEX, it->second.table_ref);
+        }
+        it->second = std::move(instance);
+    }
+    else
+    {
+        auto insert_result = script_instances_.emplace(instance_key, std::move(instance));
+        it = insert_result.first;
+    }
+
+    RuntimeScriptInstance& loaded_instance = it->second;
+    if (!CallScriptMethod(loaded_instance, "OnCreate", 0.0f, false, error_message))
+    {
+        RemoveScriptEventSubscriptionsForInstance(loaded_instance.instance_key);
+        RemoveScriptTimersForInstance(loaded_instance.instance_key);
+        if (loaded_instance.table_ref != LUA_NOREF && loaded_instance.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(lua_state, LUA_REGISTRYINDEX, loaded_instance.table_ref);
+        }
+        script_instances_.erase(instance_key);
+        return false;
+    }
+
+    return true;
+}
+
+bool RuntimeRenderer::SyncScriptInstances(std::string* error_message)
+{
+    if (script_lua_state_ == nullptr && !InitializeScriptRuntime(error_message))
+    {
+        return false;
+    }
+
+    std::unordered_set<std::string> desired_instance_keys;
+    for (const QueuedSceneObject& queued_object : queued_objects_)
+    {
+        for (const std::filesystem::path& script_path : queued_object.script_paths)
+        {
+            const std::string instance_key = BuildScriptInstanceKey(queued_object.name, script_path);
+            desired_instance_keys.insert(instance_key);
+            if (script_instances_.find(instance_key) == script_instances_.end())
+            {
+                if (!LoadScriptInstance(queued_object.name, script_path, error_message))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    for (auto it = script_instances_.begin(); it != script_instances_.end();)
+    {
+        if (desired_instance_keys.find(it->first) != desired_instance_keys.end())
+        {
+            ++it;
+            continue;
+        }
+
+        std::string ignored_error;
+        CallScriptMethod(it->second, "OnDestroy", 0.0f, false, &ignored_error);
+        RemoveScriptEventSubscriptionsForInstance(it->second.instance_key);
+        RemoveScriptTimersForInstance(it->second.instance_key);
+        if (it->second.table_ref != LUA_NOREF && it->second.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, it->second.table_ref);
+        }
+
+        it = script_instances_.erase(it);
+    }
+
+    return true;
+}
+
+bool RuntimeRenderer::CallScriptMethod(
+    RuntimeScriptInstance& instance,
+    const char* method_name,
+    float delta_time,
+    bool include_delta_time,
+    std::string* error_message)
+{
+    if (script_lua_state_ == nullptr || method_name == nullptr)
+    {
+        return false;
+    }
+
+    lua_State* const lua_state = script_lua_state_;
+    lua_rawgeti(lua_state, LUA_REGISTRYINDEX, instance.table_ref);
+    if (!lua_istable(lua_state, -1))
+    {
+        lua_pop(lua_state, 1);
+        if (error_message != nullptr)
+        {
+            *error_message = "Script did not return a table for " + instance.script_path.generic_string();
+        }
+        return false;
+    }
+
+    lua_getfield(lua_state, -1, method_name);
+    if (lua_isnil(lua_state, -1))
+    {
+        lua_pop(lua_state, 2);
+        return true;
+    }
+
+    if (!lua_isfunction(lua_state, -1))
+    {
+        lua_pop(lua_state, 2);
+        if (error_message != nullptr)
+        {
+            *error_message = "Script member is not a function: " + std::string(method_name);
+        }
+        return false;
+    }
+
+    lua_pushvalue(lua_state, -2);
+    lua_pushstring(lua_state, instance.object_name.c_str());
+    int argument_count = 2;
+    if (include_delta_time)
+    {
+        lua_pushnumber(lua_state, static_cast<lua_Number>(delta_time));
+        ++argument_count;
+    }
+
+    const std::string previous_instance_key = script_active_instance_key_;
+    const std::string previous_object_name = script_active_object_name_;
+    script_active_instance_key_ = instance.instance_key;
+    script_active_object_name_ = instance.object_name;
+
+    const int call_result = lua_pcall(lua_state, argument_count, 0, 0);
+    script_active_instance_key_ = previous_instance_key;
+    script_active_object_name_ = previous_object_name;
+    if (call_result != LUA_OK)
+    {
+        if (error_message != nullptr)
+        {
+            const char* message = lua_tostring(lua_state, -1);
+            *error_message = "Script call failed (" + std::string(method_name) + ") in " + instance.script_path.generic_string() + ": " + (message != nullptr ? message : "unknown error");
+        }
+
+        lua_pop(lua_state, 2);
+        return false;
+    }
+
+    lua_pop(lua_state, 1);
+    return true;
+}
+
+bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
+{
+    if (script_lua_state_ == nullptr)
+    {
+        return true;
+    }
+
+    // Handle pending scene load requested by World.LoadScene
+    if (!pending_scene_load_path_.empty())
+    {
+        std::string load_path = std::move(pending_scene_load_path_);
+        pending_scene_load_path_.clear();
+
+        // Resolve path: if it has no extension, append .scene
+        std::filesystem::path scene_file = load_path;
+        if (!scene_file.has_extension())
+        {
+            scene_file += ".scene";
+        }
+        // If not absolute, resolve relative to project Scenes/ directory
+        if (scene_file.is_relative())
+        {
+            scene_file = project_root_ / "Scenes" / scene_file;
+        }
+
+        const SceneMetadata new_scene_metadata = LoadSceneMetadata(scene_file);
+        const ActiveSceneCameraSelection new_camera = FindActiveSceneCamera(new_scene_metadata);
+        if (!new_camera.found)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "World.LoadScene: no camera found in scene '" + load_path + "'";
+            }
+            return false;
+        }
+
+        // Reset all runtime state for the new scene
+        DestroyAllScriptInstances();
+        ClearScriptEventSubscriptions();
+        ClearScriptTimers();
+        runtime_spawned_objects_.clear();
+        runtime_destroyed_objects_.clear();
+        script_object_position_overrides_.clear();
+        script_object_rotation_overrides_.clear();
+        script_object_scale_overrides_.clear();
+        script_active_instance_key_.clear();
+        script_active_object_name_.clear();
+        script_prev_keys_down_.clear();
+        script_frame_collision_events_.clear();
+        queued_objects_.clear();
+        script_next_timer_id_ = 1;
+        script_timer_pending_clear_.clear();
+        physics_world_built_ = false;
+        cached_scene_path_.clear();
+        cached_scene_metadata_ = SceneMetadata{};
+        has_cached_scene_metadata_ = false;
+        const std::uint64_t load_now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+        script_last_tick_ms_ = load_now_ms;
+        script_session_start_ms_ = load_now_ms;
+
+        scene_path_ = scene_file;
+        active_camera_object_name_ = new_camera.object_name;
+        active_camera_attribute_index_ = new_camera.attribute_index;
+    }
+
+    const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+    float delta_time = 0.0f;
+    if (script_last_tick_ms_ != 0 && now_ms >= script_last_tick_ms_)
+    {
+        delta_time = static_cast<float>(now_ms - script_last_tick_ms_) / 1000.0f;
+    }
+    const float total_time = static_cast<float>(now_ms - script_session_start_ms_) / 1000.0f;
+    script_last_tick_ms_ = now_ms;
+
+    // Update Time table fields
+    lua_getglobal(script_lua_state_, "Time");
+    lua_pushnumber(script_lua_state_, static_cast<lua_Number>(delta_time));
+    lua_setfield(script_lua_state_, -2, "DeltaTime");
+    lua_pushnumber(script_lua_state_, static_cast<lua_Number>(total_time));
+    lua_setfield(script_lua_state_, -2, "TotalTime");
+    lua_pop(script_lua_state_, 1);
+
+    // Snapshot current keyboard state for WasKeyPressed
+    int num_keys = 0;
+    const bool* keys = SDL_GetKeyboardState(&num_keys);
+    const std::vector<bool> current_keys(keys, keys + num_keys);
+
+    // Snapshot collisions once so every script sees the same frame data.
+    if (physics_world_.IsInitialized())
+    {
+        script_frame_collision_events_ = physics_world_.ConsumeCollisionEvents();
+    }
+    else
+    {
+        script_frame_collision_events_.clear();
+    }
+
+    for (auto& [key, instance] : script_instances_)
+    {
+        if (!CallScriptMethod(instance, "OnUpdate", delta_time, true, error_message))
+        {
+            return false;
+        }
+    }
+
+    if (!UpdateScriptTimers(delta_time, error_message))
+    {
+        return false;
+    }
+
+    // Save key state for next frame's WasKeyPressed
+    script_prev_keys_down_ = current_keys;
+
+    return true;
+}
+
+bool RuntimeRenderer::UpdateScriptTimers(float delta_time, std::string* error_message)
+{
+    if (script_lua_state_ == nullptr || script_timers_.empty())
+    {
+        return true;
+    }
+
+    script_timer_update_in_progress_ = true;
+    for (std::size_t i = 0; i < script_timers_.size();)
+    {
+        ScriptTimer& timer = script_timers_[i];
+
+        if (script_timer_pending_clear_.find(timer.id) != script_timer_pending_clear_.end())
+        {
+            if (timer.callback_ref != LUA_NOREF && timer.callback_ref != LUA_REFNIL)
+            {
+                luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, timer.callback_ref);
+            }
+            script_timers_.erase(script_timers_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+
+        const auto owner_it = script_instances_.find(timer.owner_instance_key);
+        if (owner_it == script_instances_.end())
+        {
+            if (timer.callback_ref != LUA_NOREF && timer.callback_ref != LUA_REFNIL)
+            {
+                luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, timer.callback_ref);
+            }
+            script_timers_.erase(script_timers_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+
+        timer.remaining_seconds -= delta_time;
+        if (timer.remaining_seconds > 0.0f)
+        {
+            ++i;
+            continue;
+        }
+
+        lua_rawgeti(script_lua_state_, LUA_REGISTRYINDEX, timer.callback_ref);
+        if (!lua_isfunction(script_lua_state_, -1))
+        {
+            lua_pop(script_lua_state_, 1);
+            luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, timer.callback_ref);
+            script_timers_.erase(script_timers_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+
+        const std::string previous_instance_key = script_active_instance_key_;
+        const std::string previous_object_name = script_active_object_name_;
+        script_active_instance_key_ = owner_it->second.instance_key;
+        script_active_object_name_ = owner_it->second.object_name;
+
+        const int call_result = lua_pcall(script_lua_state_, 0, 0, 0);
+
+        script_active_instance_key_ = previous_instance_key;
+        script_active_object_name_ = previous_object_name;
+
+        if (call_result != LUA_OK)
+        {
+            if (error_message != nullptr)
+            {
+                const char* message = lua_tostring(script_lua_state_, -1);
+                *error_message = std::string("Timer callback failed: ") + (message != nullptr ? message : "unknown error");
+            }
+            lua_pop(script_lua_state_, 1);
+            script_timer_update_in_progress_ = false;
+            return false;
+        }
+
+        if (timer.repeating)
+        {
+            timer.remaining_seconds = timer.interval_seconds;
+            ++i;
+            continue;
+        }
+
+        luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, timer.callback_ref);
+        script_timers_.erase(script_timers_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+
+    script_timer_update_in_progress_ = false;
+    script_timer_pending_clear_.clear();
+    return true;
+}
+
+void RuntimeRenderer::ClearScriptTimers()
+{
+    if (script_lua_state_ != nullptr)
+    {
+        for (ScriptTimer& timer : script_timers_)
+        {
+            if (timer.callback_ref != LUA_NOREF && timer.callback_ref != LUA_REFNIL)
+            {
+                luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, timer.callback_ref);
+                timer.callback_ref = LUA_NOREF;
+            }
+        }
+    }
+
+    script_timers_.clear();
+    script_timer_pending_clear_.clear();
+    script_timer_update_in_progress_ = false;
+}
+
+void RuntimeRenderer::RemoveScriptTimersForInstance(const std::string& instance_key)
+{
+    for (auto it = script_timers_.begin(); it != script_timers_.end();)
+    {
+        if (it->owner_instance_key != instance_key)
+        {
+            ++it;
+            continue;
+        }
+
+        if (script_timer_update_in_progress_)
+        {
+            script_timer_pending_clear_.insert(it->id);
+            ++it;
+            continue;
+        }
+
+        if (script_lua_state_ != nullptr && it->callback_ref != LUA_NOREF && it->callback_ref != LUA_REFNIL)
+        {
+            luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, it->callback_ref);
+        }
+        it = script_timers_.erase(it);
+    }
+}
+
+void RuntimeRenderer::ClearScriptEventSubscriptions()
+{
+    if (script_lua_state_ != nullptr)
+    {
+        for (auto& [event_name, subscriptions] : script_event_subscriptions_)
+        {
+            for (ScriptEventSubscription& subscription : subscriptions)
+            {
+                if (subscription.handler_ref != LUA_NOREF && subscription.handler_ref != LUA_REFNIL)
+                {
+                    luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, subscription.handler_ref);
+                    subscription.handler_ref = LUA_NOREF;
+                }
+            }
+        }
+    }
+
+    script_event_subscriptions_.clear();
+}
+
+void RuntimeRenderer::RemoveScriptEventSubscriptionsForInstance(const std::string& instance_key)
+{
+    for (auto subscriptions_it = script_event_subscriptions_.begin(); subscriptions_it != script_event_subscriptions_.end();)
+    {
+        std::vector<ScriptEventSubscription>& subscriptions = subscriptions_it->second;
+        for (auto it = subscriptions.begin(); it != subscriptions.end();)
+        {
+            if (it->instance_key != instance_key)
+            {
+                ++it;
+                continue;
+            }
+
+            if (script_lua_state_ != nullptr && it->handler_ref != LUA_NOREF && it->handler_ref != LUA_REFNIL)
+            {
+                luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, it->handler_ref);
+            }
+            it = subscriptions.erase(it);
+        }
+
+        if (subscriptions.empty())
+        {
+            subscriptions_it = script_event_subscriptions_.erase(subscriptions_it);
+            continue;
+        }
+
+        ++subscriptions_it;
+    }
+}
+
+bool RuntimeRenderer::SpawnRuntimeObject(const RuntimeSpawnedObject& object, std::string* error_message)
+{
+    if (object.name.empty())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "World.Spawn requires a non-empty object name";
+        }
+        return false;
+    }
+
+    if (runtime_spawned_objects_.find(object.name) != runtime_spawned_objects_.end())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "World.Spawn object already exists: " + object.name;
+        }
+        return false;
+    }
+
+    for (const SceneObjectMetadata& scene_object : cached_scene_metadata_.objects)
+    {
+        if (scene_object.name == object.name)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "World.Spawn name conflicts with scene object: " + object.name;
+            }
+            return false;
+        }
+    }
+
+    runtime_spawned_objects_[object.name] = object;
+    runtime_destroyed_objects_.erase(object.name);
+    return true;
+}
+
+void RuntimeRenderer::DestroyRuntimeObject(const std::string& object_name)
+{
+    if (object_name.empty())
+    {
+        return;
+    }
+
+    runtime_spawned_objects_.erase(object_name);
+    runtime_destroyed_objects_.insert(object_name);
+
+    script_object_position_overrides_.erase(object_name);
+    script_object_rotation_overrides_.erase(object_name);
+    script_object_scale_overrides_.erase(object_name);
+
+    std::vector<std::string> instances_to_remove;
+    for (const auto& [instance_key, instance] : script_instances_)
+    {
+        if (instance.object_name == object_name)
+        {
+            instances_to_remove.push_back(instance_key);
+        }
+    }
+
+    for (const std::string& instance_key : instances_to_remove)
+    {
+        auto it = script_instances_.find(instance_key);
+        if (it == script_instances_.end())
+        {
+            continue;
+        }
+
+        std::string ignored_error;
+        CallScriptMethod(it->second, "OnDestroy", 0.0f, false, &ignored_error);
+        RemoveScriptEventSubscriptionsForInstance(it->second.instance_key);
+        if (script_lua_state_ != nullptr && it->second.table_ref != LUA_NOREF && it->second.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, it->second.table_ref);
+        }
+        script_instances_.erase(it);
+    }
+}
+
+bool RuntimeRenderer::RuntimeObjectExists(const std::string& object_name) const
+{
+    if (object_name.empty())
+    {
+        return false;
+    }
+
+    if (runtime_destroyed_objects_.find(object_name) != runtime_destroyed_objects_.end())
+    {
+        return false;
+    }
+
+    if (runtime_spawned_objects_.find(object_name) != runtime_spawned_objects_.end())
+    {
+        return true;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name == object_name)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void RuntimeRenderer::SetScriptObjectPosition(const std::string& object_name, const SceneVector3& position)
+{
+    script_object_position_overrides_[object_name] = position;
+    for (QueuedSceneObject& object : queued_objects_)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        object.model_matrix[12] = position[0];
+        object.model_matrix[13] = position[1];
+        object.model_matrix[14] = position[2];
+    }
+}
+
+bool RuntimeRenderer::TryGetScriptObjectPosition(const std::string& object_name, SceneVector3& position) const
+{
+    for (const QueuedSceneObject& object : queued_objects_)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        position = {
+            object.model_matrix[12],
+            object.model_matrix[13],
+            object.model_matrix[14],
+        };
+        return true;
+    }
+
+    const auto override_it = script_object_position_overrides_.find(object_name);
+    if (override_it == script_object_position_overrides_.end())
+    {
+        return false;
+    }
+
+    position = override_it->second;
+    return true;
+}
+
+void RuntimeRenderer::SetScriptObjectRotation(const std::string& object_name, const SceneVector3& rotation)
+{
+    script_object_rotation_overrides_[object_name] = rotation;
+}
+
+bool RuntimeRenderer::TryGetScriptObjectRotation(const std::string& object_name, SceneVector3& rotation) const
+{
+    const auto override_it = script_object_rotation_overrides_.find(object_name);
+    if (override_it != script_object_rotation_overrides_.end())
+    {
+        rotation = override_it->second;
+        return true;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+        rotation = object.rotation;
+        return true;
+    }
+    return false;
+}
+
+void RuntimeRenderer::SetScriptObjectScale(const std::string& object_name, const SceneVector3& scale)
+{
+    script_object_scale_overrides_[object_name] = scale;
+}
+
+bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, SceneVector3& scale) const
+{
+    const auto override_it = script_object_scale_overrides_.find(object_name);
+    if (override_it != script_object_scale_overrides_.end())
+    {
+        scale = override_it->second;
+        return true;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+        scale = object.scale;
+        return true;
+    }
+    return false;
+}
+
 bool RuntimeRenderer::BuildQueuedScene(
     const SceneMetadata& scene_metadata,
     const SceneObjectMetadata& active_camera_object,
@@ -1139,21 +2206,40 @@ bool RuntimeRenderer::BuildQueuedScene(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (object.model_path.empty())
-        {
-            continue;
-        }
-
-        const std::filesystem::path model_path = project_root_ / object.model_path;
-        const CachedModelAssetEntry& model_asset_entry = GetModelAssetEntry(model_path);
-        if (!model_asset_entry.asset.loaded || !EnsureMeshCacheEntry(model_path, model_asset_entry))
+        if (runtime_destroyed_objects_.find(object.name) != runtime_destroyed_objects_.end())
         {
             continue;
         }
 
         QueuedSceneObject queued_object;
-        queued_object.model_path = model_path;
         queued_object.name = object.name;
+        queued_object.script_paths.reserve(object.script_paths.size());
+        for (const std::string& script_path : object.script_paths)
+        {
+            if (script_path.empty())
+            {
+                continue;
+            }
+
+            queued_object.script_paths.push_back(project_root_ / script_path);
+        }
+
+        bool has_renderable_model = false;
+        if (!object.model_path.empty())
+        {
+            const std::filesystem::path model_path = project_root_ / object.model_path;
+            const CachedModelAssetEntry& model_asset_entry = GetModelAssetEntry(model_path);
+            if (model_asset_entry.asset.loaded && EnsureMeshCacheEntry(model_path, model_asset_entry))
+            {
+                queued_object.model_path = model_path;
+                has_renderable_model = true;
+            }
+        }
+
+        if (!has_renderable_model && queued_object.script_paths.empty())
+        {
+            continue;
+        }
 
         const auto pose_it = resolved_object_poses.find(object.name);
         if (pose_it != resolved_object_poses.end())
@@ -1165,7 +2251,86 @@ bool RuntimeRenderer::BuildQueuedScene(
             BuildTransformMatrix(object.position, object.rotation, object.scale, queued_object.model_matrix.data());
         }
 
+        const bool has_position_override = script_object_position_overrides_.count(queued_object.name) > 0;
+        const bool has_rotation_override = script_object_rotation_overrides_.count(queued_object.name) > 0;
+        const bool has_scale_override    = script_object_scale_overrides_.count(queued_object.name) > 0;
+
+        if (has_rotation_override || has_scale_override)
+        {
+            const SceneVector3& pos = has_position_override
+                ? script_object_position_overrides_[queued_object.name]
+                : object.position;
+            const SceneVector3& rot = has_rotation_override
+                ? script_object_rotation_overrides_[queued_object.name]
+                : object.rotation;
+            const SceneVector3& scl = has_scale_override
+                ? script_object_scale_overrides_[queued_object.name]
+                : object.scale;
+            BuildTransformMatrix(pos, rot, scl, queued_object.model_matrix.data());
+        }
+        else if (has_position_override)
+        {
+            const auto& pos = script_object_position_overrides_[queued_object.name];
+            queued_object.model_matrix[12] = pos[0];
+            queued_object.model_matrix[13] = pos[1];
+            queued_object.model_matrix[14] = pos[2];
+        }
+
         queued_objects_.push_back(std::move(queued_object));
+    }
+
+    for (const auto& [name, spawned] : runtime_spawned_objects_)
+    {
+        if (runtime_destroyed_objects_.find(name) != runtime_destroyed_objects_.end())
+        {
+            continue;
+        }
+
+        QueuedSceneObject queued_object;
+        queued_object.name = spawned.name;
+
+        if (!spawned.model_path.empty())
+        {
+            const std::filesystem::path model_path = project_root_ / spawned.model_path;
+            const CachedModelAssetEntry& model_asset_entry = GetModelAssetEntry(model_path);
+            if (model_asset_entry.asset.loaded && EnsureMeshCacheEntry(model_path, model_asset_entry))
+            {
+                queued_object.model_path = model_path;
+            }
+        }
+
+        if (!spawned.script_path.empty())
+        {
+            queued_object.script_paths.push_back(project_root_ / spawned.script_path);
+        }
+
+        BuildTransformMatrix(spawned.position, spawned.rotation, spawned.scale, queued_object.model_matrix.data());
+
+        const auto position_override_it = script_object_position_overrides_.find(queued_object.name);
+        if (position_override_it != script_object_position_overrides_.end())
+        {
+            queued_object.model_matrix[12] = position_override_it->second[0];
+            queued_object.model_matrix[13] = position_override_it->second[1];
+            queued_object.model_matrix[14] = position_override_it->second[2];
+        }
+
+        queued_objects_.push_back(std::move(queued_object));
+    }
+
+    for (const QueuedSceneObject& queued_object : queued_objects_)
+    {
+        for (const std::filesystem::path& script_path : queued_object.script_paths)
+        {
+            if (!EnsureScriptCacheEntry(script_path, error_message))
+            {
+                return false;
+            }
+        }
+    }
+
+    if (!SyncScriptInstances(error_message))
+    {
+        return false;
     }
 
     lighting = ResolveSceneLighting(scene_metadata, BuildLightingPoseMap(resolved_object_poses), active_camera_object.name);
@@ -1335,6 +2500,39 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     }
 
     if (!SyncRayTracingScene(error_message))
+    {
+        return false;
+    }
+
+    // Build physics world once per session (after the first BuildQueuedScene).
+    if (!physics_world_built_ && physics_world_.IsInitialized())
+    {
+        std::unordered_map<std::string, std::array<float, 16>> world_matrices;
+        for (const QueuedSceneObject& obj : queued_objects_)
+        {
+            world_matrices[obj.name] = obj.model_matrix;
+        }
+        physics_world_.BuildFromScene(scene_metadata, world_matrices);
+        physics_world_built_ = true;
+    }
+
+    // Step physics and push simulated positions into the position overrides.
+    if (physics_world_.IsInitialized())
+    {
+        const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+        const float phys_dt = (script_last_tick_ms_ != 0 && now_ms >= script_last_tick_ms_)
+            ? static_cast<float>(now_ms - script_last_tick_ms_) / 1000.0f
+            : 0.0f;
+        physics_world_.Step(phys_dt);
+        const auto simulated = physics_world_.GetSimulatedPositions();
+        for (const auto& [name, pos] : simulated)
+        {
+            // Physics is authoritative for dynamic body positions.
+            SetScriptObjectPosition(name, pos);
+        }
+    }
+
+    if (!UpdateScriptsForFrame(error_message))
     {
         return false;
     }

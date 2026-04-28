@@ -4,6 +4,7 @@
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "render/Lighting.h"
+#include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
 
 #include <array>
@@ -11,7 +12,10 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+struct lua_State;
 
 class RuntimeRenderer
 {
@@ -85,6 +89,48 @@ public:
         std::filesystem::path model_path;
         std::string name;
         std::array<float, 16> model_matrix{};
+        std::vector<std::filesystem::path> script_paths;
+    };
+
+    struct CachedScriptSourceEntry
+    {
+        std::filesystem::file_time_type write_time{};
+        std::vector<std::uint8_t> source_bytes;
+        bool loaded = false;
+    };
+
+    struct RuntimeScriptInstance
+    {
+        std::string instance_key;
+        std::string object_name;
+        std::filesystem::path script_path;
+        int table_ref = -2;
+    };
+
+    struct ScriptEventSubscription
+    {
+        std::string instance_key;
+        int handler_ref = -2;
+    };
+
+    struct RuntimeSpawnedObject
+    {
+        std::string name;
+        std::string model_path;
+        std::string script_path;
+        SceneVector3 position = {0.0f, 0.0f, 0.0f};
+        SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
+        SceneVector3 scale = {1.0f, 1.0f, 1.0f};
+    };
+
+    struct ScriptTimer
+    {
+        std::uint64_t id = 0;
+        std::string owner_instance_key;
+        int callback_ref = -2;
+        float remaining_seconds = 0.0f;
+        float interval_seconds = 0.0f;
+        bool repeating = false;
     };
 
 private:
@@ -95,6 +141,60 @@ private:
     void ReleaseTexture(GpuTexture& texture);
     void ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry);
     bool EnsureMeshCacheEntry(const std::filesystem::path& model_path, const CachedModelAssetEntry& model_asset_entry);
+    bool EnsureScriptCacheEntry(const std::filesystem::path& script_path, std::string* error_message);
+    bool InitializeScriptRuntime(std::string* error_message);
+    void ShutdownScriptRuntime();
+    void DestroyAllScriptInstances();
+    bool LoadScriptInstance(const std::string& object_name, const std::filesystem::path& script_path, std::string* error_message);
+    bool SyncScriptInstances(std::string* error_message);
+    bool CallScriptMethod(RuntimeScriptInstance& instance, const char* method_name, float delta_time, bool include_delta_time, std::string* error_message);
+    bool UpdateScriptsForFrame(std::string* error_message);
+    bool UpdateScriptTimers(float delta_time, std::string* error_message);
+    void ClearScriptTimers();
+    void RemoveScriptTimersForInstance(const std::string& instance_key);
+    void ClearScriptEventSubscriptions();
+    void RemoveScriptEventSubscriptionsForInstance(const std::string& instance_key);
+    bool SpawnRuntimeObject(const RuntimeSpawnedObject& object, std::string* error_message);
+    void DestroyRuntimeObject(const std::string& object_name);
+    bool RuntimeObjectExists(const std::string& object_name) const;
+    void SetScriptObjectPosition(const std::string& object_name, const SceneVector3& position);
+    bool TryGetScriptObjectPosition(const std::string& object_name, SceneVector3& position) const;
+    void SetScriptObjectRotation(const std::string& object_name, const SceneVector3& rotation);
+    bool TryGetScriptObjectRotation(const std::string& object_name, SceneVector3& rotation) const;
+    void SetScriptObjectScale(const std::string& object_name, const SceneVector3& scale);
+    bool TryGetScriptObjectScale(const std::string& object_name, SceneVector3& scale) const;
+    static int LuaLog(lua_State* lua_state);
+    static int LuaSetObjectPosition(lua_State* lua_state);
+    static int LuaGetObjectPosition(lua_State* lua_state);
+    static int LuaSetObjectRotation(lua_State* lua_state);
+    static int LuaGetObjectRotation(lua_State* lua_state);
+    static int LuaSetObjectScale(lua_State* lua_state);
+    static int LuaGetObjectScale(lua_State* lua_state);
+    static int LuaInputIsKeyDown(lua_State* lua_state);
+    static int LuaInputWasKeyPressed(lua_State* lua_state);
+    static int LuaInputMousePosition(lua_State* lua_state);
+    static int LuaInputMouseDelta(lua_State* lua_state);
+    static int LuaWorldSubscribe(lua_State* lua_state);
+    static int LuaWorldEmit(lua_State* lua_state);
+    static int LuaWorldSpawn(lua_State* lua_state);
+    static int LuaWorldSpawnFromObject(lua_State* lua_state);
+    static int LuaWorldDestroy(lua_State* lua_state);
+    static int LuaWorldDestroyByPrefix(lua_State* lua_state);
+    static int LuaWorldExists(lua_State* lua_state);
+    static int LuaWorldGetAll(lua_State* lua_state);
+    static int LuaWorldFindByPrefix(lua_State* lua_state);
+    static int LuaWorldGetCollisions(lua_State* lua_state);
+    static int LuaWorldGetCollisionsFor(lua_State* lua_state);
+    static int LuaWorldGetCollisionsByPhase(lua_State* lua_state);
+    static int LuaWorldSetTimeout(lua_State* lua_state);
+    static int LuaWorldSetInterval(lua_State* lua_state);
+    static int LuaWorldClearTimer(lua_State* lua_state);
+        static int LuaWorldLoadScene(lua_State* lua_state);
+    static int LuaPhysicsRaycast(lua_State* lua_state);
+    static int LuaPhysicsSetVelocity(lua_State* lua_state);
+    static int LuaPhysicsGetVelocity(lua_State* lua_state);
+    static int LuaPhysicsAddImpulse(lua_State* lua_state);
+    static int LuaPhysicsAddForce(lua_State* lua_state);
     bool BuildQueuedScene(
         const SceneMetadata& scene_metadata,
         const SceneObjectMetadata& active_camera_object,
@@ -117,5 +217,27 @@ private:
     bool has_cached_scene_metadata_ = false;
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
+    std::unordered_map<std::filesystem::path, CachedScriptSourceEntry> script_cache_;
+    PhysicsWorld physics_world_{};
+    bool physics_world_built_ = false;
+    lua_State* script_lua_state_ = nullptr;
+    std::unordered_map<std::string, RuntimeScriptInstance> script_instances_;
+    std::unordered_map<std::string, std::vector<ScriptEventSubscription>> script_event_subscriptions_;
+    std::vector<ScriptTimer> script_timers_;
+    std::uint64_t script_next_timer_id_ = 1;
+    bool script_timer_update_in_progress_ = false;
+    std::unordered_set<std::uint64_t> script_timer_pending_clear_;
+    std::unordered_map<std::string, RuntimeSpawnedObject> runtime_spawned_objects_;
+    std::unordered_set<std::string> runtime_destroyed_objects_;
+    std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
+    std::unordered_map<std::string, SceneVector3> script_object_rotation_overrides_;
+    std::unordered_map<std::string, SceneVector3> script_object_scale_overrides_;
+    std::string script_active_instance_key_;
+    std::string script_active_object_name_;
+    std::vector<bool> script_prev_keys_down_;
+    std::vector<PhysicsCollisionEvent> script_frame_collision_events_;
+    std::uint64_t script_last_tick_ms_ = 0;
+    std::uint64_t script_session_start_ms_ = 0;
     std::vector<QueuedSceneObject> queued_objects_;
+    std::string pending_scene_load_path_;
 };

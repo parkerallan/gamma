@@ -680,6 +680,433 @@ void DrawSpotLightConeGizmo(
     }
 }
 
+void DrawProjectedSegment(
+    ImDrawList* draw_list,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const Vec3& start,
+    const Vec3& end,
+    ImU32 color,
+    float thickness)
+{
+    if (draw_list == nullptr)
+    {
+        return;
+    }
+
+    ImVec2 projected_start;
+    ImVec2 projected_end;
+    if (ProjectWorldPointToScreen(start, view_projection_matrix, viewport_min, viewport_max, projected_start)
+        && ProjectWorldPointToScreen(end, view_projection_matrix, viewport_min, viewport_max, projected_end))
+    {
+        draw_list->AddLine(projected_start, projected_end, color, thickness);
+    }
+}
+
+void DrawWireCircle(
+    ImDrawList* draw_list,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const Vec3& center,
+    const Vec3& axis_a,
+    const Vec3& axis_b,
+    float radius,
+    ImU32 color,
+    float thickness)
+{
+    if (radius <= 0.0001f)
+    {
+        return;
+    }
+
+    constexpr int kCircleSegments = 32;
+    Vec3 previous = Add(
+        center,
+        Add(Multiply(axis_a, radius), Multiply(axis_b, 0.0f)));
+
+    for (int segment = 1; segment <= kCircleSegments; ++segment)
+    {
+        const float angle = (static_cast<float>(segment) / static_cast<float>(kCircleSegments)) * kPi * 2.0f;
+        const Vec3 current = Add(
+            center,
+            Add(Multiply(axis_a, std::cos(angle) * radius), Multiply(axis_b, std::sin(angle) * radius)));
+        DrawProjectedSegment(
+            draw_list,
+            view_projection_matrix,
+            viewport_min,
+            viewport_max,
+            previous,
+            current,
+            color,
+            thickness);
+        previous = current;
+    }
+}
+
+void DrawPhysicsBoxColliderGizmo(
+    ImDrawList* draw_list,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const float* model_matrix,
+    const SceneVector3& half_extent,
+    ImU32 color,
+    float thickness)
+{
+    const float hx = (std::max)(0.01f, half_extent[0]);
+    const float hy = (std::max)(0.01f, half_extent[1]);
+    const float hz = (std::max)(0.01f, half_extent[2]);
+
+    const std::array<Vec3, 8> local_corners = {
+        Vec3{-hx, -hy, -hz}, Vec3{hx, -hy, -hz},
+        Vec3{-hx, hy, -hz}, Vec3{hx, hy, -hz},
+        Vec3{-hx, -hy, hz}, Vec3{hx, -hy, hz},
+        Vec3{-hx, hy, hz}, Vec3{hx, hy, hz}};
+
+    std::array<Vec3, 8> world_corners = {};
+    for (std::size_t i = 0; i < local_corners.size(); ++i)
+    {
+        world_corners[i] = TransformPoint(model_matrix, local_corners[i]);
+    }
+
+    constexpr int kEdges[12][2] = {
+        {0, 1}, {1, 3}, {3, 2}, {2, 0},
+        {4, 5}, {5, 7}, {7, 6}, {6, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+
+    for (const auto& edge : kEdges)
+    {
+        DrawProjectedSegment(
+            draw_list,
+            view_projection_matrix,
+            viewport_min,
+            viewport_max,
+            world_corners[edge[0]],
+            world_corners[edge[1]],
+            color,
+            thickness);
+    }
+}
+
+void DrawPhysicsSphereColliderGizmo(
+    ImDrawList* draw_list,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const float* model_matrix,
+    float local_radius,
+    ImU32 color,
+    float thickness)
+{
+    const Vec3 center = TransformPoint(model_matrix, Vec3{0.0f, 0.0f, 0.0f});
+    const Vec3 axis_x = Vec3{model_matrix[0], model_matrix[1], model_matrix[2]};
+    const Vec3 axis_y = Vec3{model_matrix[4], model_matrix[5], model_matrix[6]};
+    const Vec3 axis_z = Vec3{model_matrix[8], model_matrix[9], model_matrix[10]};
+
+    const float scale_x = Length(axis_x);
+    const float scale_y = Length(axis_y);
+    const float scale_z = Length(axis_z);
+    const float world_radius = (std::max)(0.01f, local_radius * (std::max)(scale_x, (std::max)(scale_y, scale_z)));
+
+    DrawWireCircle(
+        draw_list,
+        view_projection_matrix,
+        viewport_min,
+        viewport_max,
+        center,
+        Normalize(axis_x),
+        Normalize(axis_y),
+        world_radius,
+        color,
+        thickness);
+    DrawWireCircle(
+        draw_list,
+        view_projection_matrix,
+        viewport_min,
+        viewport_max,
+        center,
+        Normalize(axis_y),
+        Normalize(axis_z),
+        world_radius,
+        color,
+        thickness);
+    DrawWireCircle(
+        draw_list,
+        view_projection_matrix,
+        viewport_min,
+        viewport_max,
+        center,
+        Normalize(axis_z),
+        Normalize(axis_x),
+        world_radius,
+        color,
+        thickness);
+}
+
+void DrawPhysicsColliderGizmos(
+    ImDrawList* draw_list,
+    const SceneMetadata& scene_metadata,
+    const SceneResolvedObjectPoseMap& resolved_object_poses,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    const std::string& selected_object_name)
+{
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        if (object.physics_shape == SceneObjectPhysicsShape::None)
+        {
+            continue;
+        }
+
+        std::array<float, 16> fallback_world_matrix = {};
+        const float* model_matrix = nullptr;
+        const auto pose_it = resolved_object_poses.find(object.name);
+        if (pose_it != resolved_object_poses.end())
+        {
+            model_matrix = pose_it->second.world_matrix.data();
+        }
+        else
+        {
+            BuildTransformMatrix(object.position, object.rotation, object.scale, fallback_world_matrix.data());
+            model_matrix = fallback_world_matrix.data();
+        }
+
+        const bool is_selected = !selected_object_name.empty() && selected_object_name == object.name;
+        const ImU32 base_color = object.physics_is_dynamic
+            ? IM_COL32(255, 182, 66, 240)
+            : IM_COL32(70, 220, 255, 240);
+        const ImU32 color = is_selected ? IM_COL32(255, 255, 255, 250) : base_color;
+        const float thickness = is_selected ? 2.2f : 1.4f;
+
+        if (object.physics_shape == SceneObjectPhysicsShape::Box)
+        {
+            DrawPhysicsBoxColliderGizmo(
+                draw_list,
+                view_projection_matrix,
+                viewport_min,
+                viewport_max,
+                model_matrix,
+                object.physics_half_extent,
+                color,
+                thickness);
+        }
+        else if (object.physics_shape == SceneObjectPhysicsShape::Sphere)
+        {
+            DrawPhysicsSphereColliderGizmo(
+                draw_list,
+                view_projection_matrix,
+                viewport_min,
+                viewport_max,
+                model_matrix,
+                object.physics_radius,
+                color,
+                thickness);
+        }
+    }
+}
+
+struct ColliderResizeDragState
+{
+    bool active = false;
+    std::string object_name;
+    std::size_t attribute_index = 0;
+    SceneObjectPhysicsShape shape = SceneObjectPhysicsShape::None;
+    int handle_axis = 0;
+    SceneVector3 start_half_extent = {0.5f, 0.5f, 0.5f};
+    float start_radius = 0.5f;
+    ImVec2 start_mouse = ImVec2(0.0f, 0.0f);
+    ImVec2 start_center_screen = ImVec2(0.0f, 0.0f);
+    ImVec2 start_handle_screen = ImVec2(0.0f, 0.0f);
+};
+
+bool FindRigidbodyAttributeIndex(const SceneObjectMetadata& object, std::size_t& attribute_index)
+{
+    for (std::size_t index = 0; index < object.attributes.size(); ++index)
+    {
+        if (object.attributes[index].kind == SceneObjectAttributeKind::Rigidbody)
+        {
+            attribute_index = index;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool DrawAndHandleSelectedColliderResize(
+    EngineState& state,
+    const SceneObjectMetadata& object,
+    std::size_t rigidbody_attribute_index,
+    const SceneResolvedObjectPose& pose,
+    const float* view_projection_matrix,
+    const ImVec2& viewport_min,
+    const ImVec2& viewport_max,
+    bool mouse_over_viewport,
+    bool block_interaction)
+{
+    static ColliderResizeDragState drag_state;
+
+    if (!ImGui::GetIO().MouseDown[ImGuiMouseButton_Left])
+    {
+        drag_state.active = false;
+    }
+
+    if (object.physics_shape == SceneObjectPhysicsShape::None)
+    {
+        return false;
+    }
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    ImVec2 center_screen = ImVec2(0.0f, 0.0f);
+    const Vec3 center_world = TransformPoint(pose.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
+    if (!ProjectWorldPointToScreen(center_world, view_projection_matrix, viewport_min, viewport_max, center_screen))
+    {
+        return false;
+    }
+
+    constexpr float kHandleRadius = 5.5f;
+    constexpr float kHitRadius = 11.0f;
+    const ImU32 handle_color = IM_COL32(140, 230, 170, 255);
+    const ImU32 handle_hover_color = IM_COL32(220, 255, 200, 255);
+
+    struct HandleCandidate
+    {
+        int axis = 0;
+        ImVec2 screen = ImVec2(0.0f, 0.0f);
+    };
+    std::vector<HandleCandidate> handles;
+
+    if (object.physics_shape == SceneObjectPhysicsShape::Sphere)
+    {
+        ImVec2 handle_screen = ImVec2(0.0f, 0.0f);
+        const Vec3 handle_world = TransformPoint(
+            pose.world_matrix.data(),
+            Vec3{(std::max)(0.01f, object.physics_radius), 0.0f, 0.0f});
+        if (ProjectWorldPointToScreen(handle_world, view_projection_matrix, viewport_min, viewport_max, handle_screen))
+        {
+            handles.push_back({0, handle_screen});
+        }
+    }
+    else if (object.physics_shape == SceneObjectPhysicsShape::Box)
+    {
+        const SceneVector3 half = object.physics_half_extent;
+        const Vec3 local_handles[3] = {
+            Vec3{(std::max)(0.01f, half[0]), 0.0f, 0.0f},
+            Vec3{0.0f, (std::max)(0.01f, half[1]), 0.0f},
+            Vec3{0.0f, 0.0f, (std::max)(0.01f, half[2])}};
+
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            ImVec2 handle_screen = ImVec2(0.0f, 0.0f);
+            const Vec3 handle_world = TransformPoint(pose.world_matrix.data(), local_handles[axis]);
+            if (ProjectWorldPointToScreen(handle_world, view_projection_matrix, viewport_min, viewport_max, handle_screen))
+            {
+                handles.push_back({axis, handle_screen});
+            }
+        }
+    }
+
+    int hovered_handle_index = -1;
+    const ImVec2 mouse = ImGui::GetMousePos();
+    for (int i = 0; i < static_cast<int>(handles.size()); ++i)
+    {
+        const float dx = mouse.x - handles[static_cast<std::size_t>(i)].screen.x;
+        const float dy = mouse.y - handles[static_cast<std::size_t>(i)].screen.y;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        if (distance <= kHitRadius)
+        {
+            hovered_handle_index = i;
+            break;
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(handles.size()); ++i)
+    {
+        const bool hovered = i == hovered_handle_index;
+        draw_list->AddCircleFilled(
+            handles[static_cast<std::size_t>(i)].screen,
+            kHandleRadius,
+            hovered ? handle_hover_color : handle_color,
+            16);
+        draw_list->AddLine(center_screen, handles[static_cast<std::size_t>(i)].screen, IM_COL32(130, 170, 150, 190), 1.0f);
+    }
+
+    bool consumed = drag_state.active;
+    if (!block_interaction && mouse_over_viewport && hovered_handle_index >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        const HandleCandidate& handle = handles[static_cast<std::size_t>(hovered_handle_index)];
+        drag_state.active = true;
+        drag_state.object_name = object.name;
+        drag_state.attribute_index = rigidbody_attribute_index;
+        drag_state.shape = object.physics_shape;
+        drag_state.handle_axis = handle.axis;
+        drag_state.start_half_extent = object.physics_half_extent;
+        drag_state.start_radius = object.physics_radius;
+        drag_state.start_mouse = mouse;
+        drag_state.start_center_screen = center_screen;
+        drag_state.start_handle_screen = handle.screen;
+        consumed = true;
+    }
+
+    if (!drag_state.active)
+    {
+        return consumed;
+    }
+
+    if (drag_state.object_name != object.name ||
+        drag_state.attribute_index != rigidbody_attribute_index ||
+        drag_state.shape != object.physics_shape)
+    {
+        drag_state.active = false;
+        return consumed;
+    }
+
+    const ImVec2 axis_screen = ImVec2(
+        drag_state.start_handle_screen.x - drag_state.start_center_screen.x,
+        drag_state.start_handle_screen.y - drag_state.start_center_screen.y);
+    const float axis_length = std::sqrt(axis_screen.x * axis_screen.x + axis_screen.y * axis_screen.y);
+    if (axis_length < 1.0f)
+    {
+        return true;
+    }
+
+    const ImVec2 axis_dir = ImVec2(axis_screen.x / axis_length, axis_screen.y / axis_length);
+    const ImVec2 mouse_delta = ImVec2(mouse.x - drag_state.start_mouse.x, mouse.y - drag_state.start_mouse.y);
+    const float projected_pixels = mouse_delta.x * axis_dir.x + mouse_delta.y * axis_dir.y;
+
+    if (drag_state.shape == SceneObjectPhysicsShape::Sphere)
+    {
+        const float start_radius = (std::max)(0.01f, drag_state.start_radius);
+        const float units_per_pixel = start_radius / axis_length;
+        const float new_radius = (std::max)(0.01f, start_radius + projected_pixels * units_per_pixel);
+        if (std::abs(new_radius - object.physics_radius) > 0.0005f)
+        {
+            SetSceneObjectAttributePhysicsRadius(state.active_scene_path, object.name, rigidbody_attribute_index, new_radius);
+        }
+    }
+    else if (drag_state.shape == SceneObjectPhysicsShape::Box)
+    {
+        SceneVector3 new_half_extent = drag_state.start_half_extent;
+        const int axis = drag_state.handle_axis;
+        const float start_axis_value = (std::max)(0.01f, drag_state.start_half_extent[static_cast<std::size_t>(axis)]);
+        const float units_per_pixel = (std::max)(start_axis_value, 0.1f) / axis_length;
+        new_half_extent[static_cast<std::size_t>(axis)] = (std::max)(0.01f, start_axis_value + projected_pixels * units_per_pixel);
+
+        const float diff = std::abs(new_half_extent[0] - object.physics_half_extent[0]) +
+            std::abs(new_half_extent[1] - object.physics_half_extent[1]) +
+            std::abs(new_half_extent[2] - object.physics_half_extent[2]);
+        if (diff > 0.0008f)
+        {
+            SetSceneObjectAttributePhysicsHalfExtent(state.active_scene_path, object.name, rigidbody_attribute_index, new_half_extent);
+        }
+    }
+
+    return true;
+}
+
 void ExpandBoundsWithObject(Vec3& minimum, Vec3& maximum, const SceneViewportRenderer::QueuedSceneObject& object, const ModelAsset& asset)
 {
     if (!asset.bounds.valid)
@@ -1880,6 +2307,12 @@ void SceneViewportRenderer::RenderUi(
         }
     }
 
+    ImGui::Checkbox("Show Physics Colliders", &show_physics_colliders_);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    {
+        ImGui::SetTooltip("Draw wireframe collider shapes from PhysicsShape settings");
+    }
+
     ImGui::Separator();
 
     const ImVec2 available = ImGui::GetContentRegionAvail();
@@ -2259,6 +2692,39 @@ void SceneViewportRenderer::RenderUi(
         }
     }
 
+    bool collider_resize_interaction_consumed = false;
+    if (show_physics_colliders_)
+    {
+        DrawPhysicsColliderGizmos(
+            draw_list,
+            scene_metadata,
+            resolved_object_poses,
+            view_projection_.data(),
+            min,
+            max,
+            state.selected_scene_object_name);
+
+        if (selected_scene_object_metadata != nullptr)
+        {
+            const auto selected_pose_it = resolved_object_poses.find(selected_scene_object_metadata->name);
+            std::size_t rigidbody_attribute_index = 0;
+            if (selected_pose_it != resolved_object_poses.end() &&
+                FindRigidbodyAttributeIndex(*selected_scene_object_metadata, rigidbody_attribute_index))
+            {
+                collider_resize_interaction_consumed = DrawAndHandleSelectedColliderResize(
+                    state,
+                    *selected_scene_object_metadata,
+                    rigidbody_attribute_index,
+                    selected_pose_it->second,
+                    view_projection_.data(),
+                    min,
+                    max,
+                    mouse_over_viewport,
+                    transform_toolbar_hovered || ImGuizmo::IsOver() || ImGuizmo::IsUsing());
+            }
+        }
+    }
+
     const AxisViewFlipResult axis_view_result = DrawAxisViewFlipControl(min, max, camera_state);
     if (axis_view_result.changed)
     {
@@ -2269,7 +2735,13 @@ void SceneViewportRenderer::RenderUi(
         MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
     }
 
-    if (mouse_over_viewport && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !transform_toolbar_hovered && !axis_view_result.hovered && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
+    if (mouse_over_viewport &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !collider_resize_interaction_consumed &&
+        !transform_toolbar_hovered &&
+        !axis_view_result.hovered &&
+        !ImGuizmo::IsOver() &&
+        !ImGuizmo::IsUsing())
     {
         const int picked_object_index = PickSceneObject(
             queued_objects_,

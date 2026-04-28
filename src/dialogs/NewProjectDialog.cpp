@@ -202,7 +202,7 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
     const std::filesystem::path manifest_path = project_root / (project_name + ".engineproj");
     const std::filesystem::path scene_path = project_root / "Scenes" / "Main.scene";
     const std::filesystem::path config_path = project_root / "Config" / "editor.ini";
-    const std::filesystem::path script_path = project_root / "Scripts" / "Game.cpp";
+    const std::filesystem::path script_path = project_root / "Scripts" / "Game.lua";
 
     {
         std::ofstream manifest_file(manifest_path, std::ios::binary | std::ios::trunc);
@@ -239,12 +239,13 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
     {
         std::ofstream script_file(script_path, std::ios::binary | std::ios::trunc);
         script_file
-            << "#include <iostream>\n\n"
-            << "int main()\n"
-            << "{\n"
-            << "    std::cout << \"" << project_name << " script stub\\n\";\n"
-            << "    return 0;\n"
-            << "}\n";
+            << "local Game = {}\n\n"
+            << "function Game:OnCreate(entity)\n"
+            << "    -- " << project_name << " entry script\n"
+            << "end\n\n"
+            << "function Game:OnUpdate(entity, delta_time)\n"
+            << "end\n\n"
+            << "return Game\n";
     }
 
     state.AddLog("Created project scaffold: " + state.GetDisplayPath(project_root));

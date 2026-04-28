@@ -72,7 +72,13 @@ bool IsSupportedModelAttachment(const std::filesystem::path& path)
 
 bool IsSupportedScriptAttachment(const std::filesystem::path& path)
 {
-    return path.extension() == ".cpp";
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value)
+    {
+        return static_cast<char>(std::tolower(value));
+    });
+
+    return extension == ".lua";
 }
 
 bool IsSupportedGraphAttachment(const std::filesystem::path& path)
@@ -453,7 +459,7 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
         }
         else
         {
-            state.AddLog("Attach supported assets only: .fbx/.glb model, .cpp script, or .graph graph");
+            state.AddLog("Attach supported assets only: .fbx/.glb model, .lua script, or .graph graph");
         }
     }
 

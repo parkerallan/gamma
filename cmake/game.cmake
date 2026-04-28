@@ -89,7 +89,9 @@ add_executable(game
     src/vfs/PakArchive.cpp
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
+    src/render/PhysicsWorld.cpp
     src/render/RuntimeRenderer.cpp
+    src/render/RuntimeScriptAPI.cpp
     src/vfs/AssetVFS.cpp
 )
 
@@ -110,6 +112,8 @@ target_compile_definitions(game PRIVATE
 target_link_libraries(game PRIVATE
     SDL3::SDL3-static
     imgui
+    lua_runtime
+    joltphysics
     nlohmann_json::nlohmann_json
     Vulkan::Vulkan
 )

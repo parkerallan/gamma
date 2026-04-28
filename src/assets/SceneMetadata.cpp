@@ -174,6 +174,22 @@ bool ParseBool(std::string_view value, bool& result)
     return false;
 }
 
+SceneObjectPhysicsShape ParseSceneObjectPhysicsShape(std::string_view value)
+{
+    const std::string normalized = ToLowerCopy(TrimCopy(std::string(value)));
+    if (normalized == "box")
+    {
+        return SceneObjectPhysicsShape::Box;
+    }
+
+    if (normalized == "sphere")
+    {
+        return SceneObjectPhysicsShape::Sphere;
+    }
+
+    return SceneObjectPhysicsShape::None;
+}
+
 std::vector<std::string> ReadSceneLines(const std::filesystem::path& scene_path)
 {
     if (g_asset_reader)
@@ -365,7 +381,15 @@ bool IsAttributePropertyLine(std::string_view line)
         StartsWith(line, "AttributeFov:") ||
         StartsWith(line, "AttributeNearClip:") ||
     StartsWith(line, "AttributeFarClip:") ||
-    StartsWith(line, "AttributeActive:");
+    StartsWith(line, "AttributeActive:") ||
+    StartsWith(line, "AttributePhysicsShape:") ||
+    StartsWith(line, "AttributePhysicsDynamic:") ||
+    StartsWith(line, "AttributePhysicsMass:") ||
+    StartsWith(line, "AttributePhysicsFriction:") ||
+    StartsWith(line, "AttributePhysicsRadius:") ||
+    StartsWith(line, "AttributePhysicsHalfExtent:") ||
+    StartsWith(line, "AttributePhysicsLinearDamping:") ||
+    StartsWith(line, "AttributePhysicsAngularDamping:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -663,6 +687,44 @@ bool SetSceneObjectVector3(const std::filesystem::path& scene_path, const std::s
         lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(object_end), new_line);
     });
 }
+
+bool SetSceneObjectScalar(const std::filesystem::path& scene_path, const std::string& object_name, std::string_view key, float value)
+{
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + FormatScalar(value);
+        for (std::size_t index = object_start + 1; index < object_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(object_end), new_line);
+    });
+}
+
+bool SetSceneObjectBoolean(const std::filesystem::path& scene_path, const std::string& object_name, std::string_view key, bool value)
+{
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + FormatBool(value);
+        for (std::size_t index = object_start + 1; index < object_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(object_end), new_line);
+    });
+}
 }
 
 const char* ToDisplayName(SceneObjectAttributeKind kind)
@@ -677,6 +739,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Spot Light";
     case SceneObjectAttributeKind::Camera:
         return "Camera";
+    case SceneObjectAttributeKind::Rigidbody:
+        return "Rigidbody";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -695,6 +759,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "SpotLight";
     case SceneObjectAttributeKind::Camera:
         return "Camera";
+    case SceneObjectAttributeKind::Rigidbody:
+        return "Rigidbody";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -719,6 +785,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Camera")
     {
         return SceneObjectAttributeKind::Camera;
+    }
+    if (trimmed == "Rigidbody")
+    {
+        return SceneObjectAttributeKind::Rigidbody;
     }
 
     return SceneObjectAttributeKind::None;
@@ -943,7 +1013,7 @@ bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::st
                 break;
             }
 
-            if (StartsWith(trimmed, "Position:") || StartsWith(trimmed, "Rotation:") || StartsWith(trimmed, "Scale:") || StartsWith(trimmed, "Attributes:") || StartsWith(trimmed, "Model:") || StartsWith(trimmed, "Script:") || StartsWith(trimmed, "Graph:"))
+            if (StartsWith(trimmed, "Position:") || StartsWith(trimmed, "Rotation:") || StartsWith(trimmed, "Scale:") || StartsWith(trimmed, "PhysicsShape:") || StartsWith(trimmed, "PhysicsDynamic:") || StartsWith(trimmed, "PhysicsMass:") || StartsWith(trimmed, "PhysicsFriction:") || StartsWith(trimmed, "PhysicsRadius:") || StartsWith(trimmed, "PhysicsHalfExtent:") || StartsWith(trimmed, "PhysicsLinearDamping:") || StartsWith(trimmed, "PhysicsAngularDamping:") || StartsWith(trimmed, "Attributes:") || StartsWith(trimmed, "Model:") || StartsWith(trimmed, "Script:") || StartsWith(trimmed, "Graph:"))
             {
                 existing_parent_index = index;
                 break;
@@ -1031,6 +1101,38 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseVector3(ExtractValue(trimmed, "Scale:"), current_object->scale);
         }
+        else if (StartsWith(trimmed, "PhysicsShape:"))
+        {
+            current_object->physics_shape = ParseSceneObjectPhysicsShape(ExtractValue(trimmed, "PhysicsShape:"));
+        }
+        else if (StartsWith(trimmed, "PhysicsDynamic:"))
+        {
+            ParseBool(ExtractValue(trimmed, "PhysicsDynamic:"), current_object->physics_is_dynamic);
+        }
+        else if (StartsWith(trimmed, "PhysicsMass:"))
+        {
+            ParseScalar(ExtractValue(trimmed, "PhysicsMass:"), current_object->physics_mass);
+        }
+        else if (StartsWith(trimmed, "PhysicsFriction:"))
+        {
+            ParseScalar(ExtractValue(trimmed, "PhysicsFriction:"), current_object->physics_friction);
+        }
+        else if (StartsWith(trimmed, "PhysicsRadius:"))
+        {
+            ParseScalar(ExtractValue(trimmed, "PhysicsRadius:"), current_object->physics_radius);
+        }
+        else if (StartsWith(trimmed, "PhysicsHalfExtent:"))
+        {
+            ParseVector3(ExtractValue(trimmed, "PhysicsHalfExtent:"), current_object->physics_half_extent);
+        }
+        else if (StartsWith(trimmed, "PhysicsLinearDamping:"))
+        {
+            ParseScalar(ExtractValue(trimmed, "PhysicsLinearDamping:"), current_object->physics_linear_damping);
+        }
+        else if (StartsWith(trimmed, "PhysicsAngularDamping:"))
+        {
+            ParseScalar(ExtractValue(trimmed, "PhysicsAngularDamping:"), current_object->physics_angular_damping);
+        }
         else if (StartsWith(trimmed, "Attributes:"))
         {
             current_object->attributes.push_back(MakeDefaultSceneObjectAttribute(ParseSceneObjectAttributeKind(ExtractValue(trimmed, "Attributes:"))));
@@ -1083,6 +1185,46 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeActive:") && current_attribute != nullptr)
         {
             ParseBool(ExtractValue(trimmed, "AttributeActive:"), current_attribute->camera.active);
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsShape:") && current_attribute != nullptr)
+        {
+            current_attribute->rigidbody.shape = ParseSceneObjectPhysicsShape(ExtractValue(trimmed, "AttributePhysicsShape:"));
+            current_object->physics_shape = current_attribute->rigidbody.shape;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsDynamic:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributePhysicsDynamic:"), current_attribute->rigidbody.is_dynamic);
+            current_object->physics_is_dynamic = current_attribute->rigidbody.is_dynamic;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsMass:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributePhysicsMass:"), current_attribute->rigidbody.mass);
+            current_object->physics_mass = current_attribute->rigidbody.mass;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsFriction:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributePhysicsFriction:"), current_attribute->rigidbody.friction);
+            current_object->physics_friction = current_attribute->rigidbody.friction;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsRadius:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributePhysicsRadius:"), current_attribute->rigidbody.radius);
+            current_object->physics_radius = current_attribute->rigidbody.radius;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsHalfExtent:") && current_attribute != nullptr)
+        {
+            ParseVector3(ExtractValue(trimmed, "AttributePhysicsHalfExtent:"), current_attribute->rigidbody.half_extent);
+            current_object->physics_half_extent = current_attribute->rigidbody.half_extent;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsLinearDamping:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributePhysicsLinearDamping:"), current_attribute->rigidbody.linear_damping);
+            current_object->physics_linear_damping = current_attribute->rigidbody.linear_damping;
+        }
+        else if (StartsWith(trimmed, "AttributePhysicsAngularDamping:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributePhysicsAngularDamping:"), current_attribute->rigidbody.angular_damping);
+            current_object->physics_angular_damping = current_attribute->rigidbody.angular_damping;
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -1148,6 +1290,70 @@ bool SetSceneObjectRotation(const std::filesystem::path& scene_path, const std::
 bool SetSceneObjectScale(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& scale)
 {
     return SetSceneObjectVector3(scene_path, object_name, "Scale", scale);
+}
+
+bool SetSceneObjectPhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectPhysicsShape shape)
+{
+    const char* shape_name = "None";
+    if (shape == SceneObjectPhysicsShape::Box)
+    {
+        shape_name = "Box";
+    }
+    else if (shape == SceneObjectPhysicsShape::Sphere)
+    {
+        shape_name = "Sphere";
+    }
+
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        const std::string key_prefix = "PhysicsShape:";
+        const std::string new_line = std::string("PhysicsShape: ") + shape_name;
+        for (std::size_t index = object_start + 1; index < object_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(object_end), new_line);
+    });
+}
+
+bool SetSceneObjectPhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, bool is_dynamic)
+{
+    return SetSceneObjectBoolean(scene_path, object_name, "PhysicsDynamic", is_dynamic);
+}
+
+bool SetSceneObjectPhysicsMass(const std::filesystem::path& scene_path, const std::string& object_name, float mass)
+{
+    return SetSceneObjectScalar(scene_path, object_name, "PhysicsMass", mass);
+}
+
+bool SetSceneObjectPhysicsFriction(const std::filesystem::path& scene_path, const std::string& object_name, float friction)
+{
+    return SetSceneObjectScalar(scene_path, object_name, "PhysicsFriction", friction);
+}
+
+bool SetSceneObjectPhysicsRadius(const std::filesystem::path& scene_path, const std::string& object_name, float radius)
+{
+    return SetSceneObjectScalar(scene_path, object_name, "PhysicsRadius", radius);
+}
+
+bool SetSceneObjectPhysicsHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& half_extent)
+{
+    return SetSceneObjectVector3(scene_path, object_name, "PhysicsHalfExtent", half_extent);
+}
+
+bool SetSceneObjectPhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, float linear_damping)
+{
+    return SetSceneObjectScalar(scene_path, object_name, "PhysicsLinearDamping", linear_damping);
+}
+
+bool SetSceneObjectPhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, float angular_damping)
+{
+    return SetSceneObjectScalar(scene_path, object_name, "PhysicsAngularDamping", angular_damping);
 }
 
 bool AddSceneObjectAttribute(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectAttributeKind kind)
@@ -1304,6 +1510,127 @@ bool SetSceneObjectCameraActive(const std::filesystem::path& scene_path, const s
     }
 
     return SetSceneObjectAttributeBoolean("AttributeActive", scene_path, object_name, attribute_index, active);
+}
+
+bool SetSceneObjectAttributeVector3Value(
+    std::string_view key,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    const SceneVector3& value)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + FormatVector3(value);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
+bool SetSceneObjectAttributeStringValue(
+    std::string_view key,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    std::string_view string_value)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + std::string(string_value);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
+bool SetSceneObjectAttributePhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectPhysicsShape shape)
+{
+    const char* shape_string = "None";
+    if (shape == SceneObjectPhysicsShape::Box)
+    {
+        shape_string = "Box";
+    }
+    else if (shape == SceneObjectPhysicsShape::Sphere)
+    {
+        shape_string = "Sphere";
+    }
+    return SetSceneObjectAttributeStringValue("AttributePhysicsShape", scene_path, object_name, attribute_index, shape_string);
+}
+
+bool SetSceneObjectAttributePhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool is_dynamic)
+{
+    return SetSceneObjectAttributeBoolean("AttributePhysicsDynamic", scene_path, object_name, attribute_index, is_dynamic);
+}
+
+bool SetSceneObjectAttributePhysicsMass(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float mass)
+{
+    return SetSceneObjectAttributeScalar("AttributePhysicsMass", scene_path, object_name, attribute_index, mass);
+}
+
+bool SetSceneObjectAttributePhysicsFriction(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float friction)
+{
+    return SetSceneObjectAttributeScalar("AttributePhysicsFriction", scene_path, object_name, attribute_index, friction);
+}
+
+bool SetSceneObjectAttributePhysicsRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float radius)
+{
+    return SetSceneObjectAttributeScalar("AttributePhysicsRadius", scene_path, object_name, attribute_index, radius);
+}
+
+bool SetSceneObjectAttributePhysicsHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent)
+{
+    return SetSceneObjectAttributeVector3Value("AttributePhysicsHalfExtent", scene_path, object_name, attribute_index, half_extent);
+}
+
+bool SetSceneObjectAttributePhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float linear_damping)
+{
+    return SetSceneObjectAttributeScalar("AttributePhysicsLinearDamping", scene_path, object_name, attribute_index, linear_damping);
+}
+
+bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float angular_damping)
+{
+    return SetSceneObjectAttributeScalar("AttributePhysicsAngularDamping", scene_path, object_name, attribute_index, angular_damping);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)
