@@ -89,6 +89,26 @@ void ApplyDirectionalLight(ResolvedSceneLighting& lighting, const SceneLightingR
     lighting.directional_light_data = {DegreesToRadians(kDefaultDirectionalAngularRadiusDegrees), 0.0f, 0.0f, 0.0f};
 }
 
+void ApplyPointLight(ResolvedSceneLighting& lighting, const SceneLightingResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
+{
+    const Vec3 position = TransformPoint(pose.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
+    lighting.point_light_color = {
+        attribute.point_light.color[0],
+        attribute.point_light.color[1],
+        attribute.point_light.color[2],
+        attribute.point_light.intensity};
+    lighting.point_light_position = {
+        position.x,
+        position.y,
+        position.z,
+        (std::max)(attribute.point_light.range, 0.001f)};
+    lighting.point_light_data = {
+        (std::max)(attribute.point_light.source_radius, 0.001f),
+        (std::max)(attribute.point_light.halo_intensity, 0.0f),
+        (std::max)(attribute.point_light.halo_radius, 0.01f),
+        0.0f};
+}
+
 void ApplySpotLight(ResolvedSceneLighting& lighting, const SceneLightingResolvedObjectPose& pose, const SceneObjectAttribute& attribute)
 {
     const Vec3 direction = TransformDirectionByMatrix(pose.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
@@ -121,6 +141,7 @@ void ResolvePreferredDirectLights(
     const SceneLightingResolvedObjectPoseMap& resolved_poses,
     const std::string& selected_object_name,
     bool& found_directional_light,
+    bool& found_point_light,
     bool& found_spot_light)
 {
     if (selected_object_name.empty())
@@ -150,6 +171,11 @@ void ResolvePreferredDirectLights(
             ApplyDirectionalLight(lighting, pose_it->second, attribute);
             found_directional_light = true;
         }
+        else if (!found_point_light && attribute.kind == SceneObjectAttributeKind::PointLight)
+        {
+            ApplyPointLight(lighting, pose_it->second, attribute);
+            found_point_light = true;
+        }
         else if (!found_spot_light && attribute.kind == SceneObjectAttributeKind::SpotLight)
         {
             ApplySpotLight(lighting, pose_it->second, attribute);
@@ -168,9 +194,10 @@ ResolvedSceneLighting ResolveSceneLighting(
 
     bool found_environment_light = false;
     bool found_directional_light = false;
+    bool found_point_light = false;
     bool found_spot_light = false;
 
-    ResolvePreferredDirectLights(lighting, scene_metadata, resolved_poses, selected_object_name, found_directional_light, found_spot_light);
+    ResolvePreferredDirectLights(lighting, scene_metadata, resolved_poses, selected_object_name, found_directional_light, found_point_light, found_spot_light);
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
@@ -193,6 +220,14 @@ ResolvedSceneLighting ResolveSceneLighting(
                 {
                     ApplyDirectionalLight(lighting, pose_it->second, attribute);
                     found_directional_light = true;
+                }
+                break;
+
+            case SceneObjectAttributeKind::PointLight:
+                if (!found_point_light)
+                {
+                    ApplyPointLight(lighting, pose_it->second, attribute);
+                    found_point_light = true;
                 }
                 break;
 

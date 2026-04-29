@@ -16,6 +16,9 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 directional_light_color;
     vec4 directional_light_direction;
     vec4 directional_light_data;
+    vec4 point_light_color;
+    vec4 point_light_position;
+    vec4 point_light_data;
     vec4 spot_light_color;
     vec4 spot_light_direction;
     vec4 spot_light_position;

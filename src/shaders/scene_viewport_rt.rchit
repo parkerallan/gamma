@@ -24,6 +24,9 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 directional_light_color;
     vec4 directional_light_direction;
     vec4 directional_light_data;
+    vec4 point_light_color;
+    vec4 point_light_position;
+    vec4 point_light_data;
     vec4 spot_light_color;
     vec4 spot_light_direction;
     vec4 spot_light_position;
@@ -345,6 +348,79 @@ float trace_shadow_visibility(vec3 origin, vec3 direction, float max_distance)
     return shadow_payload;
 }
 
+vec3 evaluate_point_light_emitter(vec3 ray_origin, vec3 ray_direction, float scene_hit_distance)
+{
+    if (scene_uniforms.point_light_color.a <= 0.0)
+    {
+        return vec3(0.0);
+    }
+
+    vec3 light_center = scene_uniforms.point_light_position.xyz;
+    float source_radius = max(scene_uniforms.point_light_data.x, 0.02);
+    float halo_intensity = max(scene_uniforms.point_light_data.y, 0.0);
+    float halo_radius = max(scene_uniforms.point_light_data.z, 0.01);
+    vec3 base_color = max(scene_uniforms.point_light_color.rgb, vec3(0.0));
+    float intensity = max(scene_uniforms.point_light_color.a, 0.0);
+
+    vec3 center_delta = light_center - ray_origin;
+    float closest_t = dot(center_delta, ray_direction);
+    vec3 closest_point = ray_origin + ray_direction * max(closest_t, 0.0);
+    float radial_distance = length(light_center - closest_point);
+
+    vec3 result = vec3(0.0);
+
+    if (closest_t > 0.0 && closest_t < scene_hit_distance)
+    {
+        float inv_dist = 1.0 / max(closest_t, 0.001);
+        float angular_radial = radial_distance * inv_dist;
+        float angular_source = source_radius * inv_dist;
+
+        float halo_sigma_outer_ang = max(angular_source * 4.2 * halo_radius, 0.00015);
+        float halo_sigma_inner_ang = max(angular_source * 1.6 * halo_radius, 0.00008);
+
+        float halo_outer = exp(-(angular_radial * angular_radial) / max(halo_sigma_outer_ang * halo_sigma_outer_ang, 1e-6));
+        float halo_inner = exp(-(angular_radial * angular_radial) / max(halo_sigma_inner_ang * halo_sigma_inner_ang, 1e-6));
+
+        float halo_hotness = clamp(halo_inner * 0.75 + halo_outer * 0.25, 0.0, 1.0);
+        vec3 halo_color = mix(base_color * 0.55, vec3(1.0, 0.985, 0.955), halo_hotness * 0.55);
+        float halo_energy = (halo_outer * 0.55 + halo_inner * 0.45);
+        result += halo_color * intensity * halo_intensity * halo_energy * 1.1;
+    }
+
+    vec3 oc = ray_origin - light_center;
+    float b = dot(oc, ray_direction);
+    float c = dot(oc, oc) - source_radius * source_radius;
+    float h = b * b - c;
+    if (h >= 0.0)
+    {
+        float s = sqrt(h);
+        float t_near = -b - s;
+        float t_far = -b + s;
+        float hit_t = t_near > 0.0 ? t_near : (t_far > 0.0 ? t_far : -1.0);
+        if (hit_t > 0.0 && hit_t < scene_hit_distance)
+        {
+            vec3 hit_position = ray_origin + ray_direction * hit_t;
+            vec3 sphere_normal = normalize(hit_position - light_center);
+            float facing = clamp(dot(-ray_direction, sphere_normal), 0.0, 1.0);
+            float radial_unit = clamp(radial_distance / max(source_radius, 1e-6), 0.0, 1.0);
+            float radial_center = 1.0 - radial_unit;
+
+            float body_weight = pow(radial_center, 1.8);
+            float core_weight = pow(radial_center, 3.2);
+            float limb = 0.5 + 0.5 * facing;
+
+            float whiten = clamp(body_weight * 0.55 + core_weight * 0.45, 0.0, 1.0);
+            vec3 warm_white = vec3(1.0, 0.992, 0.97);
+            vec3 radial_color = mix(base_color, warm_white, whiten);
+
+            float brightness = (1.2 + 4.5 * body_weight + 7.5 * core_weight) * limb;
+            result += radial_color * intensity * brightness;
+        }
+    }
+
+    return result;
+}
+
 void main()
 {
     MeshRecord mesh = meshes[gl_InstanceCustomIndexEXT];
@@ -434,6 +510,57 @@ void main()
         lighting += light_sum / float(sample_count);
     }
 
+    if (scene_uniforms.point_light_color.a > 0.0)
+    {
+        float source_radius = max(scene_uniforms.point_light_data.x, 0.0);
+        uint sample_count = source_radius > 0.00001 ? SOFT_SHADOW_SAMPLE_COUNT : 1u;
+        float sample_rotation = hash_to_unit_float(sample_seed ^ 0x2f6e2b1du) * (2.0 * PI);
+        vec3 light_sum = vec3(0.0);
+        vec3 center_to_light = scene_uniforms.point_light_position.xyz - world_position;
+        float center_distance = length(center_to_light);
+        vec3 sample_axis = center_distance > 0.0001 ? (center_to_light / center_distance) : vec3(0.0, 1.0, 0.0);
+        vec3 sample_tangent;
+        vec3 sample_bitangent;
+        build_basis(sample_axis, sample_tangent, sample_bitangent);
+
+        for (uint sample_index = 0u; sample_index < sample_count; ++sample_index)
+        {
+            vec2 disk_sample = sample_count > 1u ? sample_concentric_disk(hammersley(sample_index, sample_count, sample_seed ^ 0xb7e15162u)) : vec2(0.0);
+            disk_sample = rotate_disk_sample(disk_sample, sample_rotation) * source_radius;
+            vec3 sampled_light_position = scene_uniforms.point_light_position.xyz + sample_tangent * disk_sample.x + sample_bitangent * disk_sample.y;
+            vec3 to_light = sampled_light_position - world_position;
+            float distance_to_light = length(to_light);
+            if (distance_to_light <= 0.0001)
+            {
+                continue;
+            }
+
+            vec3 light_direction = to_light / distance_to_light;
+            float range = max(scene_uniforms.point_light_position.w, 0.0001);
+            float normalized_distance = distance_to_light / range;
+            float range_fade = clamp(1.0 - normalized_distance * normalized_distance * normalized_distance * normalized_distance, 0.0, 1.0);
+            float smooth_range = range_fade * range_fade;
+            float inverse_square = 1.0 / max(distance_to_light * distance_to_light, 0.01);
+            float attenuation = inverse_square * smooth_range;
+            if (attenuation <= 0.0)
+            {
+                continue;
+            }
+
+            vec3 brdf = evaluate_direct_brdf(albedo.rgb, metallic, roughness, f0, world_normal, view_direction, light_direction);
+            if (max(brdf.r, max(brdf.g, brdf.b)) <= 0.0)
+            {
+                continue;
+            }
+
+            float visibility = trace_shadow_visibility(shadow_origin + light_direction * 0.0025, light_direction, max(distance_to_light - 0.01, 0.001));
+            vec3 radiance = scene_uniforms.point_light_color.rgb * scene_uniforms.point_light_color.a * attenuation * visibility;
+            light_sum += brdf * radiance;
+        }
+
+        lighting += light_sum / float(sample_count);
+    }
+
     if (scene_uniforms.spot_light_color.a > 0.0)
     {
         vec3 light_axis = normalize(-scene_uniforms.spot_light_direction.xyz);
@@ -511,6 +638,7 @@ void main()
                 10000.0,
                 0);
             vec3 reflection_color = primary_payload.color.rgb;
+            reflection_color += evaluate_point_light_emitter(shadow_origin, normalize(reflection_direction), primary_payload.hit_distance);
             shaded_color += reflection_color * fresnel * reflection_weight * ambient_occlusion;
             primary_payload.depth = current_depth;
         }

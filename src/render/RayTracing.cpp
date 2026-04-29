@@ -2020,6 +2020,9 @@ bool RayTracing::RenderFrame(
     uniforms.directional_light_color = lighting.directional_light_color;
     uniforms.directional_light_direction = lighting.directional_light_direction;
     uniforms.directional_light_data = lighting.directional_light_data;
+    uniforms.point_light_color = lighting.point_light_color;
+    uniforms.point_light_position = lighting.point_light_position;
+    uniforms.point_light_data = lighting.point_light_data;
     uniforms.spot_light_color = lighting.spot_light_color;
     uniforms.spot_light_direction = lighting.spot_light_direction;
     uniforms.spot_light_position = lighting.spot_light_position;

@@ -386,6 +386,9 @@ bool IsAttributePropertyLine(std::string_view line)
     return StartsWith(line, "AttributeColor:") ||
         StartsWith(line, "AttributeIntensity:") ||
         StartsWith(line, "AttributeRange:") ||
+        StartsWith(line, "AttributeSourceRadius:") ||
+        StartsWith(line, "AttributeHaloIntensity:") ||
+        StartsWith(line, "AttributeHaloRadius:") ||
         StartsWith(line, "AttributeInnerCone:") ||
         StartsWith(line, "AttributeOuterCone:") ||
         StartsWith(line, "AttributeFov:") ||
@@ -750,6 +753,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Environment Light";
     case SceneObjectAttributeKind::DirectionalLight:
         return "Directional Light";
+    case SceneObjectAttributeKind::PointLight:
+        return "Point Light";
     case SceneObjectAttributeKind::SpotLight:
         return "Spot Light";
     case SceneObjectAttributeKind::Camera:
@@ -772,6 +777,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "EnvironmentLight";
     case SceneObjectAttributeKind::DirectionalLight:
         return "DirectionalLight";
+    case SceneObjectAttributeKind::PointLight:
+        return "PointLight";
     case SceneObjectAttributeKind::SpotLight:
         return "SpotLight";
     case SceneObjectAttributeKind::Camera:
@@ -796,6 +803,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "DirectionalLight")
     {
         return SceneObjectAttributeKind::DirectionalLight;
+    }
+    if (trimmed == "PointLight")
+    {
+        return SceneObjectAttributeKind::PointLight;
     }
     if (trimmed == "SpotLight")
     {
@@ -1199,6 +1210,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             {
                 current_attribute->environment_light.color = color;
                 current_attribute->directional_light.color = color;
+                current_attribute->point_light.color = color;
                 current_attribute->spot_light.color = color;
             }
         }
@@ -1209,12 +1221,26 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             {
                 current_attribute->environment_light.intensity = intensity;
                 current_attribute->directional_light.intensity = intensity;
+                current_attribute->point_light.intensity = intensity;
                 current_attribute->spot_light.intensity = intensity;
             }
         }
         else if (StartsWith(trimmed, "AttributeRange:") && current_attribute != nullptr)
         {
+            ParseScalar(ExtractValue(trimmed, "AttributeRange:"), current_attribute->point_light.range);
             ParseScalar(ExtractValue(trimmed, "AttributeRange:"), current_attribute->spot_light.range);
+        }
+        else if (StartsWith(trimmed, "AttributeSourceRadius:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeSourceRadius:"), current_attribute->point_light.source_radius);
+        }
+        else if (StartsWith(trimmed, "AttributeHaloIntensity:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeHaloIntensity:"), current_attribute->point_light.halo_intensity);
+        }
+        else if (StartsWith(trimmed, "AttributeHaloRadius:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeHaloRadius:"), current_attribute->point_light.halo_radius);
         }
         else if (StartsWith(trimmed, "AttributeInnerCone:") && current_attribute != nullptr)
         {
@@ -1539,6 +1565,21 @@ bool SetSceneObjectAttributeIntensity(const std::filesystem::path& scene_path, c
 bool SetSceneObjectAttributeRange(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float range)
 {
     return SetSceneObjectAttributeScalar("AttributeRange", scene_path, object_name, attribute_index, range);
+}
+
+bool SetSceneObjectAttributeSourceRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float source_radius)
+{
+    return SetSceneObjectAttributeScalar("AttributeSourceRadius", scene_path, object_name, attribute_index, source_radius);
+}
+
+bool SetSceneObjectAttributeHaloIntensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float halo_intensity)
+{
+    return SetSceneObjectAttributeScalar("AttributeHaloIntensity", scene_path, object_name, attribute_index, halo_intensity);
+}
+
+bool SetSceneObjectAttributeHaloRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float halo_radius)
+{
+    return SetSceneObjectAttributeScalar("AttributeHaloRadius", scene_path, object_name, attribute_index, halo_radius);
 }
 
 bool SetSceneObjectAttributeInnerConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float inner_cone_degrees)

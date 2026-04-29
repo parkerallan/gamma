@@ -13,6 +13,7 @@ namespace
 constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::EnvironmentLight,
     SceneObjectAttributeKind::DirectionalLight,
+    SceneObjectAttributeKind::PointLight,
     SceneObjectAttributeKind::SpotLight,
     SceneObjectAttributeKind::Camera,
     SceneObjectAttributeKind::Rigidbody,
@@ -207,6 +208,51 @@ bool RenderAttributeSection(
             ImGui::TextDisabled("Direction uses the object rotation.");
             changed = RenderCommonLightControls(state, object, attribute_index, attribute.directional_light.color, attribute.directional_light.intensity);
             break;
+
+        case SceneObjectAttributeKind::PointLight:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+            ImGui::TextDisabled("Position uses the object transform. Light emits in all directions.");
+            changed = RenderCommonLightControls(state, object, attribute_index, attribute.point_light.color, attribute.point_light.intensity);
+
+            float range = attribute.point_light.range;
+            if (ImGui::DragFloat("Range", &range, 0.1f, 0.01f, 1000.0f, "%.3f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "point light range", [&]()
+                {
+                    return SetSceneObjectAttributeRange(state.selected_item_path, object.name, attribute_index, range);
+                }) || changed;
+            }
+
+            float source_radius = attribute.point_light.source_radius;
+            if (ImGui::DragFloat("Radius", &source_radius, 0.01f, 0.01f, 100.0f, "%.3f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "point light radius", [&]()
+                {
+                    return SetSceneObjectAttributeSourceRadius(state.selected_item_path, object.name, attribute_index, source_radius);
+                }) || changed;
+            }
+
+            float halo_intensity = attribute.point_light.halo_intensity;
+            if (ImGui::DragFloat("Halo Intensity", &halo_intensity, 0.01f, 0.0f, 10.0f, "%.3f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "point light halo intensity", [&]()
+                {
+                    return SetSceneObjectAttributeHaloIntensity(state.selected_item_path, object.name, attribute_index, halo_intensity);
+                }) || changed;
+            }
+
+            float halo_radius = attribute.point_light.halo_radius;
+            if (ImGui::DragFloat("Halo Radius", &halo_radius, 0.01f, 0.01f, 20.0f, "%.3f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "point light halo radius", [&]()
+                {
+                    return SetSceneObjectAttributeHaloRadius(state.selected_item_path, object.name, attribute_index, halo_radius);
+                }) || changed;
+            }
+            break;
+        }
 
         case SceneObjectAttributeKind::SpotLight:
         {

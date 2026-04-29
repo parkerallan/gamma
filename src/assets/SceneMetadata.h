@@ -22,6 +22,7 @@ enum class SceneObjectAttributeKind
     None,
     EnvironmentLight,
     DirectionalLight,
+    PointLight,
     SpotLight,
     Camera,
     Rigidbody,
@@ -38,6 +39,16 @@ struct SceneObjectDirectionalLightAttributes
 {
     SceneColor3 color = {1.0f, 1.0f, 1.0f};
     float intensity = 1.0f;
+};
+
+struct SceneObjectPointLightAttributes
+{
+    SceneColor3 color = {1.0f, 1.0f, 1.0f};
+    float intensity = 25.0f;
+    float range = 15.0f;
+    float source_radius = 0.1f;
+    float halo_intensity = 1.0f;
+    float halo_radius = 1.0f;
 };
 
 struct SceneObjectSpotLightAttributes
@@ -83,6 +94,7 @@ struct SceneObjectAttribute
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
     SceneObjectEnvironmentLightAttributes environment_light{};
     SceneObjectDirectionalLightAttributes directional_light{};
+    SceneObjectPointLightAttributes point_light{};
     SceneObjectSpotLightAttributes spot_light{};
     SceneObjectCameraAttributes camera{};
     SceneObjectRigidbodyAttributes rigidbody{};
@@ -161,6 +173,9 @@ bool SetSceneObjectAttributeKind(const std::filesystem::path& scene_path, const 
 bool SetSceneObjectAttributeColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color);
 bool SetSceneObjectAttributeIntensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float intensity);
 bool SetSceneObjectAttributeRange(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float range);
+bool SetSceneObjectAttributeSourceRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float source_radius);
+bool SetSceneObjectAttributeHaloIntensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float halo_intensity);
+bool SetSceneObjectAttributeHaloRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float halo_radius);
 bool SetSceneObjectAttributeInnerConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float inner_cone_degrees);
 bool SetSceneObjectAttributeOuterConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float outer_cone_degrees);
 bool SetSceneObjectAttributeFieldOfView(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float field_of_view_degrees);
