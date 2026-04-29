@@ -25,6 +25,7 @@ enum class SceneObjectAttributeKind
     SpotLight,
     Camera,
     Rigidbody,
+    TriggerVolume,
 };
 
 struct SceneObjectEnvironmentLightAttributes
@@ -72,6 +73,11 @@ struct SceneObjectRigidbodyAttributes
     float angular_damping = 0.05f;
 };
 
+struct SceneObjectTriggerVolumeAttributes
+{
+    SceneVector3 half_extent = {0.5f, 0.5f, 0.5f};
+};
+
 struct SceneObjectAttribute
 {
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
@@ -80,6 +86,7 @@ struct SceneObjectAttribute
     SceneObjectSpotLightAttributes spot_light{};
     SceneObjectCameraAttributes camera{};
     SceneObjectRigidbodyAttributes rigidbody{};
+    SceneObjectTriggerVolumeAttributes trigger_box{};
 };
 
 struct SceneObjectMetadata
@@ -97,6 +104,7 @@ struct SceneObjectMetadata
     // Physics
     SceneObjectPhysicsShape physics_shape = SceneObjectPhysicsShape::None;
     bool physics_is_dynamic = false;
+    bool physics_is_trigger = false;
     bool physics_lock_rotation_x = false;
     bool physics_lock_rotation_y = false;
     bool physics_lock_rotation_z = false;
@@ -171,6 +179,7 @@ bool SetSceneObjectAttributePhysicsCapsuleHalfHeight(const std::filesystem::path
 bool SetSceneObjectAttributePhysicsHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent);
 bool SetSceneObjectAttributePhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float linear_damping);
 bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float angular_damping);
+bool SetSceneObjectAttributeTriggerHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);

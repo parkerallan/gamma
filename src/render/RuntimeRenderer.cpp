@@ -1748,6 +1748,76 @@ bool RuntimeRenderer::CallScriptMethod(
     return true;
 }
 
+bool RuntimeRenderer::CallScriptTriggerMethod(
+    RuntimeScriptInstance& instance,
+    const char* method_name,
+    const std::string& other_object_name,
+    const std::string& phase,
+    std::string* error_message)
+{
+    if (script_lua_state_ == nullptr || method_name == nullptr)
+    {
+        return false;
+    }
+
+    lua_State* const lua_state = script_lua_state_;
+    lua_rawgeti(lua_state, LUA_REGISTRYINDEX, instance.table_ref);
+    if (!lua_istable(lua_state, -1))
+    {
+        lua_pop(lua_state, 1);
+        if (error_message != nullptr)
+        {
+            *error_message = "Script did not return a table for " + instance.script_path.generic_string();
+        }
+        return false;
+    }
+
+    lua_getfield(lua_state, -1, method_name);
+    if (lua_isnil(lua_state, -1))
+    {
+        lua_pop(lua_state, 2);
+        return true;
+    }
+
+    if (!lua_isfunction(lua_state, -1))
+    {
+        lua_pop(lua_state, 2);
+        if (error_message != nullptr)
+        {
+            *error_message = "Script member is not a function: " + std::string(method_name);
+        }
+        return false;
+    }
+
+    lua_pushvalue(lua_state, -2);
+    lua_pushstring(lua_state, instance.object_name.c_str());
+    lua_pushstring(lua_state, other_object_name.c_str());
+    lua_pushstring(lua_state, phase.c_str());
+
+    const std::string previous_instance_key = script_active_instance_key_;
+    const std::string previous_object_name = script_active_object_name_;
+    script_active_instance_key_ = instance.instance_key;
+    script_active_object_name_ = instance.object_name;
+
+    const int call_result = lua_pcall(lua_state, 4, 0, 0);
+    script_active_instance_key_ = previous_instance_key;
+    script_active_object_name_ = previous_object_name;
+    if (call_result != LUA_OK)
+    {
+        if (error_message != nullptr)
+        {
+            const char* message = lua_tostring(lua_state, -1);
+            *error_message = "Script call failed (" + std::string(method_name) + ") in " + instance.script_path.generic_string() + ": " + (message != nullptr ? message : "unknown error");
+        }
+
+        lua_pop(lua_state, 2);
+        return false;
+    }
+
+    lua_pop(lua_state, 1);
+    return true;
+}
+
 bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
 {
     if (script_lua_state_ == nullptr)
@@ -1843,6 +1913,71 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
     else
     {
         script_frame_collision_events_.clear();
+    }
+
+    std::unordered_set<std::string> trigger_objects;
+    trigger_objects.reserve(cached_scene_metadata_.objects.size());
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (!object.physics_is_trigger)
+        {
+            continue;
+        }
+
+        if (runtime_destroyed_objects_.find(object.name) != runtime_destroyed_objects_.end())
+        {
+            continue;
+        }
+
+        trigger_objects.insert(object.name);
+    }
+
+    for (const PhysicsCollisionEvent& collision : script_frame_collision_events_)
+    {
+        const char* method_name = nullptr;
+        if (collision.phase == "enter")
+        {
+            method_name = "OnTriggerEnter";
+        }
+        else if (collision.phase == "stay")
+        {
+            method_name = "OnTriggerStay";
+        }
+        else if (collision.phase == "exit")
+        {
+            method_name = "OnTriggerExit";
+        }
+
+        if (method_name == nullptr)
+        {
+            continue;
+        }
+
+        const bool a_is_trigger = trigger_objects.find(collision.object_a) != trigger_objects.end();
+        const bool b_is_trigger = trigger_objects.find(collision.object_b) != trigger_objects.end();
+        if (!a_is_trigger && !b_is_trigger)
+        {
+            continue;
+        }
+
+        for (auto& [key, instance] : script_instances_)
+        {
+            if (a_is_trigger && instance.object_name == collision.object_a)
+            {
+                if (!CallScriptTriggerMethod(instance, method_name, collision.object_b, collision.phase, error_message))
+                {
+                    return false;
+                }
+            }
+
+            if (b_is_trigger && instance.object_name == collision.object_b)
+            {
+                if (!CallScriptTriggerMethod(instance, method_name, collision.object_a, collision.phase, error_message))
+                {
+                    return false;
+                }
+            }
+        }
     }
 
     for (auto& [key, instance] : script_instances_)

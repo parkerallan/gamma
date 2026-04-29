@@ -292,6 +292,45 @@ Physics.AddForce("Player", 10.0, 0.0, 0.0)
 
 ## Callback Notes
 
-Typical script callbacks are `OnStart(self)` and `OnUpdate(self, dt)`.
+Typical script callbacks are `OnStart(self)`, `OnUpdate(self, dt)`, and `OnDestroy(self)`.
+
+### Trigger Callbacks
+
+Objects with a `Trigger Volume` attribute can implement the following callbacks:
+
+#### `OnTriggerEnter(self, objectName, otherName, phase)`
+Quick summary: Called when another object first overlaps this trigger volume.
+
+```lua
+function Script:OnTriggerEnter(objectName, otherName, phase)
+    if otherName == "Player" then
+        Engine.Log(objectName .. " entered by " .. otherName .. " (" .. phase .. ")")
+    end
+end
+```
+
+#### `OnTriggerStay(self, objectName, otherName, phase)`
+Quick summary: Called each frame while another object remains inside this trigger volume.
+
+```lua
+function Script:OnTriggerStay(objectName, otherName, phase)
+    if otherName == "Player" then
+        -- Keep this lightweight; it runs every frame during overlap.
+    end
+end
+```
+
+#### `OnTriggerExit(self, objectName, otherName, phase)`
+Quick summary: Called when another object stops overlapping this trigger volume.
+
+```lua
+function Script:OnTriggerExit(objectName, otherName, phase)
+    if otherName == "Player" then
+        Engine.Log(objectName .. " exited by " .. otherName .. " (" .. phase .. ")")
+    end
+end
+```
+
+`otherName` is the other object in the overlap pair, and `phase` is one of `enter`, `stay`, `exit`.
 
 `World.Subscribe`, `World.SetTimeout`, and `World.SetInterval` must be called from an active script callback.

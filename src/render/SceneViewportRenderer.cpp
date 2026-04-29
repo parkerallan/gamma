@@ -986,9 +986,11 @@ void DrawPhysicsColliderGizmos(
         }
 
         const bool is_selected = !selected_object_name.empty() && selected_object_name == object.name;
-        const ImU32 base_color = object.physics_is_dynamic
-            ? IM_COL32(255, 182, 66, 240)
-            : IM_COL32(70, 220, 255, 240);
+        const ImU32 base_color = object.physics_is_trigger
+            ? IM_COL32(130, 255, 130, 240)
+            : (object.physics_is_dynamic
+                ? IM_COL32(255, 182, 66, 240)
+                : IM_COL32(70, 220, 255, 240));
         const ImU32 color = is_selected ? IM_COL32(255, 255, 255, 250) : base_color;
         const float thickness = is_selected ? 2.2f : 1.4f;
 

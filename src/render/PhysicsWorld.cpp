@@ -487,7 +487,8 @@ void PhysicsWorld::BuildFromScene(
         }
 
         const bool is_mesh_shape = object.physics_shape == SceneObjectPhysicsShape::Mesh;
-        const bool is_dynamic = object.physics_is_dynamic && !is_mesh_shape;
+        const bool is_trigger = object.physics_is_trigger;
+        const bool is_dynamic = object.physics_is_dynamic && !is_mesh_shape && !is_trigger;
         const JPH::ObjectLayer layer = is_dynamic ? Layers::MOVING : Layers::NON_MOVING;
         const JPH::EMotionType motion = is_dynamic
             ? JPH::EMotionType::Dynamic
@@ -499,6 +500,7 @@ void PhysicsWorld::BuildFromScene(
             rotation,
             motion,
             layer);
+        settings.mIsSensor = is_trigger;
         if (is_dynamic)
         {
             settings.mAllowedDOFs =

@@ -16,6 +16,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::SpotLight,
     SceneObjectAttributeKind::Camera,
     SceneObjectAttributeKind::Rigidbody,
+    SceneObjectAttributeKind::TriggerVolume,
 };
 
 bool RefreshOpenSceneBuffer(EngineState& state)
@@ -181,7 +182,8 @@ bool RenderAttributeSection(
     bool keep_attribute = true;
     if (ImGui::CollapsingHeader(ToDisplayName(attribute.kind), &keep_attribute, ImGuiTreeNodeFlags_DefaultOpen))
     {
-        if (attribute.kind != SceneObjectAttributeKind::Rigidbody)
+        if (attribute.kind != SceneObjectAttributeKind::Rigidbody &&
+            attribute.kind != SceneObjectAttributeKind::TriggerVolume)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
             {
@@ -459,6 +461,31 @@ bool RenderAttributeSection(
                     }) || changed;
                 }
             }
+            break;
+        }
+
+        case SceneObjectAttributeKind::TriggerVolume:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+            ImGui::TextDisabled("Trigger volumes detect overlap without physical collision response.");
+
+            float half_extent[3] = {
+                attribute.trigger_box.half_extent[0],
+                attribute.trigger_box.half_extent[1],
+                attribute.trigger_box.half_extent[2]};
+            if (ImGui::DragFloat3("Half Extent", half_extent, 0.01f, 0.01f, 10000.0f, "%.3f"))
+            {
+                const SceneVector3 clamped = {
+                    (std::max)(0.01f, half_extent[0]),
+                    (std::max)(0.01f, half_extent[1]),
+                    (std::max)(0.01f, half_extent[2])};
+                changed = SaveSceneObjectAttributeEdit(state, object, "trigger half extent", [&]()
+                {
+                    return SetSceneObjectAttributeTriggerHalfExtent(state.selected_item_path, object.name, attribute_index, clamped);
+                }) || changed;
+            }
+
             break;
         }
 

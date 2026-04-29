@@ -150,6 +150,7 @@ private:
     bool LoadScriptInstance(const std::string& object_name, const std::filesystem::path& script_path, std::string* error_message);
     bool SyncScriptInstances(std::string* error_message);
     bool CallScriptMethod(RuntimeScriptInstance& instance, const char* method_name, float delta_time, bool include_delta_time, std::string* error_message);
+    bool CallScriptTriggerMethod(RuntimeScriptInstance& instance, const char* method_name, const std::string& other_object_name, const std::string& phase, std::string* error_message);
     bool UpdateScriptsForFrame(std::string* error_message);
     bool UpdateScriptTimers(float delta_time, std::string* error_message);
     void ClearScriptTimers();

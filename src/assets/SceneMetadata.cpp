@@ -403,7 +403,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributePhysicsCapsuleHalfHeight:") ||
     StartsWith(line, "AttributePhysicsHalfExtent:") ||
     StartsWith(line, "AttributePhysicsLinearDamping:") ||
-    StartsWith(line, "AttributePhysicsAngularDamping:");
+    StartsWith(line, "AttributePhysicsAngularDamping:") ||
+    StartsWith(line, "AttributeTriggerHalfExtent:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -755,6 +756,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Camera";
     case SceneObjectAttributeKind::Rigidbody:
         return "Rigidbody";
+    case SceneObjectAttributeKind::TriggerVolume:
+        return "Trigger Volume";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -775,6 +778,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Camera";
     case SceneObjectAttributeKind::Rigidbody:
         return "Rigidbody";
+    case SceneObjectAttributeKind::TriggerVolume:
+        return "TriggerVolume";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -803,6 +808,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Rigidbody")
     {
         return SceneObjectAttributeKind::Rigidbody;
+    }
+    if (trimmed == "TriggerVolume")
+    {
+        return SceneObjectAttributeKind::TriggerVolume;
     }
 
     return SceneObjectAttributeKind::None;
@@ -1167,6 +1176,21 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             current_object->attributes.push_back(MakeDefaultSceneObjectAttribute(ParseSceneObjectAttributeKind(ExtractValue(trimmed, "Attributes:"))));
             current_attribute = &current_object->attributes.back();
+
+            if (current_attribute->kind == SceneObjectAttributeKind::TriggerVolume)
+            {
+                current_object->physics_shape = SceneObjectPhysicsShape::Box;
+                current_object->physics_is_dynamic = false;
+                current_object->physics_is_trigger = true;
+                current_object->physics_half_extent = current_attribute->trigger_box.half_extent;
+            }
+            else if (current_attribute->kind == SceneObjectAttributeKind::Rigidbody)
+            {
+                current_object->physics_shape = current_attribute->rigidbody.shape;
+                current_object->physics_is_dynamic = current_attribute->rigidbody.is_dynamic;
+                current_object->physics_is_trigger = false;
+                current_object->physics_half_extent = current_attribute->rigidbody.half_extent;
+            }
         }
         else if (StartsWith(trimmed, "AttributeColor:") && current_attribute != nullptr)
         {
@@ -1220,11 +1244,13 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             current_attribute->rigidbody.shape = ParseSceneObjectPhysicsShape(ExtractValue(trimmed, "AttributePhysicsShape:"));
             current_object->physics_shape = current_attribute->rigidbody.shape;
+            current_object->physics_is_trigger = false;
         }
         else if (StartsWith(trimmed, "AttributePhysicsDynamic:") && current_attribute != nullptr)
         {
             ParseBool(ExtractValue(trimmed, "AttributePhysicsDynamic:"), current_attribute->rigidbody.is_dynamic);
             current_object->physics_is_dynamic = current_attribute->rigidbody.is_dynamic;
+            current_object->physics_is_trigger = false;
         }
         else if (StartsWith(trimmed, "AttributePhysicsLockRotationX:") && current_attribute != nullptr)
         {
@@ -1265,6 +1291,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseVector3(ExtractValue(trimmed, "AttributePhysicsHalfExtent:"), current_attribute->rigidbody.half_extent);
             current_object->physics_half_extent = current_attribute->rigidbody.half_extent;
+            current_object->physics_is_trigger = false;
         }
         else if (StartsWith(trimmed, "AttributePhysicsLinearDamping:") && current_attribute != nullptr)
         {
@@ -1275,6 +1302,15 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseScalar(ExtractValue(trimmed, "AttributePhysicsAngularDamping:"), current_attribute->rigidbody.angular_damping);
             current_object->physics_angular_damping = current_attribute->rigidbody.angular_damping;
+            current_object->physics_is_trigger = false;
+        }
+        else if (StartsWith(trimmed, "AttributeTriggerHalfExtent:") && current_attribute != nullptr)
+        {
+            ParseVector3(ExtractValue(trimmed, "AttributeTriggerHalfExtent:"), current_attribute->trigger_box.half_extent);
+            current_object->physics_shape = SceneObjectPhysicsShape::Box;
+            current_object->physics_is_dynamic = false;
+            current_object->physics_is_trigger = true;
+            current_object->physics_half_extent = current_attribute->trigger_box.half_extent;
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -1727,6 +1763,11 @@ bool SetSceneObjectAttributePhysicsLinearDamping(const std::filesystem::path& sc
 bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float angular_damping)
 {
     return SetSceneObjectAttributeScalar("AttributePhysicsAngularDamping", scene_path, object_name, attribute_index, angular_damping);
+}
+
+bool SetSceneObjectAttributeTriggerHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent)
+{
+    return SetSceneObjectAttributeVector3Value("AttributeTriggerHalfExtent", scene_path, object_name, attribute_index, half_extent);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)
