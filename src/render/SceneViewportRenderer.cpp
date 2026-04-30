@@ -2535,29 +2535,14 @@ void SceneViewportRenderer::RenderUi(
     queued_objects_.clear();
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (object.model_path.empty())
-        {
-            continue;
-        }
-
-        const std::filesystem::path model_path = state.project_root / object.model_path;
-        const SceneViewportResolvedModel resolved_model = resolve_model_asset(model_path);
-        if (resolved_model.asset == nullptr || !resolved_model.asset->loaded)
-        {
-            continue;
-        }
-        if (!EnsureMeshCacheEntry(model_path, resolved_model))
-        {
-            continue;
-        }
         QueuedSceneObject queued_object;
-        queued_object.model_path = model_path;
         queued_object.name = object.name;
         queued_object.model_visual_offset = object.model_visual_offset;
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;
         queued_object.selected = state.selected_item_path == state.active_scene_path && state.selected_scene_object_name == object.name;
+        
         const auto pose_it = resolved_object_poses.find(object.name);
         if (pose_it != resolved_object_poses.end())
         {
@@ -2572,14 +2557,33 @@ void SceneViewportRenderer::RenderUi(
             SetIdentity(queued_object.parent_matrix.data());
             queued_object.world_position = queued_object.local_position;
         }
-        Vec3 object_bounds_min;
-        Vec3 object_bounds_max;
-        queued_object.has_bounds = ComputeObjectBounds(queued_object, *resolved_model.asset, object_bounds_min, object_bounds_max);
+
+        Vec3 object_bounds_min = ToVec3(queued_object.world_position);
+        Vec3 object_bounds_max = ToVec3(queued_object.world_position);
+
+        if (!object.model_path.empty())
+        {
+            const std::filesystem::path model_path = state.project_root / object.model_path;
+            const SceneViewportResolvedModel resolved_model = resolve_model_asset(model_path);
+            if (resolved_model.asset != nullptr && resolved_model.asset->loaded && 
+                EnsureMeshCacheEntry(model_path, resolved_model))
+            {
+                queued_object.model_path = model_path;
+                queued_object.has_bounds = ComputeObjectBounds(queued_object, *resolved_model.asset, object_bounds_min, object_bounds_max);
+                ExpandBoundsWithObject(world_min, world_max, queued_object, *resolved_model.asset);
+            }
+        }
+        else
+        {
+            const float pickup_radius = 0.5f;
+            object_bounds_min = Subtract(object_bounds_min, Vec3{pickup_radius, pickup_radius, pickup_radius});
+            object_bounds_max = Add(object_bounds_max, Vec3{pickup_radius, pickup_radius, pickup_radius});
+            queued_object.has_bounds = true;
+        }
+
         queued_object.bounds_min = ToSceneVector3(object_bounds_min);
         queued_object.bounds_max = ToSceneVector3(object_bounds_max);
         queued_objects_.push_back(queued_object);
-
-        ExpandBoundsWithObject(world_min, world_max, queued_object, *resolved_model.asset);
     }
 
     QueuedSceneObject fallback_gizmo_object;

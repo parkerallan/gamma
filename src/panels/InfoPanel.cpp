@@ -121,6 +121,22 @@ bool SaveSceneObjectVector3Edit(
     return true;
 }
 
+void UpdateCachedSceneObjectVector3(
+    SceneMetadata& scene_metadata,
+    const std::string& object_name,
+    SceneVector3 SceneObjectMetadata::*field,
+    const SceneVector3& value)
+{
+    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](SceneObjectMetadata& object)
+    {
+        return object.name == object_name;
+    });
+    if (object_it != scene_metadata.objects.end())
+    {
+        (*object_it).*field = value;
+    }
+}
+
 SceneVector3 SnapPositionToGrid(const SceneVector3& value, const EngineState& state)
 {
     if (!state.snap_to_grid || state.grid_size <= 0.0f)
@@ -469,10 +485,6 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
 
 void InfoPanel::RenderSelectedSceneObject(EngineState& state)
 {
-    // Viewport gizmo edits can happen multiple times within a single timestamp
-    // granularity window on Windows, so force a fresh parse while editing.
-    has_cached_scene_metadata_ = false;
-
     const SceneMetadata& scene_metadata = GetSceneMetadata(state.selected_item_path);
     if (!scene_metadata.parsed)
     {
@@ -495,7 +507,9 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         return;
     }
 
-    const std::string preview_scope = state.selected_item_path.generic_string() + "::" + object_it->name;
+    SceneObjectMetadata selected_object = *object_it;
+
+    const std::string preview_scope = state.selected_item_path.generic_string() + "::" + selected_object.name;
     if (active_camera_preview_scope_ != preview_scope)
     {
         ClearCameraPreviewRenderers();
@@ -503,45 +517,47 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     }
 
     ImGui::SeparatorText("Object");
-    ImGui::Text("Name: %s", object_it->name.c_str());
+    ImGui::Text("Name: %s", selected_object.name.c_str());
 
     ImGui::Spacing();
     ImGui::SeparatorText("Transform");
 
-    float position[3] = {object_it->position[0], object_it->position[1], object_it->position[2]};
+    float position[3] = {selected_object.position[0], selected_object.position[1], selected_object.position[2]};
     if (ImGui::DragFloat3("Position", position, 0.1f))
     {
         const SceneVector3 snapped_position = SnapPositionToGrid({position[0], position[1], position[2]}, state);
-        if (SaveSceneObjectVector3Edit(state, *object_it, "position", snapped_position, SetSceneObjectPosition))
+        if (SaveSceneObjectVector3Edit(state, selected_object, "position", snapped_position, SetSceneObjectPosition))
         {
-            has_cached_scene_metadata_ = false;
-            return;
+            selected_object.position = snapped_position;
+            UpdateCachedSceneObjectVector3(cached_scene_metadata_, selected_object.name, &SceneObjectMetadata::position, snapped_position);
         }
     }
 
-    float rotation[3] = {object_it->rotation[0], object_it->rotation[1], object_it->rotation[2]};
+    float rotation[3] = {selected_object.rotation[0], selected_object.rotation[1], selected_object.rotation[2]};
     if (ImGui::DragFloat3("Rotation", rotation, 0.5f))
     {
-        if (SaveSceneObjectVector3Edit(state, *object_it, "rotation", {rotation[0], rotation[1], rotation[2]}, SetSceneObjectRotation))
+        const SceneVector3 updated_rotation = {rotation[0], rotation[1], rotation[2]};
+        if (SaveSceneObjectVector3Edit(state, selected_object, "rotation", updated_rotation, SetSceneObjectRotation))
         {
-            has_cached_scene_metadata_ = false;
-            return;
+            selected_object.rotation = updated_rotation;
+            UpdateCachedSceneObjectVector3(cached_scene_metadata_, selected_object.name, &SceneObjectMetadata::rotation, updated_rotation);
         }
     }
 
-    float scale[3] = {object_it->scale[0], object_it->scale[1], object_it->scale[2]};
+    float scale[3] = {selected_object.scale[0], selected_object.scale[1], selected_object.scale[2]};
     if (ImGui::DragFloat3("Scale", scale, 0.05f, 0.001f, 1000.0f))
     {
-        if (SaveSceneObjectVector3Edit(state, *object_it, "scale", {scale[0], scale[1], scale[2]}, SetSceneObjectScale))
+        const SceneVector3 updated_scale = {scale[0], scale[1], scale[2]};
+        if (SaveSceneObjectVector3Edit(state, selected_object, "scale", updated_scale, SetSceneObjectScale))
         {
-            has_cached_scene_metadata_ = false;
-            return;
+            selected_object.scale = updated_scale;
+            UpdateCachedSceneObjectVector3(cached_scene_metadata_, selected_object.name, &SceneObjectMetadata::scale, updated_scale);
         }
     }
 
     if (RenderSceneObjectAttributesEditor(
             state,
-            *object_it,
+            selected_object,
             [this, &scene_metadata](EngineState& callback_state, const SceneObjectMetadata& callback_object, std::size_t attribute_index, const SceneObjectAttribute& attribute)
             {
                 RenderCameraAttributePreview(scene_metadata, callback_state, callback_object, attribute_index, attribute);
@@ -553,32 +569,35 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
 
     ImGui::Spacing();
 
-    if (!object_it->model_path.empty())
+    if (!selected_object.model_path.empty())
     {
         ImGui::PushID("Model");
         bool keep_model_attachment = true;
-        if (ImGui::CollapsingHeader(object_it->model_path.c_str(), &keep_model_attachment, ImGuiTreeNodeFlags_DefaultOpen))
+        if (ImGui::CollapsingHeader(selected_object.model_path.c_str(), &keep_model_attachment, ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::Spacing();
             ImGui::TextUnformatted("Settings");
 
             float model_visual_offset[3] = {
-                object_it->model_visual_offset[0],
-                object_it->model_visual_offset[1],
-                object_it->model_visual_offset[2],
+                selected_object.model_visual_offset[0],
+                selected_object.model_visual_offset[1],
+                selected_object.model_visual_offset[2],
             };
             if (ImGui::DragFloat3("Visual Offset", model_visual_offset, 0.01f))
             {
+                const SceneVector3 updated_model_visual_offset = {
+                    model_visual_offset[0],
+                    model_visual_offset[1],
+                    model_visual_offset[2]};
                 if (SaveSceneObjectVector3Edit(
                         state,
-                        *object_it,
+                        selected_object,
                         "model visual offset",
-                        {model_visual_offset[0], model_visual_offset[1], model_visual_offset[2]},
+                        updated_model_visual_offset,
                         SetSceneObjectModelVisualOffset))
                 {
-                    has_cached_scene_metadata_ = false;
-                    ImGui::PopID();
-                    return;
+                    selected_object.model_visual_offset = updated_model_visual_offset;
+                    UpdateCachedSceneObjectVector3(cached_scene_metadata_, selected_object.name, &SceneObjectMetadata::model_visual_offset, updated_model_visual_offset);
                 }
             }
 
@@ -590,9 +609,9 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
             {
                 state.AddLog("Save the open scene before removing the object model");
             }
-            else if (ClearSceneObjectModel(state.selected_item_path, object_it->name))
+            else if (ClearSceneObjectModel(state.selected_item_path, selected_object.name))
             {
-                state.AddLog("Removed model from object: " + object_it->name);
+                state.AddLog("Removed model from object: " + selected_object.name);
                 state.OpenTextFile(state.selected_item_path);
                 has_cached_scene_metadata_ = false;
                 ImGui::PopID();
@@ -602,9 +621,9 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         ImGui::PopID();
     }
 
-    for (std::size_t script_index = 0; script_index < object_it->script_paths.size(); ++script_index)
+    for (std::size_t script_index = 0; script_index < selected_object.script_paths.size(); ++script_index)
     {
-        const std::string& script_path = object_it->script_paths[script_index];
+        const std::string& script_path = selected_object.script_paths[script_index];
         ImGui::PushID(static_cast<int>(10000 + script_index));
         bool keep_script_attachment = true;
         if (ImGui::CollapsingHeader(script_path.c_str(), &keep_script_attachment, ImGuiTreeNodeFlags_DefaultOpen))
@@ -619,9 +638,9 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
             {
                 state.AddLog("Save the open scene before removing an object script");
             }
-            else if (RemoveSceneObjectScript(state.selected_item_path, object_it->name, state.project_root, state.project_root / script_path))
+            else if (RemoveSceneObjectScript(state.selected_item_path, selected_object.name, state.project_root, state.project_root / script_path))
             {
-                state.AddLog("Removed script from object: " + object_it->name);
+                state.AddLog("Removed script from object: " + selected_object.name);
                 state.OpenTextFile(state.selected_item_path);
                 has_cached_scene_metadata_ = false;
                 ImGui::PopID();
@@ -631,9 +650,9 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         ImGui::PopID();
     }
 
-    for (std::size_t graph_index = 0; graph_index < object_it->graph_paths.size(); ++graph_index)
+    for (std::size_t graph_index = 0; graph_index < selected_object.graph_paths.size(); ++graph_index)
     {
-        const std::string& graph_path = object_it->graph_paths[graph_index];
+        const std::string& graph_path = selected_object.graph_paths[graph_index];
         ImGui::PushID(static_cast<int>(20000 + graph_index));
         bool keep_graph_attachment = true;
         if (ImGui::CollapsingHeader(graph_path.c_str(), &keep_graph_attachment, ImGuiTreeNodeFlags_DefaultOpen))
@@ -648,9 +667,9 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
             {
                 state.AddLog("Save the open scene before removing an object graph");
             }
-            else if (RemoveSceneObjectGraph(state.selected_item_path, object_it->name, state.project_root, state.project_root / graph_path))
+            else if (RemoveSceneObjectGraph(state.selected_item_path, selected_object.name, state.project_root, state.project_root / graph_path))
             {
-                state.AddLog("Removed graph from object: " + object_it->name);
+                state.AddLog("Removed graph from object: " + selected_object.name);
                 state.OpenTextFile(state.selected_item_path);
                 has_cached_scene_metadata_ = false;
                 ImGui::PopID();
@@ -661,7 +680,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     }
 
     ImGui::InvisibleButton("##ObjectAttachmentDropTarget", ImVec2(-FLT_MIN, ImGui::GetContentRegionAvail().y));
-    if (HandleSceneObjectAttachmentDrop(state, state.selected_item_path, object_it->name))
+    if (HandleSceneObjectAttachmentDrop(state, state.selected_item_path, selected_object.name))
     {
         return;
     }
