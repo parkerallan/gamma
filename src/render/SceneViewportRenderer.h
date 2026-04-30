@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -136,6 +137,28 @@ private:
     ResolvedSceneLighting resolved_lighting_{};
     std::vector<QueuedSceneObject> queued_objects_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
+
+    // Deferred gizmo commit state: keeps viewport responsive during drag and commits once on release.
+    bool gizmo_preview_active_ = false;
+    std::string gizmo_preview_object_name_;
+    SceneVector3 gizmo_preview_local_position_ = {0.0f, 0.0f, 0.0f};
+    SceneVector3 gizmo_preview_local_rotation_ = {0.0f, 0.0f, 0.0f};
+    SceneVector3 gizmo_preview_local_scale_ = {1.0f, 1.0f, 1.0f};
+    bool gizmo_preview_write_position_ = false;
+    bool gizmo_preview_write_rotation_ = false;
+    bool gizmo_preview_write_scale_ = false;
+
+    // Deferred 2D overlay commit state for Text2D/Image2D drag/resize.
+    bool overlay_preview_active_ = false;
+    std::string overlay_preview_object_name_;
+    std::size_t overlay_preview_attribute_index_ = 0;
+    bool overlay_preview_is_text_ = false;
+    float overlay_preview_x_ = 0.0f;
+    float overlay_preview_y_ = 0.0f;
+    float overlay_preview_w_ = 1.0f;
+    float overlay_preview_h_ = 1.0f;
+    bool overlay_preview_write_position_ = false;
+    bool overlay_preview_write_size_ = false;
 
     // Pending scene data set by RenderUi, consumed by RenderGpu.
     SceneMetadata pending_scene_metadata_{};

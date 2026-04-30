@@ -1645,9 +1645,12 @@ bool UpdateSceneObjectTransform(
     const SceneViewportRenderer::QueuedSceneObject& object,
     const SceneVector3& position,
     const SceneVector3& rotation,
-    const SceneVector3& scale)
+    const SceneVector3& scale,
+    bool write_position,
+    bool write_rotation,
+    bool write_scale)
 {
-    if (state.active_scene_path.empty())
+    if (state.active_scene_path.empty() || (!write_position && !write_rotation && !write_scale))
     {
         return false;
     }
@@ -1673,11 +1676,53 @@ bool UpdateSceneObjectTransform(
     const SceneVector3 local_rotation = {local_rotation_components[0], local_rotation_components[1], local_rotation_components[2]};
     const SceneVector3 local_scale = {local_scale_components[0], local_scale_components[1], local_scale_components[2]};
 
-    bool changed = false;
-    changed = SetSceneObjectPosition(state.active_scene_path, object.name, local_position) || changed;
-    changed = SetSceneObjectRotation(state.active_scene_path, object.name, local_rotation) || changed;
-    changed = SetSceneObjectScale(state.active_scene_path, object.name, local_scale) || changed;
-    return changed;
+    return SetSceneObjectTransform(
+        state.active_scene_path,
+        object.name,
+        local_position,
+        local_rotation,
+        local_scale,
+        write_position,
+        write_rotation,
+        write_scale);
+}
+
+void ResolveLocalSceneObjectTransform(
+    const SceneViewportRenderer::QueuedSceneObject& object,
+    const SceneVector3& position,
+    const SceneVector3& rotation,
+    const SceneVector3& scale,
+    SceneVector3& local_position,
+    SceneVector3& local_rotation,
+    SceneVector3& local_scale)
+{
+    float local_matrix[16];
+    BuildTransformMatrix(position, rotation, scale, local_matrix);
+    if (object.has_parent_transform)
+    {
+        float inverse_parent_matrix[16];
+        if (InvertMatrix(object.parent_matrix.data(), inverse_parent_matrix))
+        {
+            float converted_local_matrix[16];
+            MultiplyMatrix(inverse_parent_matrix, local_matrix, converted_local_matrix);
+            std::memcpy(local_matrix, converted_local_matrix, sizeof(converted_local_matrix));
+        }
+    }
+
+    float local_position_components[3] = {};
+    float local_rotation_components[3] = {};
+    float local_scale_components[3] = {};
+    ImGuizmo::DecomposeMatrixToComponents(local_matrix, local_position_components, local_rotation_components, local_scale_components);
+    local_position = {local_position_components[0], local_position_components[1], local_position_components[2]};
+    local_rotation = {local_rotation_components[0], local_rotation_components[1], local_rotation_components[2]};
+    local_scale = {local_scale_components[0], local_scale_components[1], local_scale_components[2]};
+}
+
+bool HasSignificantSceneVectorDelta(const SceneVector3& left, const SceneVector3& right, float epsilon)
+{
+    return std::abs(left[0] - right[0]) > epsilon ||
+           std::abs(left[1] - right[1]) > epsilon ||
+           std::abs(left[2] - right[2]) > epsilon;
 }
 
 void RecoverOrbitCameraFromView(
@@ -2513,27 +2558,113 @@ void SceneViewportRenderer::RenderUi(
         std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest()};
+
+    SceneMetadata scene_metadata_for_render = scene_metadata;
+    if (gizmo_preview_active_)
+    {
+        const auto preview_object_it = std::find_if(
+            scene_metadata_for_render.objects.begin(),
+            scene_metadata_for_render.objects.end(),
+            [&](const SceneObjectMetadata& object)
+            {
+                return object.name == gizmo_preview_object_name_;
+            });
+
+        if (preview_object_it != scene_metadata_for_render.objects.end())
+        {
+            preview_object_it->position = gizmo_preview_local_position_;
+            preview_object_it->rotation = gizmo_preview_local_rotation_;
+            preview_object_it->scale = gizmo_preview_local_scale_;
+        }
+        else
+        {
+            gizmo_preview_active_ = false;
+            gizmo_preview_object_name_.clear();
+            gizmo_preview_write_position_ = false;
+            gizmo_preview_write_rotation_ = false;
+            gizmo_preview_write_scale_ = false;
+        }
+    }
+
+    if (overlay_preview_active_)
+    {
+        const auto preview_object_it = std::find_if(
+            scene_metadata_for_render.objects.begin(),
+            scene_metadata_for_render.objects.end(),
+            [&](const SceneObjectMetadata& object)
+            {
+                return object.name == overlay_preview_object_name_;
+            });
+
+        if (preview_object_it != scene_metadata_for_render.objects.end() &&
+            overlay_preview_attribute_index_ < preview_object_it->attributes.size())
+        {
+            SceneObjectAttribute& preview_attribute = preview_object_it->attributes[overlay_preview_attribute_index_];
+            if (overlay_preview_is_text_ && preview_attribute.kind == SceneObjectAttributeKind::Text2D)
+            {
+                if (overlay_preview_write_position_)
+                {
+                    preview_attribute.text_2d.x = overlay_preview_x_;
+                    preview_attribute.text_2d.y = overlay_preview_y_;
+                }
+                if (overlay_preview_write_size_)
+                {
+                    preview_attribute.text_2d.width = overlay_preview_w_;
+                    preview_attribute.text_2d.height = overlay_preview_h_;
+                }
+            }
+            else if (!overlay_preview_is_text_ && preview_attribute.kind == SceneObjectAttributeKind::Image2D)
+            {
+                if (overlay_preview_write_position_)
+                {
+                    preview_attribute.image_2d.x = overlay_preview_x_;
+                    preview_attribute.image_2d.y = overlay_preview_y_;
+                }
+                if (overlay_preview_write_size_)
+                {
+                    preview_attribute.image_2d.width = overlay_preview_w_;
+                    preview_attribute.image_2d.height = overlay_preview_h_;
+                }
+            }
+            else
+            {
+                overlay_preview_active_ = false;
+                overlay_preview_object_name_.clear();
+                overlay_preview_write_position_ = false;
+                overlay_preview_write_size_ = false;
+            }
+        }
+        else
+        {
+            overlay_preview_active_ = false;
+            overlay_preview_object_name_.clear();
+            overlay_preview_write_position_ = false;
+            overlay_preview_write_size_ = false;
+        }
+    }
+
+    const SceneMetadata& active_scene_metadata = scene_metadata_for_render;
     const bool has_selected_scene_object = state.selected_item_path == state.active_scene_path && !state.selected_scene_object_name.empty();
     const SceneObjectMetadata* selected_scene_object_metadata = nullptr;
-    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
+    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(active_scene_metadata);
     if (has_selected_scene_object)
     {
-        const auto selected_object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+        const auto selected_object_it = std::find_if(active_scene_metadata.objects.begin(), active_scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
         {
             return object.name == state.selected_scene_object_name;
         });
-        if (selected_object_it != scene_metadata.objects.end())
+        if (selected_object_it != active_scene_metadata.objects.end())
         {
             selected_scene_object_metadata = &(*selected_object_it);
         }
     }
-    else if (scene_metadata.objects.size() == 1)
+    else if (active_scene_metadata.objects.size() == 1)
     {
-        selected_scene_object_metadata = &scene_metadata.objects.front();
+        selected_scene_object_metadata = &active_scene_metadata.objects.front();
     }
 
     queued_objects_.clear();
-    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    for (const SceneObjectMetadata& object : active_scene_metadata.objects)
     {
         QueuedSceneObject queued_object;
         queued_object.name = object.name;
@@ -2756,6 +2887,8 @@ void SceneViewportRenderer::RenderUi(
 
     if (gizmo_object != nullptr)
     {
+        constexpr float kGizmoTransformEpsilon = 0.0005f;
+
         float gizmo_matrix[16];
         float delta_matrix[16];
         std::memcpy(gizmo_matrix, gizmo_object->model_matrix.data(), sizeof(gizmo_matrix));
@@ -2780,7 +2913,11 @@ void SceneViewportRenderer::RenderUi(
             snap = operation == ImGuizmo::ROTATE ? &angle_snap : snap_values;
         }
 
-        if (ImGuizmo::Manipulate(view_matrix, projection_matrix, operation, mode, gizmo_matrix, delta_matrix, snap))
+        const bool write_position = operation == ImGuizmo::TRANSLATE;
+        const bool write_rotation = operation == ImGuizmo::ROTATE;
+        const bool write_scale = operation == ImGuizmo::SCALEU;
+        const bool is_manipulating = ImGuizmo::Manipulate(view_matrix, projection_matrix, operation, mode, gizmo_matrix, delta_matrix, snap);
+        if (is_manipulating)
         {
             float position[3] = {};
             float rotation[3] = {};
@@ -2797,7 +2934,63 @@ void SceneViewportRenderer::RenderUi(
             }
 
             gizmo_object->world_position = new_position;
-            UpdateSceneObjectTransform(state, *gizmo_object, new_position, new_rotation, new_scale);
+
+            SceneVector3 new_local_position = {};
+            SceneVector3 new_local_rotation = {};
+            SceneVector3 new_local_scale = {};
+            ResolveLocalSceneObjectTransform(
+                *gizmo_object,
+                new_position,
+                new_rotation,
+                new_scale,
+                new_local_position,
+                new_local_rotation,
+                new_local_scale);
+
+            const SceneVector3 baseline_position =
+                (gizmo_preview_active_ && gizmo_preview_object_name_ == gizmo_object->name) ? gizmo_preview_local_position_ : gizmo_object->local_position;
+            const SceneVector3 baseline_rotation =
+                (gizmo_preview_active_ && gizmo_preview_object_name_ == gizmo_object->name) ? gizmo_preview_local_rotation_ : gizmo_object->local_rotation;
+            const SceneVector3 baseline_scale =
+                (gizmo_preview_active_ && gizmo_preview_object_name_ == gizmo_object->name) ? gizmo_preview_local_scale_ : gizmo_object->local_scale;
+
+            const bool position_changed = write_position && HasSignificantSceneVectorDelta(new_local_position, baseline_position, kGizmoTransformEpsilon);
+            const bool rotation_changed = write_rotation && HasSignificantSceneVectorDelta(new_local_rotation, baseline_rotation, kGizmoTransformEpsilon);
+            const bool scale_changed = write_scale && HasSignificantSceneVectorDelta(new_local_scale, baseline_scale, kGizmoTransformEpsilon);
+            if (position_changed || rotation_changed || scale_changed)
+            {
+                gizmo_preview_active_ = true;
+                gizmo_preview_object_name_ = gizmo_object->name;
+                gizmo_preview_local_position_ = new_local_position;
+                gizmo_preview_local_rotation_ = new_local_rotation;
+                gizmo_preview_local_scale_ = new_local_scale;
+                gizmo_preview_write_position_ = write_position;
+                gizmo_preview_write_rotation_ = write_rotation;
+                gizmo_preview_write_scale_ = write_scale;
+            }
+        }
+
+        if (gizmo_preview_active_ && !ImGuizmo::IsUsing())
+        {
+            const bool committed = SetSceneObjectTransform(
+                state.active_scene_path,
+                gizmo_preview_object_name_,
+                gizmo_preview_local_position_,
+                gizmo_preview_local_rotation_,
+                gizmo_preview_local_scale_,
+                gizmo_preview_write_position_,
+                gizmo_preview_write_rotation_,
+                gizmo_preview_write_scale_);
+            if (committed)
+            {
+                state.request_files_tree_refresh = true;
+            }
+
+            gizmo_preview_active_ = false;
+            gizmo_preview_object_name_.clear();
+            gizmo_preview_write_position_ = false;
+            gizmo_preview_write_rotation_ = false;
+            gizmo_preview_write_scale_ = false;
         }
     }
 
@@ -2873,7 +3066,7 @@ void SceneViewportRenderer::RenderUi(
     const float overlay_scale_x = viewport_width / static_cast<float>((std::max)(1u, target_width));
     const float overlay_scale_y = viewport_height / static_cast<float>((std::max)(1u, target_height));
     const ImVec2 overlay_mouse_pos = ImGui::GetMousePos();
-    for (auto object_it = scene_metadata.objects.rbegin(); object_it != scene_metadata.objects.rend(); ++object_it)
+    for (auto object_it = active_scene_metadata.objects.rbegin(); object_it != active_scene_metadata.objects.rend(); ++object_it)
     {
         const SceneObjectMetadata& object = *object_it;
         bool hit = false;
@@ -3009,10 +3202,72 @@ void SceneViewportRenderer::RenderUi(
                 }
             }
 
-            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            const bool left_mouse_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+            if (!left_mouse_down && (overlay_dragging || overlay_resizing))
             {
+                bool committed = false;
+                if (is_text_overlay)
+                {
+                    if (overlay_dragging)
+                    {
+                        committed = SetSceneObjectAttributeText2DPosition(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_x,
+                            overlay_y);
+                    }
+                    else if (overlay_resizing)
+                    {
+                        committed = SetSceneObjectAttributeText2DSize(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_w,
+                            overlay_h);
+                    }
+                }
+                else
+                {
+                    if (overlay_dragging)
+                    {
+                        committed = SetSceneObjectAttributeImage2DPosition(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_x,
+                            overlay_y);
+                    }
+                    else if (overlay_resizing)
+                    {
+                        committed = SetSceneObjectAttributeImage2DSize(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_w,
+                            overlay_h);
+                    }
+                }
+
+                if (committed)
+                {
+                    state.request_files_tree_refresh = true;
+                }
+
                 overlay_dragging = false;
                 overlay_resizing = false;
+                overlay_preview_active_ = false;
+                overlay_preview_object_name_.clear();
+                overlay_preview_write_position_ = false;
+                overlay_preview_write_size_ = false;
+                overlay_gizmo_interaction_consumed = true;
+            }
+            else if (!left_mouse_down)
+            {
+                overlay_preview_active_ = false;
+                overlay_preview_object_name_.clear();
+                overlay_preview_write_position_ = false;
+                overlay_preview_write_size_ = false;
             }
 
             if ((overlay_dragging || overlay_resizing) && allow_overlay_interaction)
@@ -3044,50 +3299,16 @@ void SceneViewportRenderer::RenderUi(
                     }
                 }
 
-                if (is_text_overlay)
-                {
-                    if (overlay_dragging)
-                    {
-                        SetSceneObjectAttributeText2DPosition(
-                            state.active_scene_path,
-                            selected_scene_object_metadata->name,
-                            selected_overlay_attribute_index,
-                            overlay_x,
-                            overlay_y);
-                    }
-                    else
-                    {
-                        SetSceneObjectAttributeText2DSize(
-                            state.active_scene_path,
-                            selected_scene_object_metadata->name,
-                            selected_overlay_attribute_index,
-                            overlay_w,
-                            overlay_h);
-                    }
-                }
-                else
-                {
-                    if (overlay_dragging)
-                    {
-                        SetSceneObjectAttributeImage2DPosition(
-                            state.active_scene_path,
-                            selected_scene_object_metadata->name,
-                            selected_overlay_attribute_index,
-                            overlay_x,
-                            overlay_y);
-                    }
-                    else
-                    {
-                        SetSceneObjectAttributeImage2DSize(
-                            state.active_scene_path,
-                            selected_scene_object_metadata->name,
-                            selected_overlay_attribute_index,
-                            overlay_w,
-                            overlay_h);
-                    }
-                }
-
-                state.request_files_tree_refresh = true;
+                overlay_preview_active_ = true;
+                overlay_preview_object_name_ = selected_scene_object_metadata->name;
+                overlay_preview_attribute_index_ = selected_overlay_attribute_index;
+                overlay_preview_is_text_ = is_text_overlay;
+                overlay_preview_x_ = overlay_x;
+                overlay_preview_y_ = overlay_y;
+                overlay_preview_w_ = overlay_w;
+                overlay_preview_h_ = overlay_h;
+                overlay_preview_write_position_ = overlay_dragging;
+                overlay_preview_write_size_ = overlay_resizing;
                 overlay_gizmo_interaction_consumed = true;
             }
         }
@@ -3110,7 +3331,7 @@ void SceneViewportRenderer::RenderUi(
 
         if (overlay_gizmo_interaction_consumed)
         {
-            pending_scene_metadata_ = scene_metadata;
+            pending_scene_metadata_ = active_scene_metadata;
             pending_project_root_ = state.project_root;
             render_requested_ = true;
 
@@ -3138,7 +3359,7 @@ void SceneViewportRenderer::RenderUi(
         }
     }
 
-    pending_scene_metadata_ = scene_metadata;
+    pending_scene_metadata_ = active_scene_metadata;
     pending_project_root_ = state.project_root;
     render_requested_ = true;
 

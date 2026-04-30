@@ -189,6 +189,15 @@ bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::st
 bool SetSceneObjectPosition(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& position);
 bool SetSceneObjectRotation(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& rotation);
 bool SetSceneObjectScale(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& scale);
+bool SetSceneObjectTransform(
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    const SceneVector3& position,
+    const SceneVector3& rotation,
+    const SceneVector3& scale,
+    bool write_position,
+    bool write_rotation,
+    bool write_scale);
 bool SetSceneObjectPhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectPhysicsShape shape);
 bool SetSceneObjectPhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, bool is_dynamic);
 bool SetSceneObjectPhysicsMass(const std::filesystem::path& scene_path, const std::string& object_name, float mass);

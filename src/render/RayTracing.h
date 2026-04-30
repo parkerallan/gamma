@@ -231,4 +231,28 @@ private:
     bool accumulation_reset_requested_ = true;
     std::uint64_t scene_signature_ = 0;
     bool scene_signature_valid_ = false;
+
+    // Geometry signature – hashes mesh/section/material/texture records only.
+    // Unchanged during gizmo drag (only transforms change), so storage buffers are skipped.
+    std::uint64_t geometry_signature_ = 0;
+    bool geometry_signature_valid_ = false;
+
+    // TLAS topology signature – hashes BLAS device-addresses and instance count.
+    // Unchanged during gizmo drag, enabling TLAS refit instead of a full rebuild.
+    std::uint64_t tlas_topology_signature_ = 0;
+    bool tlas_topology_signature_valid_ = false;
+    std::uint32_t tlas_capacity_ = 0;  // max instances the current TLAS AS was sized for
+    std::uint32_t instance_buffer_capacity_ = 0;  // capacity of instance_buffer_ in instance count
+
+    // Pending TLAS data set by UpdateScene, consumed by RenderFrame command buffer.
+    std::vector<VkAccelerationStructureInstanceKHR> pending_acceleration_instances_;
+    bool tlas_rebuild_pending_ = false;  // full rebuild required (topology or capacity changed)
+    bool tlas_refit_pending_   = false;  // transform-only update via VK UPDATE mode
+
+    // Persistent device-local scratch buffer for TLAS build / refit.
+    // Sized to max(buildScratchSize, updateScratchSize) at last full build.
+    GpuBuffer tlas_scratch_buffer_{};
+
+    // Guards vkUpdateDescriptorSets – set only when descriptor bindings actually change.
+    bool descriptors_dirty_ = false;
 };

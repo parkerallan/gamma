@@ -958,6 +958,8 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         return false;
     }
 
+    // Build CPU-side records into local vectors first so we can compute signatures before
+    // committing any GPU work.  This avoids touching the GPU entirely on the hot drag path.
     std::unordered_map<std::string, const MeshInput*> meshes_by_key;
     std::unordered_map<std::string, std::uint32_t> mesh_index_by_key;
     std::unordered_map<std::uintptr_t, std::uint32_t> texture_index_by_view;
@@ -965,10 +967,10 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     mesh_index_by_key.reserve(meshes.size());
     texture_index_by_view.reserve(meshes.size());
 
-    mesh_records_cpu_.clear();
-    section_records_cpu_.clear();
-    material_records_cpu_.clear();
-    texture_descriptors_cpu_.clear();
+    std::vector<MeshRecordGpu> new_mesh_records;
+    std::vector<SectionRecordGpu> new_section_records;
+    std::vector<MaterialRecordGpu> new_material_records;
+    std::vector<VkDescriptorImageInfo> new_texture_descriptors;
 
     for (const MeshInput& mesh : meshes)
     {
@@ -978,7 +980,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         }
 
         meshes_by_key[mesh.key] = &mesh;
-        mesh_index_by_key.emplace(mesh.key, static_cast<std::uint32_t>(mesh_records_cpu_.size()));
+        mesh_index_by_key.emplace(mesh.key, static_cast<std::uint32_t>(new_mesh_records.size()));
 
         MeshRecordGpu mesh_record{};
         mesh_record.vertex_buffer_address = mesh.vertex_device_address;
@@ -986,9 +988,9 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         mesh_record.vertex_count = mesh.vertex_count;
         mesh_record.vertex_stride = mesh.vertex_stride;
         mesh_record.index_count = mesh.index_count;
-        mesh_record.section_offset = static_cast<std::uint32_t>(section_records_cpu_.size());
+        mesh_record.section_offset = static_cast<std::uint32_t>(new_section_records.size());
         mesh_record.section_count = static_cast<std::uint32_t>(mesh.sections.size());
-        mesh_record.material_offset = static_cast<std::uint32_t>(material_records_cpu_.size());
+        mesh_record.material_offset = static_cast<std::uint32_t>(new_material_records.size());
 
         for (const MeshSectionRecord& section : mesh.sections)
         {
@@ -997,7 +999,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             section_record.index_count = section.index_count;
             section_record.material_index = mesh_record.material_offset + section.material_index;
             section_record.uses_alpha_transparency = section.uses_alpha_transparency ? 1u : 0u;
-            section_records_cpu_.push_back(section_record);
+            new_section_records.push_back(section_record);
         }
 
         for (const MaterialRecord& material : mesh.materials)
@@ -1015,7 +1017,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 
             auto resolve_texture_index = [&](VkImageView image_view) -> std::uint32_t
             {
-                if (image_view == VK_NULL_HANDLE || texture_descriptors_cpu_.size() >= kMaxTextures)
+                if (image_view == VK_NULL_HANDLE || new_texture_descriptors.size() >= kMaxTextures)
                 {
                     return 0xFFFFFFFFu;
                 }
@@ -1024,13 +1026,13 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
                 auto texture_it = texture_index_by_view.find(view_key);
                 if (texture_it == texture_index_by_view.end())
                 {
-                    const std::uint32_t texture_index = static_cast<std::uint32_t>(texture_descriptors_cpu_.size());
+                    const std::uint32_t texture_index = static_cast<std::uint32_t>(new_texture_descriptors.size());
                     texture_index_by_view.emplace(view_key, texture_index);
 
                     VkDescriptorImageInfo image_info = {};
                     image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                     image_info.imageView = image_view;
-                    texture_descriptors_cpu_.push_back(image_info);
+                    new_texture_descriptors.push_back(image_info);
                     return texture_index;
                 }
 
@@ -1043,25 +1045,86 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             material_record.occlusion_texture_index = resolve_texture_index(material.occlusion_view);
             material_record.emissive_texture_index = resolve_texture_index(material.emissive_view);
 
-            material_records_cpu_.push_back(material_record);
+            new_material_records.push_back(material_record);
         }
 
-        mesh_records_cpu_.push_back(mesh_record);
+        new_mesh_records.push_back(mesh_record);
+    }
+
+    // Geometry signature covers mesh/section/material/texture records.
+    // It is stable during a gizmo drag (only instance transforms change), so we can skip
+    // the storage-buffer rebuild and descriptor update on the hot path.
+    std::uint64_t new_geometry_sig = kFnvOffsetBasis;
+    HashVector(new_geometry_sig, new_mesh_records);
+    HashVector(new_geometry_sig, new_section_records);
+    HashVector(new_geometry_sig, new_material_records);
+    HashVector(new_geometry_sig, new_texture_descriptors);
+
+    const bool geometry_changed = !geometry_signature_valid_ || geometry_signature_ != new_geometry_sig;
+    if (geometry_changed)
+    {
+        mesh_records_cpu_      = std::move(new_mesh_records);
+        section_records_cpu_   = std::move(new_section_records);
+        material_records_cpu_  = std::move(new_material_records);
+        texture_descriptors_cpu_ = std::move(new_texture_descriptors);
+        geometry_signature_       = new_geometry_sig;
+        geometry_signature_valid_ = true;
+
+        auto rebuild_storage_buffer = [&](const auto& cpu_data, GpuBuffer& gpu_buffer, const char* failure_message) -> bool
+        {
+            DestroyGpuBuffer(vulkan_context_, gpu_buffer);
+            if (cpu_data.empty())
+            {
+                return true;
+            }
+
+            const VkDeviceSize buffer_size = static_cast<VkDeviceSize>(cpu_data.size() * sizeof(cpu_data[0]));
+            if (!CreateGpuBuffer(
+                    *vulkan_context_,
+                    buffer_size,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    gpu_buffer))
+            {
+                status_message_ = failure_message;
+                return false;
+            }
+
+            if (!UploadGpuBuffer(*vulkan_context_, gpu_buffer, cpu_data.data(), static_cast<std::size_t>(buffer_size)))
+            {
+                status_message_ = failure_message;
+                DestroyGpuBuffer(vulkan_context_, gpu_buffer);
+                return false;
+            }
+
+            return true;
+        };
+
+        if (!rebuild_storage_buffer(mesh_records_cpu_, mesh_record_buffer_, "Failed to upload viewport RT mesh records") ||
+            !rebuild_storage_buffer(section_records_cpu_, section_record_buffer_, "Failed to upload viewport RT section records") ||
+            !rebuild_storage_buffer(material_records_cpu_, material_record_buffer_, "Failed to upload viewport RT material records"))
+        {
+            return false;
+        }
+
+        descriptors_dirty_ = true;
+        ResetAccumulationState();
     }
 
     if (meshes_by_key.empty() || instances.empty())
     {
-        DestroyAccelerationStructure(vulkan_context_, top_level_as_);
-        DestroyGpuBuffer(vulkan_context_, instance_buffer_);
-        DestroyGpuBuffer(vulkan_context_, mesh_record_buffer_);
-        DestroyGpuBuffer(vulkan_context_, section_record_buffer_);
-        DestroyGpuBuffer(vulkan_context_, material_record_buffer_);
-        scene_signature_valid_ = false;
+        // No renderable instances – schedule a TLAS clear to be handled in RenderFrame.
+        pending_acceleration_instances_.clear();
+        tlas_rebuild_pending_         = true;
+        tlas_refit_pending_           = false;
+        tlas_topology_signature_valid_ = false;
+        scene_signature_valid_        = false;
         ResetAccumulationState();
         status_message_ = "RT scene cleared";
         return true;
     }
 
+    // Build / reuse bottom-level acceleration structures (only when mesh geometry changes).
     for (const auto& [mesh_key, mesh] : meshes_by_key)
     {
         BottomLevelCacheEntry& cache_entry = bottom_level_cache_[mesh_key];
@@ -1085,8 +1148,9 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         }
     }
 
-    std::vector<VkAccelerationStructureInstanceKHR> acceleration_instances;
-    acceleration_instances.reserve(instances.size());
+    // Build the instance list (BLAS references + per-instance transforms).
+    std::vector<VkAccelerationStructureInstanceKHR> new_instances;
+    new_instances.reserve(instances.size());
     for (const InstanceInput& instance : instances)
     {
         const auto mesh_it = bottom_level_cache_.find(instance.mesh_key);
@@ -1105,176 +1169,66 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         acceleration_instance.instanceShaderBindingTableRecordOffset = 0;
         acceleration_instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         acceleration_instance.accelerationStructureReference = mesh_it->second.acceleration_structure.device_address;
-        acceleration_instances.push_back(acceleration_instance);
+        new_instances.push_back(acceleration_instance);
     }
 
-    DestroyAccelerationStructure(vulkan_context_, top_level_as_);
-    DestroyGpuBuffer(vulkan_context_, instance_buffer_);
-
-    if (acceleration_instances.empty())
+    if (new_instances.empty())
     {
-        scene_signature_valid_ = false;
+        pending_acceleration_instances_.clear();
+        tlas_rebuild_pending_         = true;
+        tlas_refit_pending_           = false;
+        tlas_topology_signature_valid_ = false;
+        scene_signature_valid_        = false;
         ResetAccumulationState();
         status_message_ = "RT scene has no buildable instances";
         return true;
     }
 
-    std::uint64_t scene_signature = kFnvOffsetBasis;
-    HashVector(scene_signature, mesh_records_cpu_);
-    HashVector(scene_signature, section_records_cpu_);
-    HashVector(scene_signature, material_records_cpu_);
-    HashVector(scene_signature, texture_descriptors_cpu_);
-    HashVector(scene_signature, acceleration_instances);
-    if (!scene_signature_valid_ || scene_signature_ != scene_signature)
+    // Topology signature hashes BLAS device-addresses and instance count.
+    // This is stable during a gizmo drag, enabling a cheap TLAS refit instead of a rebuild.
+    std::uint64_t new_topo_sig = kFnvOffsetBasis;
+    const std::uint32_t new_instance_count = static_cast<std::uint32_t>(new_instances.size());
+    HashBytes(new_topo_sig, &new_instance_count, sizeof(new_instance_count));
+    for (const auto& inst : new_instances)
     {
-        scene_signature_ = scene_signature;
+        HashBytes(new_topo_sig, &inst.accelerationStructureReference, sizeof(inst.accelerationStructureReference));
+    }
+
+    const bool topology_changed = !tlas_topology_signature_valid_ || tlas_topology_signature_ != new_topo_sig;
+
+    // Full scene signature for accumulation-reset detection (includes transforms).
+    std::uint64_t full_sig = new_geometry_sig;
+    HashVector(full_sig, new_instances);
+    const bool scene_changed = !scene_signature_valid_ || scene_signature_ != full_sig;
+    if (scene_changed)
+    {
+        scene_signature_       = full_sig;
         scene_signature_valid_ = true;
         ResetAccumulationState();
     }
 
-    const VkDeviceSize instance_buffer_size =
-        static_cast<VkDeviceSize>(acceleration_instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
-    if (!CreateGpuBuffer(
-            *vulkan_context_,
-            instance_buffer_size,
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            instance_buffer_))
+    // Store the prepared instances; actual GPU work is deferred to RenderFrame where it
+    // can be recorded directly into the render command buffer, avoiding an extra queue stall.
+    pending_acceleration_instances_ = std::move(new_instances);
+
+    if (topology_changed)
     {
-        status_message_ = "Failed to create viewport RT instance buffer";
-        return false;
+        tlas_topology_signature_       = new_topo_sig;
+        tlas_topology_signature_valid_ = true;
+        tlas_rebuild_pending_          = true;
+        tlas_refit_pending_            = false;
+    }
+    else if (scene_changed && !tlas_rebuild_pending_)
+    {
+        // Only transforms changed – schedule a fast refit.
+        tlas_refit_pending_ = true;
+    }
+    else
+    {
+        tlas_refit_pending_ = false;
     }
 
-    if (!UploadGpuBuffer(*vulkan_context_, instance_buffer_, acceleration_instances.data(), static_cast<std::size_t>(instance_buffer_size)))
-    {
-        status_message_ = "Failed to upload viewport RT instance buffer";
-        DestroyGpuBuffer(vulkan_context_, instance_buffer_);
-        return false;
-    }
-
-    VkAccelerationStructureGeometryInstancesDataKHR instances_data = {
-        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
-    instances_data.data.deviceAddress = instance_buffer_.device_address;
-
-    VkAccelerationStructureGeometryKHR geometry = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    geometry.geometry.instances = instances_data;
-
-    const std::uint32_t primitive_count = static_cast<std::uint32_t>(acceleration_instances.size());
-    VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {
-        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    build_geometry_info.geometryCount = 1;
-    build_geometry_info.pGeometries = &geometry;
-
-    VkAccelerationStructureBuildSizesInfoKHR build_sizes = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    vulkan_context_->GetRayTracingDispatch().get_acceleration_structure_build_sizes(
-        vulkan_context_->GetDevice(),
-        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-        &build_geometry_info,
-        &primitive_count,
-        &build_sizes);
-
-    if (!CreateAccelerationStructure(*vulkan_context_, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, build_sizes.accelerationStructureSize, top_level_as_))
-    {
-        status_message_ = "Failed to create viewport RT top-level acceleration structure";
-        DestroyGpuBuffer(vulkan_context_, instance_buffer_);
-        return false;
-    }
-
-    GpuBuffer scratch_buffer{};
-    if (!CreateGpuBuffer(
-            *vulkan_context_,
-            build_sizes.buildScratchSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            scratch_buffer))
-    {
-        status_message_ = "Failed to create viewport RT TLAS scratch buffer";
-        DestroyAccelerationStructure(vulkan_context_, top_level_as_);
-        DestroyGpuBuffer(vulkan_context_, instance_buffer_);
-        return false;
-    }
-
-    build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    build_geometry_info.dstAccelerationStructure = top_level_as_.handle;
-    build_geometry_info.scratchData.deviceAddress = scratch_buffer.device_address;
-
-    VkAccelerationStructureBuildRangeInfoKHR build_range = {};
-    build_range.primitiveCount = primitive_count;
-    const VkAccelerationStructureBuildRangeInfoKHR* build_range_ptr = &build_range;
-    const bool build_succeeded = ExecuteImmediateCommands(*vulkan_context_, command_pool_, [&](VkCommandBuffer command_buffer)
-    {
-        vulkan_context_->GetRayTracingDispatch().cmd_build_acceleration_structures(command_buffer, 1, &build_geometry_info, &build_range_ptr);
-
-        VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-        barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(
-            command_buffer,
-            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            0,
-            1,
-            &barrier,
-            0,
-            nullptr,
-            0,
-            nullptr);
-    });
-    DestroyGpuBuffer(vulkan_context_, scratch_buffer);
-    if (!build_succeeded)
-    {
-        status_message_ = "Failed to build viewport RT top-level acceleration structure";
-        DestroyAccelerationStructure(vulkan_context_, top_level_as_);
-        DestroyGpuBuffer(vulkan_context_, instance_buffer_);
-        return false;
-    }
-
-    auto rebuild_storage_buffer = [&](const auto& cpu_data, GpuBuffer& gpu_buffer, const char* failure_message) -> bool
-    {
-        DestroyGpuBuffer(vulkan_context_, gpu_buffer);
-        if (cpu_data.empty())
-        {
-            return true;
-        }
-
-        const VkDeviceSize buffer_size = static_cast<VkDeviceSize>(cpu_data.size() * sizeof(cpu_data[0]));
-        if (!CreateGpuBuffer(
-                *vulkan_context_,
-                buffer_size,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                gpu_buffer))
-        {
-            status_message_ = failure_message;
-            return false;
-        }
-
-        if (!UploadGpuBuffer(*vulkan_context_, gpu_buffer, cpu_data.data(), static_cast<std::size_t>(buffer_size)))
-        {
-            status_message_ = failure_message;
-            DestroyGpuBuffer(vulkan_context_, gpu_buffer);
-            return false;
-        }
-
-        return true;
-    };
-
-    if (!rebuild_storage_buffer(mesh_records_cpu_, mesh_record_buffer_, "Failed to upload viewport RT mesh records") ||
-        !rebuild_storage_buffer(section_records_cpu_, section_record_buffer_, "Failed to upload viewport RT section records") ||
-        !rebuild_storage_buffer(material_records_cpu_, material_record_buffer_, "Failed to upload viewport RT material records"))
-    {
-        return false;
-    }
-
-    if (descriptor_set_ != VK_NULL_HANDLE && !UpdateDescriptors())
-    {
-        return false;
-    }
-
-    status_message_ = "RT scene acceleration structures and shader buffers updated";
+    status_message_ = "RT scene update queued";
     return true;
 }
 
@@ -1380,6 +1334,7 @@ void RayTracing::DestroySceneResources()
 {
     DestroyAccelerationStructure(vulkan_context_, top_level_as_);
     DestroyGpuBuffer(vulkan_context_, instance_buffer_);
+    DestroyGpuBuffer(vulkan_context_, tlas_scratch_buffer_);
     DestroyGpuBuffer(vulkan_context_, uniform_buffer_);
     DestroyGpuBuffer(vulkan_context_, mesh_record_buffer_);
     DestroyGpuBuffer(vulkan_context_, section_record_buffer_);
@@ -1393,6 +1348,15 @@ void RayTracing::DestroySceneResources()
     section_records_cpu_.clear();
     material_records_cpu_.clear();
     texture_descriptors_cpu_.clear();
+    pending_acceleration_instances_.clear();
+    tlas_rebuild_pending_         = false;
+    tlas_refit_pending_           = false;
+    tlas_capacity_                = 0;
+    instance_buffer_capacity_     = 0;
+    geometry_signature_valid_     = false;
+    tlas_topology_signature_valid_ = false;
+    scene_signature_valid_        = false;
+    descriptors_dirty_            = false;
 }
 
 void RayTracing::DestroyPipelineResources()
@@ -1615,6 +1579,7 @@ bool RayTracing::EnsurePipelineResources()
             descriptor_set_ = VK_NULL_HANDLE;
             return false;
         }
+        descriptors_dirty_ = true;
     }
 
     if (pipeline_layout_ == VK_NULL_HANDLE)
@@ -1770,7 +1735,16 @@ bool RayTracing::EnsurePipelineResources()
         }
     }
 
-    return UpdateDescriptors();
+    if (descriptors_dirty_)
+    {
+        const bool ok = UpdateDescriptors();
+        if (ok)
+        {
+            descriptors_dirty_ = false;
+        }
+        return ok;
+    }
+    return true;
 }
 
 bool RayTracing::UpdateDescriptors()
@@ -1917,6 +1891,217 @@ bool RayTracing::RenderFrame(
     result = vkResetCommandPool(device, command_pool_, 0);
     VulkanContext::CheckVkResult(result);
 
+    // --- Handle pending TLAS work (after fence ensures the previous frame is done) ---
+    // Instance buffer and TLAS AS are managed here on the CPU side; the actual
+    // cmd_build_acceleration_structures call is recorded into the render CB below.
+    if (tlas_rebuild_pending_ || tlas_refit_pending_)
+    {
+        if (!pending_acceleration_instances_.empty())
+        {
+            const std::uint32_t needed_count =
+                static_cast<std::uint32_t>(pending_acceleration_instances_.size());
+            const VkDeviceSize needed_size =
+                static_cast<VkDeviceSize>(needed_count * sizeof(VkAccelerationStructureInstanceKHR));
+
+            // Grow the instance buffer only when the capacity is exceeded (avoids
+            // deallocation/reallocation on every gizmo-drag frame).
+            if (needed_count > instance_buffer_capacity_)
+            {
+                DestroyGpuBuffer(vulkan_context_, instance_buffer_);
+                instance_buffer_capacity_ = 0;
+                if (!CreateGpuBuffer(
+                        *vulkan_context_,
+                        needed_size,
+                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        instance_buffer_))
+                {
+                    status_message_ = "Failed to create viewport RT instance buffer";
+                    tlas_rebuild_pending_ = false;
+                    tlas_refit_pending_   = false;
+                    return false;
+                }
+                instance_buffer_capacity_ = needed_count;
+            }
+
+            if (!UploadGpuBuffer(
+                    *vulkan_context_,
+                    instance_buffer_,
+                    pending_acceleration_instances_.data(),
+                    static_cast<std::size_t>(needed_size)))
+            {
+                status_message_ = "Failed to upload viewport RT instance buffer";
+                tlas_rebuild_pending_ = false;
+                tlas_refit_pending_   = false;
+                return false;
+            }
+        }
+
+        if (tlas_rebuild_pending_)
+        {
+            if (pending_acceleration_instances_.empty())
+            {
+                // No instances – destroy any existing TLAS.
+                DestroyAccelerationStructure(vulkan_context_, top_level_as_);
+                tlas_capacity_    = 0;
+                descriptors_dirty_ = true;
+            }
+            else
+            {
+                const std::uint32_t primitive_count =
+                    static_cast<std::uint32_t>(pending_acceleration_instances_.size());
+
+                if (primitive_count > tlas_capacity_)
+                {
+                    // Query required sizes for the new topology.
+                    VkAccelerationStructureGeometryInstancesDataKHR size_instances = {
+                        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+                    size_instances.data.deviceAddress = instance_buffer_.device_address;
+
+                    VkAccelerationStructureGeometryKHR size_geometry = {
+                        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+                    size_geometry.geometryType          = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+                    size_geometry.geometry.instances    = size_instances;
+
+                    VkAccelerationStructureBuildGeometryInfoKHR size_query = {
+                        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+                    size_query.type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+                    size_query.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                                               VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+                    size_query.geometryCount = 1;
+                    size_query.pGeometries   = &size_geometry;
+
+                    VkAccelerationStructureBuildSizesInfoKHR build_sizes = {
+                        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+                    vulkan_context_->GetRayTracingDispatch().get_acceleration_structure_build_sizes(
+                        device,
+                        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                        &size_query,
+                        &primitive_count,
+                        &build_sizes);
+
+                    // Recreate the TLAS AS buffer sized for the new topology.
+                    DestroyAccelerationStructure(vulkan_context_, top_level_as_);
+                    if (!CreateAccelerationStructure(
+                            *vulkan_context_,
+                            VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+                            build_sizes.accelerationStructureSize,
+                            top_level_as_))
+                    {
+                        status_message_ = "Failed to create viewport RT top-level acceleration structure";
+                        tlas_rebuild_pending_ = false;
+                        tlas_refit_pending_   = false;
+                        return false;
+                    }
+
+                    // Ensure the persistent scratch buffer is large enough for both
+                    // full builds and refits.
+                    const VkDeviceSize scratch_needed =
+                        (std::max)(build_sizes.buildScratchSize, build_sizes.updateScratchSize);
+                    if (scratch_needed > tlas_scratch_buffer_.size)
+                    {
+                        DestroyGpuBuffer(vulkan_context_, tlas_scratch_buffer_);
+                        if (!CreateGpuBuffer(
+                                *vulkan_context_,
+                                scratch_needed,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                tlas_scratch_buffer_))
+                        {
+                            status_message_ = "Failed to create viewport RT TLAS scratch buffer";
+                            tlas_rebuild_pending_ = false;
+                            tlas_refit_pending_   = false;
+                            return false;
+                        }
+                    }
+
+                    tlas_capacity_    = primitive_count;
+                    descriptors_dirty_ = true;
+                }
+            }
+        }
+    }
+        if ((tlas_rebuild_pending_ || tlas_refit_pending_) &&
+            top_level_as_.handle != VK_NULL_HANDLE &&
+            instance_buffer_.device_address != 0 &&
+            tlas_scratch_buffer_.device_address != 0 &&
+            !pending_acceleration_instances_.empty())
+        {
+            const std::uint32_t primitive_count =
+                static_cast<std::uint32_t>(pending_acceleration_instances_.size());
+
+            VkAccelerationStructureGeometryInstancesDataKHR instances_data = {
+                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+            instances_data.data.deviceAddress = instance_buffer_.device_address;
+
+            VkAccelerationStructureGeometryKHR geometry = {
+                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+            geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+            geometry.geometry.instances = instances_data;
+
+            VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {
+                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+            build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+            build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                                        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+            build_geometry_info.geometryCount = 1;
+            build_geometry_info.pGeometries = &geometry;
+            if (tlas_refit_pending_ && !tlas_rebuild_pending_)
+            {
+                build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+                build_geometry_info.srcAccelerationStructure = top_level_as_.handle;
+            }
+            else
+            {
+                build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            }
+            build_geometry_info.dstAccelerationStructure = top_level_as_.handle;
+            build_geometry_info.scratchData.deviceAddress = tlas_scratch_buffer_.device_address;
+
+            VkAccelerationStructureBuildRangeInfoKHR build_range = {};
+            build_range.primitiveCount = primitive_count;
+            const VkAccelerationStructureBuildRangeInfoKHR* build_range_ptr = &build_range;
+
+            const bool build_succeeded = ExecuteImmediateCommands(*vulkan_context_, command_pool_, [&](VkCommandBuffer command_buffer)
+            {
+                vulkan_context_->GetRayTracingDispatch().cmd_build_acceleration_structures(
+                    command_buffer,
+                    1,
+                    &build_geometry_info,
+                    &build_range_ptr);
+
+                VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+                barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+                vkCmdPipelineBarrier(
+                    command_buffer,
+                    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                    0,
+                    1,
+                    &barrier,
+                    0,
+                    nullptr,
+                    0,
+                    nullptr);
+            });
+
+            if (!build_succeeded)
+            {
+                status_message_ = "Failed to build viewport RT top-level acceleration structure";
+                tlas_rebuild_pending_ = false;
+                tlas_refit_pending_ = false;
+                return false;
+            }
+        }
+
+    tlas_rebuild_pending_ = false;
+    tlas_refit_pending_ = false;
+
+    // ---------------------------------------------------------------------------
+
     VkCommandBufferBeginInfo begin_info = {};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -2057,11 +2242,15 @@ bool RayTracing::RenderFrame(
         return false;
     }
 
-    if (!UpdateDescriptors())
+    if (descriptors_dirty_)
     {
-        status_message_ = "Failed to update viewport RT descriptors";
-        vkEndCommandBuffer(command_buffer_);
-        return false;
+        if (!UpdateDescriptors())
+        {
+            status_message_ = "Failed to update viewport RT descriptors";
+            vkEndCommandBuffer(command_buffer_);
+            return false;
+        }
+        descriptors_dirty_ = false;
     }
 
     vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);

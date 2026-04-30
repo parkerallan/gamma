@@ -1515,6 +1515,57 @@ bool SetSceneObjectScale(const std::filesystem::path& scene_path, const std::str
     return SetSceneObjectVector3(scene_path, object_name, "Scale", scale);
 }
 
+bool SetSceneObjectTransform(
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    const SceneVector3& position,
+    const SceneVector3& rotation,
+    const SceneVector3& scale,
+    bool write_position,
+    bool write_rotation,
+    bool write_scale)
+{
+    if (!write_position && !write_rotation && !write_scale)
+    {
+        return false;
+    }
+
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t insert_index = object_end;
+
+        auto upsert_vector_line = [&](std::string_view key, const SceneVector3& value)
+        {
+            const std::string key_prefix = std::string(key) + ":";
+            const std::string new_line = std::string(key) + ": " + FormatVector3(value);
+            for (std::size_t index = object_start + 1; index < insert_index; ++index)
+            {
+                if (StartsWith(TrimCopy(lines[index]), key_prefix))
+                {
+                    lines[index] = new_line;
+                    return;
+                }
+            }
+
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index), new_line);
+            ++insert_index;
+        };
+
+        if (write_position)
+        {
+            upsert_vector_line("Position", position);
+        }
+        if (write_rotation)
+        {
+            upsert_vector_line("Rotation", rotation);
+        }
+        if (write_scale)
+        {
+            upsert_vector_line("Scale", scale);
+        }
+    });
+}
+
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset)
 {
     return SetSceneObjectVector3(scene_path, object_name, "ModelVisualOffset", model_visual_offset);
@@ -1954,6 +2005,51 @@ bool SetSceneObjectAttributeStringValue(
 
     return rewrite_succeeded && updated;
 }
+
+bool SetSceneObjectAttributeFloat2Value(
+    std::string_view key_x,
+    std::string_view key_y,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    float value_x,
+    float value_y)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        std::size_t insert_index = attribute_end;
+        auto upsert_scalar = [&](std::string_view key, float scalar)
+        {
+            const std::string key_prefix = std::string(key) + ":";
+            const std::string new_line = std::string(key) + ": " + FormatScalar(scalar);
+            for (std::size_t index = attribute_start + 1; index < insert_index; ++index)
+            {
+                if (StartsWith(TrimCopy(lines[index]), key_prefix))
+                {
+                    lines[index] = new_line;
+                    return;
+                }
+            }
+
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index), new_line);
+            ++insert_index;
+        };
+
+        upsert_scalar(key_x, value_x);
+        upsert_scalar(key_y, value_y);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
 }
 
 bool SetSceneObjectAttributeText2DFontPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& font_path)
@@ -1968,16 +2064,26 @@ bool SetSceneObjectAttributeText2DText(const std::filesystem::path& scene_path, 
 
 bool SetSceneObjectAttributeText2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
 {
-    bool ok = SetSceneObjectAttributeScalar("AttributeText2DX", scene_path, object_name, attribute_index, x);
-    ok = SetSceneObjectAttributeScalar("AttributeText2DY", scene_path, object_name, attribute_index, y) && ok;
-    return ok;
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeText2DX",
+        "AttributeText2DY",
+        scene_path,
+        object_name,
+        attribute_index,
+        x,
+        y);
 }
 
 bool SetSceneObjectAttributeText2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height)
 {
-    bool ok = SetSceneObjectAttributeScalar("AttributeText2DWidth", scene_path, object_name, attribute_index, width);
-    ok = SetSceneObjectAttributeScalar("AttributeText2DHeight", scene_path, object_name, attribute_index, height) && ok;
-    return ok;
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeText2DWidth",
+        "AttributeText2DHeight",
+        scene_path,
+        object_name,
+        attribute_index,
+        width,
+        height);
 }
 
 bool SetSceneObjectAttributeText2DFontSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float font_size)
@@ -2007,16 +2113,26 @@ bool SetSceneObjectAttributeImage2DImagePath(const std::filesystem::path& scene_
 
 bool SetSceneObjectAttributeImage2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
 {
-    bool ok = SetSceneObjectAttributeScalar("AttributeImage2DX", scene_path, object_name, attribute_index, x);
-    ok = SetSceneObjectAttributeScalar("AttributeImage2DY", scene_path, object_name, attribute_index, y) && ok;
-    return ok;
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeImage2DX",
+        "AttributeImage2DY",
+        scene_path,
+        object_name,
+        attribute_index,
+        x,
+        y);
 }
 
 bool SetSceneObjectAttributeImage2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height)
 {
-    bool ok = SetSceneObjectAttributeScalar("AttributeImage2DWidth", scene_path, object_name, attribute_index, width);
-    ok = SetSceneObjectAttributeScalar("AttributeImage2DHeight", scene_path, object_name, attribute_index, height) && ok;
-    return ok;
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeImage2DWidth",
+        "AttributeImage2DHeight",
+        scene_path,
+        object_name,
+        attribute_index,
+        width,
+        height);
 }
 
 bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint)
