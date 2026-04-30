@@ -407,7 +407,25 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributePhysicsHalfExtent:") ||
     StartsWith(line, "AttributePhysicsLinearDamping:") ||
     StartsWith(line, "AttributePhysicsAngularDamping:") ||
-    StartsWith(line, "AttributeTriggerHalfExtent:");
+    StartsWith(line, "AttributeTriggerHalfExtent:") ||
+    StartsWith(line, "AttributeText2DFontPath:") ||
+    StartsWith(line, "AttributeText2DText:") ||
+    StartsWith(line, "AttributeText2DX:") ||
+    StartsWith(line, "AttributeText2DY:") ||
+    StartsWith(line, "AttributeText2DWidth:") ||
+    StartsWith(line, "AttributeText2DHeight:") ||
+    StartsWith(line, "AttributeText2DFontSize:") ||
+    StartsWith(line, "AttributeText2DColor:") ||
+    StartsWith(line, "AttributeText2DAlpha:") ||
+    StartsWith(line, "AttributeText2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeImage2DImagePath:") ||
+    StartsWith(line, "AttributeImage2DX:") ||
+    StartsWith(line, "AttributeImage2DY:") ||
+    StartsWith(line, "AttributeImage2DWidth:") ||
+    StartsWith(line, "AttributeImage2DHeight:") ||
+    StartsWith(line, "AttributeImage2DTint:") ||
+    StartsWith(line, "AttributeImage2DAlpha:") ||
+    StartsWith(line, "AttributeImage2DLockAspectRatio:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -763,6 +781,10 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Rigidbody";
     case SceneObjectAttributeKind::TriggerVolume:
         return "Trigger Volume";
+    case SceneObjectAttributeKind::Text2D:
+        return "Text 2D";
+    case SceneObjectAttributeKind::Image2D:
+        return "Image 2D";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -787,6 +809,10 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Rigidbody";
     case SceneObjectAttributeKind::TriggerVolume:
         return "TriggerVolume";
+    case SceneObjectAttributeKind::Text2D:
+        return "Text2D";
+    case SceneObjectAttributeKind::Image2D:
+        return "Image2D";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -823,6 +849,14 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "TriggerVolume")
     {
         return SceneObjectAttributeKind::TriggerVolume;
+    }
+    if (trimmed == "Text2D")
+    {
+        return SceneObjectAttributeKind::Text2D;
+    }
+    if (trimmed == "Image2D")
+    {
+        return SceneObjectAttributeKind::Image2D;
     }
 
     return SceneObjectAttributeKind::None;
@@ -1338,6 +1372,78 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             current_object->physics_is_trigger = true;
             current_object->physics_half_extent = current_attribute->trigger_box.half_extent;
         }
+        else if (StartsWith(trimmed, "AttributeText2DFontPath:") && current_attribute != nullptr)
+        {
+            current_attribute->text_2d.font_path = ExtractValue(trimmed, "AttributeText2DFontPath:");
+        }
+        else if (StartsWith(trimmed, "AttributeText2DText:") && current_attribute != nullptr)
+        {
+            current_attribute->text_2d.text = ExtractValue(trimmed, "AttributeText2DText:");
+        }
+        else if (StartsWith(trimmed, "AttributeText2DX:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeText2DX:"), current_attribute->text_2d.x);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DY:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeText2DY:"), current_attribute->text_2d.y);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DWidth:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeText2DWidth:"), current_attribute->text_2d.width);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DHeight:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeText2DHeight:"), current_attribute->text_2d.height);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DFontSize:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeText2DFontSize:"), current_attribute->text_2d.font_size);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DColor:") && current_attribute != nullptr)
+        {
+            ParseColor3(ExtractValue(trimmed, "AttributeText2DColor:"), current_attribute->text_2d.color);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DAlpha:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeText2DAlpha:"), current_attribute->text_2d.alpha);
+        }
+        else if (StartsWith(trimmed, "AttributeText2DLockAspectRatio:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeText2DLockAspectRatio:"), current_attribute->text_2d.lock_aspect_ratio);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DImagePath:") && current_attribute != nullptr)
+        {
+            current_attribute->image_2d.image_path = ExtractValue(trimmed, "AttributeImage2DImagePath:");
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DX:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeImage2DX:"), current_attribute->image_2d.x);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DY:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeImage2DY:"), current_attribute->image_2d.y);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DWidth:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeImage2DWidth:"), current_attribute->image_2d.width);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DHeight:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeImage2DHeight:"), current_attribute->image_2d.height);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DTint:") && current_attribute != nullptr)
+        {
+            ParseColor3(ExtractValue(trimmed, "AttributeImage2DTint:"), current_attribute->image_2d.tint);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DAlpha:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeImage2DAlpha:"), current_attribute->image_2d.alpha);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DLockAspectRatio:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeImage2DLockAspectRatio:"), current_attribute->image_2d.lock_aspect_ratio);
+        }
         else if (StartsWith(trimmed, "Model:"))
         {
             current_attribute = nullptr;
@@ -1809,6 +1915,123 @@ bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& s
 bool SetSceneObjectAttributeTriggerHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent)
 {
     return SetSceneObjectAttributeVector3Value("AttributeTriggerHalfExtent", scene_path, object_name, attribute_index, half_extent);
+}
+
+namespace
+{
+bool SetSceneObjectAttributeStringValue(
+    std::string_view key,
+    const std::filesystem::path& scene_path,
+    const std::string& object_name,
+    std::size_t attribute_index,
+    const std::string& value)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string(key) + ":";
+        const std::string new_line = std::string(key) + ": " + value;
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+}
+
+bool SetSceneObjectAttributeText2DFontPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& font_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeText2DFontPath", scene_path, object_name, attribute_index, font_path);
+}
+
+bool SetSceneObjectAttributeText2DText(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& text)
+{
+    return SetSceneObjectAttributeStringValue("AttributeText2DText", scene_path, object_name, attribute_index, text);
+}
+
+bool SetSceneObjectAttributeText2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
+{
+    bool ok = SetSceneObjectAttributeScalar("AttributeText2DX", scene_path, object_name, attribute_index, x);
+    ok = SetSceneObjectAttributeScalar("AttributeText2DY", scene_path, object_name, attribute_index, y) && ok;
+    return ok;
+}
+
+bool SetSceneObjectAttributeText2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height)
+{
+    bool ok = SetSceneObjectAttributeScalar("AttributeText2DWidth", scene_path, object_name, attribute_index, width);
+    ok = SetSceneObjectAttributeScalar("AttributeText2DHeight", scene_path, object_name, attribute_index, height) && ok;
+    return ok;
+}
+
+bool SetSceneObjectAttributeText2DFontSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float font_size)
+{
+    return SetSceneObjectAttributeScalar("AttributeText2DFontSize", scene_path, object_name, attribute_index, font_size);
+}
+
+bool SetSceneObjectAttributeText2DColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color)
+{
+    return SetSceneObjectAttributeColorValue("AttributeText2DColor", scene_path, object_name, attribute_index, color);
+}
+
+bool SetSceneObjectAttributeText2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha)
+{
+    return SetSceneObjectAttributeScalar("AttributeText2DAlpha", scene_path, object_name, attribute_index, alpha);
+}
+
+bool SetSceneObjectAttributeText2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
+{
+    return SetSceneObjectAttributeBoolean("AttributeText2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
+}
+
+bool SetSceneObjectAttributeImage2DImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeImage2DImagePath", scene_path, object_name, attribute_index, image_path);
+}
+
+bool SetSceneObjectAttributeImage2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
+{
+    bool ok = SetSceneObjectAttributeScalar("AttributeImage2DX", scene_path, object_name, attribute_index, x);
+    ok = SetSceneObjectAttributeScalar("AttributeImage2DY", scene_path, object_name, attribute_index, y) && ok;
+    return ok;
+}
+
+bool SetSceneObjectAttributeImage2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height)
+{
+    bool ok = SetSceneObjectAttributeScalar("AttributeImage2DWidth", scene_path, object_name, attribute_index, width);
+    ok = SetSceneObjectAttributeScalar("AttributeImage2DHeight", scene_path, object_name, attribute_index, height) && ok;
+    return ok;
+}
+
+bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint)
+{
+    return SetSceneObjectAttributeColorValue("AttributeImage2DTint", scene_path, object_name, attribute_index, tint);
+}
+
+bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha)
+{
+    return SetSceneObjectAttributeScalar("AttributeImage2DAlpha", scene_path, object_name, attribute_index, alpha);
+}
+
+bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
+{
+    return SetSceneObjectAttributeBoolean("AttributeImage2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)

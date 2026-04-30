@@ -107,6 +107,7 @@ public:
     VkCommandBuffer GetCommandBuffer() const { return command_buffer_; }
     VkFence GetRenderFence() const { return render_fence_; }
     VkImage GetOutputImage() const { return output_image_; }
+    VkImageView GetOutputImageView() const { return output_view_; }
     std::uint32_t GetOutputWidth() const { return output_width_; }
     std::uint32_t GetOutputHeight() const { return output_height_; }
     VkImageLayout GetOutputLayout() const { return output_layout_; }

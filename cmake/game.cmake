@@ -70,6 +70,8 @@ add_game_shader(scene_viewport_rt.rchit rchit)
 add_game_shader(scene_viewport_rt_shadow.rchit rchit)
 add_game_shader(scene_viewport_rt_primary.rahit rahit)
 add_game_shader(scene_viewport_rt_shadow.rahit rahit)
+add_game_shader(overlay2d.vert vert)
+add_game_shader(overlay2d.frag frag)
 
 add_custom_target(game_shaders
     DEPENDS ${GAME_SHADER_OUTPUTS}
@@ -90,6 +92,7 @@ add_executable(game
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
     src/render/PhysicsWorld.cpp
+    src/render/Scene2DRenderer.cpp
     src/render/RuntimeRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/vfs/AssetVFS.cpp

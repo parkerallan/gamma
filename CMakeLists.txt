@@ -293,6 +293,8 @@ add_engine_shader(scene_viewport_rt.rchit rchit)
 add_engine_shader(scene_viewport_rt_shadow.rchit rchit)
 add_engine_shader(scene_viewport_rt_primary.rahit rahit)
 add_engine_shader(scene_viewport_rt_shadow.rahit rahit)
+add_engine_shader(overlay2d.vert vert)
+add_engine_shader(overlay2d.frag frag)
 
 add_custom_target(engine_scene_shaders
     DEPENDS ${ENGINE_SHADER_OUTPUTS}
@@ -376,6 +378,7 @@ add_executable(engine
     src/render/RuntimeRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/render/PhysicsWorld.cpp
+    src/render/Scene2DRenderer.cpp
     src/render/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/render/FontInfoRenderer.cpp

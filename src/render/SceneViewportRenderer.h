@@ -5,6 +5,7 @@
 #include "assets/SceneMetadata.h"
 #include "render/Lighting.h"
 #include "render/Raytracing.h"
+#include "render/Scene2DRenderer.h"
 #include "state/EngineState.h"
 
 #include <vulkan/vulkan.h>
@@ -118,6 +119,7 @@ public:
 private:
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
+    Scene2DRenderer scene_2d_renderer_{};
     bool render_requested_ = false;
     bool middle_mouse_panning_ = false;
     bool show_physics_colliders_ = false;
@@ -134,6 +136,10 @@ private:
     ResolvedSceneLighting resolved_lighting_{};
     std::vector<QueuedSceneObject> queued_objects_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
+
+    // Pending scene data set by RenderUi, consumed by RenderGpu.
+    SceneMetadata pending_scene_metadata_{};
+    std::filesystem::path pending_project_root_{};
 
     void ReleaseBuffer(GpuBuffer& buffer);
     void ReleaseTexture(GpuTexture& texture);

@@ -2058,6 +2058,7 @@ bool SceneViewportRenderer::Initialize(VulkanContext* context)
 {
     vulkan_context_ = context;
     ray_tracing_.Initialize(context);
+    scene_2d_renderer_.Initialize(context);
     return vulkan_context_ != nullptr;
 }
 
@@ -2131,6 +2132,7 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 
 void SceneViewportRenderer::Shutdown()
 {
+    scene_2d_renderer_.Shutdown();
     ray_tracing_.Shutdown();
 
     for (auto& mesh_entry : mesh_cache_)
@@ -2863,14 +2865,258 @@ void SceneViewportRenderer::RenderUi(
         MultiplyMatrix(projection_matrix, view_matrix, view_projection_.data());
     }
 
+    std::string overlay_hit_object_name;
+    const float overlay_scale_x = viewport_width / static_cast<float>((std::max)(1u, target_width));
+    const float overlay_scale_y = viewport_height / static_cast<float>((std::max)(1u, target_height));
+    const ImVec2 overlay_mouse_pos = ImGui::GetMousePos();
+    for (auto object_it = scene_metadata.objects.rbegin(); object_it != scene_metadata.objects.rend(); ++object_it)
+    {
+        const SceneObjectMetadata& object = *object_it;
+        bool hit = false;
+        for (const SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind != SceneObjectAttributeKind::Text2D &&
+                attribute.kind != SceneObjectAttributeKind::Image2D)
+            {
+                continue;
+            }
+
+            const bool is_text_overlay = attribute.kind == SceneObjectAttributeKind::Text2D;
+            const float attr_x = is_text_overlay ? attribute.text_2d.x : attribute.image_2d.x;
+            const float attr_y = is_text_overlay ? attribute.text_2d.y : attribute.image_2d.y;
+            const float attr_w = is_text_overlay ? attribute.text_2d.width : attribute.image_2d.width;
+            const float attr_h = is_text_overlay ? attribute.text_2d.height : attribute.image_2d.height;
+
+            const ImVec2 rect_min(min.x + attr_x * overlay_scale_x, min.y + attr_y * overlay_scale_y);
+            const ImVec2 rect_max(rect_min.x + attr_w * overlay_scale_x, rect_min.y + attr_h * overlay_scale_y);
+            if (overlay_mouse_pos.x >= rect_min.x && overlay_mouse_pos.x <= rect_max.x &&
+                overlay_mouse_pos.y >= rect_min.y && overlay_mouse_pos.y <= rect_max.y)
+            {
+                overlay_hit_object_name = object.name;
+                hit = true;
+                break;
+            }
+        }
+
+        if (hit)
+        {
+            break;
+        }
+    }
+
+    bool overlay_gizmo_interaction_consumed = false;
+    if (selected_scene_object_metadata != nullptr)
+    {
+        const SceneObjectAttribute* selected_overlay_attribute = nullptr;
+        std::size_t selected_overlay_attribute_index = 0;
+        for (std::size_t attribute_index = 0; attribute_index < selected_scene_object_metadata->attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = selected_scene_object_metadata->attributes[attribute_index];
+            if (attribute.kind == SceneObjectAttributeKind::Text2D || attribute.kind == SceneObjectAttributeKind::Image2D)
+            {
+                selected_overlay_attribute = &attribute;
+                selected_overlay_attribute_index = attribute_index;
+                break;
+            }
+        }
+
+        if (selected_overlay_attribute != nullptr)
+        {
+            static std::string active_overlay_object_name;
+            static std::size_t active_overlay_attribute_index = 0;
+            static bool overlay_dragging = false;
+            static bool overlay_resizing = false;
+            static float overlay_x = 0.0f;
+            static float overlay_y = 0.0f;
+            static float overlay_w = 1.0f;
+            static float overlay_h = 1.0f;
+
+            const bool is_text_overlay = selected_overlay_attribute->kind == SceneObjectAttributeKind::Text2D;
+            const float attr_x = is_text_overlay ? selected_overlay_attribute->text_2d.x : selected_overlay_attribute->image_2d.x;
+            const float attr_y = is_text_overlay ? selected_overlay_attribute->text_2d.y : selected_overlay_attribute->image_2d.y;
+            const float attr_w = is_text_overlay ? selected_overlay_attribute->text_2d.width : selected_overlay_attribute->image_2d.width;
+            const float attr_h = is_text_overlay ? selected_overlay_attribute->text_2d.height : selected_overlay_attribute->image_2d.height;
+            const bool lock_aspect_ratio = is_text_overlay
+                ? selected_overlay_attribute->text_2d.lock_aspect_ratio
+                : selected_overlay_attribute->image_2d.lock_aspect_ratio;
+
+            const bool same_overlay_target =
+                active_overlay_object_name == selected_scene_object_metadata->name &&
+                active_overlay_attribute_index == selected_overlay_attribute_index;
+            if (!overlay_dragging && !overlay_resizing)
+            {
+                active_overlay_object_name = selected_scene_object_metadata->name;
+                active_overlay_attribute_index = selected_overlay_attribute_index;
+                overlay_x = attr_x;
+                overlay_y = attr_y;
+                overlay_w = attr_w;
+                overlay_h = attr_h;
+            }
+            else if (!same_overlay_target)
+            {
+                overlay_dragging = false;
+                overlay_resizing = false;
+                active_overlay_object_name = selected_scene_object_metadata->name;
+                active_overlay_attribute_index = selected_overlay_attribute_index;
+                overlay_x = attr_x;
+                overlay_y = attr_y;
+                overlay_w = attr_w;
+                overlay_h = attr_h;
+            }
+
+            const float scale_x = viewport_width / static_cast<float>((std::max)(1u, target_width));
+            const float scale_y = viewport_height / static_cast<float>((std::max)(1u, target_height));
+            const ImVec2 rect_min(min.x + overlay_x * scale_x, min.y + overlay_y * scale_y);
+            const ImVec2 rect_max(rect_min.x + overlay_w * scale_x, rect_min.y + overlay_h * scale_y);
+            const ImVec2 resize_handle_min(rect_max.x - 8.0f, rect_max.y - 8.0f);
+
+            draw_list->AddRect(rect_min, rect_max, IM_COL32(250, 196, 52, 255), 0.0f, 0, 2.0f);
+            draw_list->AddRectFilled(resize_handle_min, rect_max, IM_COL32(250, 196, 52, 220));
+
+            const ImVec2 mouse_pos = ImGui::GetMousePos();
+            const bool mouse_in_rect =
+                mouse_pos.x >= rect_min.x && mouse_pos.x <= rect_max.x &&
+                mouse_pos.y >= rect_min.y && mouse_pos.y <= rect_max.y;
+            const bool mouse_in_resize =
+                mouse_pos.x >= resize_handle_min.x && mouse_pos.x <= rect_max.x &&
+                mouse_pos.y >= resize_handle_min.y && mouse_pos.y <= rect_max.y;
+
+            const bool allow_overlay_interaction =
+                mouse_over_viewport &&
+                !transform_toolbar_hovered &&
+                !axis_view_result.hovered &&
+                !collider_resize_interaction_consumed &&
+                !ImGuizmo::IsOver() &&
+                !ImGuizmo::IsUsing();
+
+            if (allow_overlay_interaction && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            {
+                if (mouse_in_resize)
+                {
+                    overlay_resizing = true;
+                    overlay_dragging = false;
+                    overlay_gizmo_interaction_consumed = true;
+                }
+                else if (mouse_in_rect)
+                {
+                    overlay_dragging = true;
+                    overlay_resizing = false;
+                    overlay_gizmo_interaction_consumed = true;
+                }
+            }
+
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            {
+                overlay_dragging = false;
+                overlay_resizing = false;
+            }
+
+            if ((overlay_dragging || overlay_resizing) && allow_overlay_interaction)
+            {
+                const float delta_x = io.MouseDelta.x / scale_x;
+                const float delta_y = io.MouseDelta.y / scale_y;
+                if (overlay_dragging)
+                {
+                    overlay_x += delta_x;
+                    overlay_y += delta_y;
+                }
+                else if (overlay_resizing)
+                {
+                    if (lock_aspect_ratio)
+                    {
+                        const float aspect = (std::max)(overlay_h, 1.0f) > 0.0f
+                            ? (overlay_w / (std::max)(overlay_h, 1.0f))
+                            : 1.0f;
+                        const float diagonal_delta = std::abs(delta_x) >= std::abs(delta_y) ? delta_x : delta_y;
+                        const float next_w = (std::max)(1.0f, overlay_w + diagonal_delta);
+                        const float safe_aspect = (std::max)(aspect, 0.0001f);
+                        overlay_w = next_w;
+                        overlay_h = (std::max)(1.0f, next_w / safe_aspect);
+                    }
+                    else
+                    {
+                        overlay_w = (std::max)(1.0f, overlay_w + delta_x);
+                        overlay_h = (std::max)(1.0f, overlay_h + delta_y);
+                    }
+                }
+
+                if (is_text_overlay)
+                {
+                    if (overlay_dragging)
+                    {
+                        SetSceneObjectAttributeText2DPosition(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_x,
+                            overlay_y);
+                    }
+                    else
+                    {
+                        SetSceneObjectAttributeText2DSize(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_w,
+                            overlay_h);
+                    }
+                }
+                else
+                {
+                    if (overlay_dragging)
+                    {
+                        SetSceneObjectAttributeImage2DPosition(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_x,
+                            overlay_y);
+                    }
+                    else
+                    {
+                        SetSceneObjectAttributeImage2DSize(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_w,
+                            overlay_h);
+                    }
+                }
+
+                state.request_files_tree_refresh = true;
+                overlay_gizmo_interaction_consumed = true;
+            }
+        }
+    }
+
     if (mouse_over_viewport &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !overlay_gizmo_interaction_consumed &&
         !collider_resize_interaction_consumed &&
         !transform_toolbar_hovered &&
         !axis_view_result.hovered &&
         !ImGuizmo::IsOver() &&
         !ImGuizmo::IsUsing())
     {
+        if (!overlay_hit_object_name.empty())
+        {
+            state.SetSelectedSceneObject(state.active_scene_path, overlay_hit_object_name);
+            overlay_gizmo_interaction_consumed = true;
+        }
+
+        if (overlay_gizmo_interaction_consumed)
+        {
+            pending_scene_metadata_ = scene_metadata;
+            pending_project_root_ = state.project_root;
+            render_requested_ = true;
+
+            const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
+            const std::string footer = "Viewport " + std::to_string(viewport_fps) + " FPS";
+            draw_list->AddText(ImVec2(min.x + 12.0f, max.y - 24.0f), IM_COL32(145, 152, 163, 255), footer.c_str());
+            ImGui::EndChild();
+            return;
+        }
+
         const int picked_object_index = PickSceneObject(
             queued_objects_,
             ImGui::GetMousePos(),
@@ -2888,6 +3134,8 @@ void SceneViewportRenderer::RenderUi(
         }
     }
 
+    pending_scene_metadata_ = scene_metadata;
+    pending_project_root_ = state.project_root;
     render_requested_ = true;
 
     const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
@@ -3083,4 +3331,12 @@ void SceneViewportRenderer::RenderGpu()
     {
         SDL_Log("RayTracing::RenderFrame failed: %s", ray_tracing_.GetStatusMessage().c_str());
     }
+
+    scene_2d_renderer_.CompositeOverlay(
+        pending_scene_metadata_,
+        pending_project_root_,
+        ray_tracing_.GetOutputImage(),
+        ray_tracing_.GetOutputImageView(),
+        ray_tracing_.GetOutputWidth(),
+        ray_tracing_.GetOutputHeight());
 }

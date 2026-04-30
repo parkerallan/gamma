@@ -27,6 +27,8 @@ enum class SceneObjectAttributeKind
     Camera,
     Rigidbody,
     TriggerVolume,
+    Text2D,
+    Image2D,
 };
 
 struct SceneObjectEnvironmentLightAttributes
@@ -89,6 +91,32 @@ struct SceneObjectTriggerVolumeAttributes
     SceneVector3 half_extent = {0.5f, 0.5f, 0.5f};
 };
 
+struct SceneObjectText2DAttributes
+{
+    std::string font_path;
+    std::string text;
+    float x = 0.05f;
+    float y = 0.05f;
+    float width = 400.0f;
+    float height = 80.0f;
+    float font_size = 32.0f;
+    SceneColor3 color = {1.0f, 1.0f, 1.0f};
+    float alpha = 1.0f;
+    bool lock_aspect_ratio = false;
+};
+
+struct SceneObjectImage2DAttributes
+{
+    std::string image_path;
+    float x = 0.05f;
+    float y = 0.05f;
+    float width = 256.0f;
+    float height = 256.0f;
+    SceneColor3 tint = {1.0f, 1.0f, 1.0f};
+    float alpha = 1.0f;
+    bool lock_aspect_ratio = false;
+};
+
 struct SceneObjectAttribute
 {
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
@@ -99,6 +127,8 @@ struct SceneObjectAttribute
     SceneObjectCameraAttributes camera{};
     SceneObjectRigidbodyAttributes rigidbody{};
     SceneObjectTriggerVolumeAttributes trigger_box{};
+    SceneObjectText2DAttributes text_2d{};
+    SceneObjectImage2DAttributes image_2d{};
 };
 
 struct SceneObjectMetadata
@@ -195,6 +225,20 @@ bool SetSceneObjectAttributePhysicsHalfExtent(const std::filesystem::path& scene
 bool SetSceneObjectAttributePhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float linear_damping);
 bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float angular_damping);
 bool SetSceneObjectAttributeTriggerHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent);
+bool SetSceneObjectAttributeText2DFontPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& font_path);
+bool SetSceneObjectAttributeText2DText(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& text);
+bool SetSceneObjectAttributeText2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y);
+bool SetSceneObjectAttributeText2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height);
+bool SetSceneObjectAttributeText2DFontSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float font_size);
+bool SetSceneObjectAttributeText2DColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color);
+bool SetSceneObjectAttributeText2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
+bool SetSceneObjectAttributeText2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
+bool SetSceneObjectAttributeImage2DImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
+bool SetSceneObjectAttributeImage2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y);
+bool SetSceneObjectAttributeImage2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height);
+bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint);
+bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
+bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);

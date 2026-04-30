@@ -469,6 +469,10 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
 
 void InfoPanel::RenderSelectedSceneObject(EngineState& state)
 {
+    // Viewport gizmo edits can happen multiple times within a single timestamp
+    // granularity window on Windows, so force a fresh parse while editing.
+    has_cached_scene_metadata_ = false;
+
     const SceneMetadata& scene_metadata = GetSceneMetadata(state.selected_item_path);
     if (!scene_metadata.parsed)
     {

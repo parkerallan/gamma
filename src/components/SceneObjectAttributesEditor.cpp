@@ -3,6 +3,8 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <functional>
 #include <fstream>
 #include <iterator>
@@ -18,7 +20,58 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Camera,
     SceneObjectAttributeKind::Rigidbody,
     SceneObjectAttributeKind::TriggerVolume,
+    SceneObjectAttributeKind::Text2D,
+    SceneObjectAttributeKind::Image2D,
 };
+
+constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
+
+std::string ToLowerAscii(std::string value)
+{
+    for (char& ch : value)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+bool HasAnyExtension(const std::filesystem::path& path, const std::initializer_list<const char*>& extensions)
+{
+    const std::string ext = ToLowerAscii(path.extension().string());
+    for (const char* expected : extensions)
+    {
+        if (ext == expected)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string NormalizeAssetPath(const EngineState& state, const std::filesystem::path& absolute_or_relative)
+{
+    std::error_code ec;
+    const std::filesystem::path project_root = std::filesystem::weakly_canonical(state.project_root, ec);
+    const std::filesystem::path candidate = std::filesystem::weakly_canonical(absolute_or_relative, ec);
+    if (!ec && !project_root.empty())
+    {
+        const std::filesystem::path relative = std::filesystem::relative(candidate, project_root, ec);
+        const bool escapes_project_root =
+            !relative.empty() &&
+            relative.begin() != relative.end() &&
+            (*relative.begin() == std::filesystem::path(".."));
+        if (!ec && !relative.empty() && !escapes_project_root)
+        {
+            return relative.generic_string();
+        }
+    }
+
+    if (absolute_or_relative.is_absolute())
+    {
+        return absolute_or_relative.generic_string();
+    }
+    return std::filesystem::path(state.project_root / absolute_or_relative).generic_string();
+}
 
 bool RefreshOpenSceneBuffer(EngineState& state)
 {
@@ -184,7 +237,9 @@ bool RenderAttributeSection(
     if (ImGui::CollapsingHeader(ToDisplayName(attribute.kind), &keep_attribute, ImGuiTreeNodeFlags_DefaultOpen))
     {
         if (attribute.kind != SceneObjectAttributeKind::Rigidbody &&
-            attribute.kind != SceneObjectAttributeKind::TriggerVolume)
+            attribute.kind != SceneObjectAttributeKind::TriggerVolume &&
+            attribute.kind != SceneObjectAttributeKind::Text2D &&
+            attribute.kind != SceneObjectAttributeKind::Image2D)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
             {
@@ -529,6 +584,247 @@ bool RenderAttributeSection(
                 changed = SaveSceneObjectAttributeEdit(state, object, "trigger half extent", [&]()
                 {
                     return SetSceneObjectAttributeTriggerHalfExtent(state.selected_item_path, object.name, attribute_index, clamped);
+                }) || changed;
+            }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Text2D:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_font_label = attribute.text_2d.font_path.empty()
+                ? std::string("Drop TTF Font Here")
+                : std::filesystem::path(attribute.text_2d.font_path).filename().string();
+            ImGui::Button(current_font_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+                {
+                    const char* payload_text = static_cast<const char*>(payload->Data);
+                    const std::size_t payload_size = payload->DataSize > 0
+                        ? static_cast<std::size_t>(payload->DataSize - 1)
+                        : 0;
+                    const std::filesystem::path dropped_path(std::string(payload_text, payload_size));
+                    if (HasAnyExtension(dropped_path, {".ttf", ".otf"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "text 2D font", [&]()
+                        {
+                            return SetSceneObjectAttributeText2DFontPath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            std::array<char, 4096> text_buffer{};
+            const std::string initial_text = attribute.text_2d.text;
+            const std::size_t copy_size = (std::min)(initial_text.size(), text_buffer.size() - 1);
+            std::copy_n(initial_text.data(), copy_size, text_buffer.data());
+            if (ImGui::InputTextMultiline("Text", text_buffer.data(), text_buffer.size(), ImVec2(-1.0f, 120.0f)))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D text", [&]()
+                {
+                    return SetSceneObjectAttributeText2DText(state.selected_item_path, object.name, attribute_index, std::string(text_buffer.data()));
+                }) || changed;
+            }
+
+            float position[2] = {attribute.text_2d.x, attribute.text_2d.y};
+            if (ImGui::DragFloat2("Position", position, 1.0f, -100000.0f, 100000.0f, "%.1f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D position", [&]()
+                {
+                    return SetSceneObjectAttributeText2DPosition(state.selected_item_path, object.name, attribute_index, position[0], position[1]);
+                }) || changed;
+            }
+
+            if (attribute.text_2d.lock_aspect_ratio)
+            {
+                const float safe_height = (std::max)(1.0f, attribute.text_2d.height);
+                const float aspect = (std::max)(attribute.text_2d.width / safe_height, 0.0001f);
+                float width_locked = attribute.text_2d.width;
+                if (ImGui::DragFloat("Size", &width_locked, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    const float clamped_width = (std::max)(1.0f, width_locked);
+                    const float clamped_height = (std::max)(1.0f, clamped_width / aspect);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "text 2D size", [&]()
+                    {
+                        return SetSceneObjectAttributeText2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            clamped_width,
+                            clamped_height);
+                    }) || changed;
+                }
+            }
+            else
+            {
+                float size[2] = {attribute.text_2d.width, attribute.text_2d.height};
+                if (ImGui::DragFloat2("Size", size, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "text 2D size", [&]()
+                    {
+                        return SetSceneObjectAttributeText2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            (std::max)(1.0f, size[0]),
+                            (std::max)(1.0f, size[1]));
+                    }) || changed;
+                }
+            }
+
+            bool text_lock_aspect_ratio = attribute.text_2d.lock_aspect_ratio;
+            if (ImGui::Checkbox("Lock Aspect Ratio", &text_lock_aspect_ratio))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D lock aspect ratio", [&]()
+                {
+                    return SetSceneObjectAttributeText2DLockAspectRatio(state.selected_item_path, object.name, attribute_index, text_lock_aspect_ratio);
+                }) || changed;
+            }
+
+            float font_size = attribute.text_2d.font_size;
+            if (ImGui::DragFloat("Font Size", &font_size, 0.5f, 1.0f, 512.0f, "%.1f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D font size", [&]()
+                {
+                    return SetSceneObjectAttributeText2DFontSize(state.selected_item_path, object.name, attribute_index, (std::max)(1.0f, font_size));
+                }) || changed;
+            }
+
+            float color[3] = {
+                attribute.text_2d.color[0],
+                attribute.text_2d.color[1],
+                attribute.text_2d.color[2]};
+            if (ImGui::ColorEdit3("Color", color))
+            {
+                const SceneColor3 next_color = {color[0], color[1], color[2]};
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D color", [&]()
+                {
+                    return SetSceneObjectAttributeText2DColor(state.selected_item_path, object.name, attribute_index, next_color);
+                }) || changed;
+            }
+
+            float alpha = attribute.text_2d.alpha;
+            if (ImGui::DragFloat("Alpha", &alpha, 0.01f, 0.0f, 1.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D alpha", [&]()
+                {
+                    return SetSceneObjectAttributeText2DAlpha(state.selected_item_path, object.name, attribute_index, std::clamp(alpha, 0.0f, 1.0f));
+                }) || changed;
+            }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Image2D:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_image_label = attribute.image_2d.image_path.empty()
+                ? std::string("Drop Image Here")
+                : std::filesystem::path(attribute.image_2d.image_path).filename().string();
+            ImGui::Button(current_image_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+                {
+                    const char* payload_text = static_cast<const char*>(payload->Data);
+                    const std::size_t payload_size = payload->DataSize > 0
+                        ? static_cast<std::size_t>(payload->DataSize - 1)
+                        : 0;
+                    const std::filesystem::path dropped_path(std::string(payload_text, payload_size));
+                    if (HasAnyExtension(dropped_path, {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".gif", ".webp"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "image 2D path", [&]()
+                        {
+                            return SetSceneObjectAttributeImage2DImagePath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            float position[2] = {attribute.image_2d.x, attribute.image_2d.y};
+            if (ImGui::DragFloat2("Position", position, 1.0f, -100000.0f, 100000.0f, "%.1f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "image 2D position", [&]()
+                {
+                    return SetSceneObjectAttributeImage2DPosition(state.selected_item_path, object.name, attribute_index, position[0], position[1]);
+                }) || changed;
+            }
+
+            if (attribute.image_2d.lock_aspect_ratio)
+            {
+                const float safe_height = (std::max)(1.0f, attribute.image_2d.height);
+                const float aspect = (std::max)(attribute.image_2d.width / safe_height, 0.0001f);
+                float width_locked = attribute.image_2d.width;
+                if (ImGui::DragFloat("Size", &width_locked, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    const float clamped_width = (std::max)(1.0f, width_locked);
+                    const float clamped_height = (std::max)(1.0f, clamped_width / aspect);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "image 2D size", [&]()
+                    {
+                        return SetSceneObjectAttributeImage2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            clamped_width,
+                            clamped_height);
+                    }) || changed;
+                }
+            }
+            else
+            {
+                float size[2] = {attribute.image_2d.width, attribute.image_2d.height};
+                if (ImGui::DragFloat2("Size", size, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "image 2D size", [&]()
+                    {
+                        return SetSceneObjectAttributeImage2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            (std::max)(1.0f, size[0]),
+                            (std::max)(1.0f, size[1]));
+                    }) || changed;
+                }
+            }
+
+            bool image_lock_aspect_ratio = attribute.image_2d.lock_aspect_ratio;
+            if (ImGui::Checkbox("Lock Aspect Ratio", &image_lock_aspect_ratio))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "image 2D lock aspect ratio", [&]()
+                {
+                    return SetSceneObjectAttributeImage2DLockAspectRatio(state.selected_item_path, object.name, attribute_index, image_lock_aspect_ratio);
+                }) || changed;
+            }
+
+            float tint[3] = {
+                attribute.image_2d.tint[0],
+                attribute.image_2d.tint[1],
+                attribute.image_2d.tint[2]};
+            if (ImGui::ColorEdit3("Tint", tint))
+            {
+                const SceneColor3 next_tint = {tint[0], tint[1], tint[2]};
+                changed = SaveSceneObjectAttributeEdit(state, object, "image 2D tint", [&]()
+                {
+                    return SetSceneObjectAttributeImage2DTint(state.selected_item_path, object.name, attribute_index, next_tint);
+                }) || changed;
+            }
+
+            float alpha = attribute.image_2d.alpha;
+            if (ImGui::DragFloat("Alpha", &alpha, 0.01f, 0.0f, 1.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "image 2D alpha", [&]()
+                {
+                    return SetSceneObjectAttributeImage2DAlpha(state.selected_item_path, object.name, attribute_index, std::clamp(alpha, 0.0f, 1.0f));
                 }) || changed;
             }
 

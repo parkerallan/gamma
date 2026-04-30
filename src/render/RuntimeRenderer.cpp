@@ -936,6 +936,8 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
         return false;
     }
 
+    scene_2d_renderer_.Initialize(context);
+
     return true;
 }
 
@@ -1001,6 +1003,7 @@ void RuntimeRenderer::Shutdown()
 {
     ShutdownScriptRuntime();
     physics_world_.Shutdown();
+    scene_2d_renderer_.Shutdown();
     ray_tracing_.Shutdown();
     for (auto& [path, entry] : mesh_cache_)
     {
@@ -2771,6 +2774,14 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         }
         return false;
     }
+
+    scene_2d_renderer_.CompositeOverlay(
+        scene_metadata,
+        project_root_,
+        ray_tracing_.GetOutputImage(),
+        ray_tracing_.GetOutputImageView(),
+        ray_tracing_.GetOutputWidth(),
+        ray_tracing_.GetOutputHeight());
 
     return true;
 }
