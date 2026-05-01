@@ -189,7 +189,7 @@ void FilesPanel::Render(EngineState& state)
 
 void FilesPanel::RenderFilesTab(EngineState& state, bool& file_tree_changed)
 {
-    file_tree_changed = creation_menu_.RenderButton(state, state.project_root, "Add", false) || file_tree_changed;
+    file_tree_changed = creation_menu_.RenderButton(state, state.project_root, ICON_CI_ADD, false) || file_tree_changed;
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##FilesSearch", "Search", search_buffer_.data(), search_buffer_.size());

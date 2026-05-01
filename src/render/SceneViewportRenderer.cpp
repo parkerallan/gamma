@@ -2437,8 +2437,7 @@ void SceneViewportRenderer::RenderUi(
     constexpr const char* kStopBuildButtonLabel = ICON_CI_STOP_CIRCLE;
     constexpr const char* kPlayButtonLabel = ICON_CI_PLAY;
     constexpr const char* kCloseRuntimeButtonLabel = ICON_CI_CLOSE_ALL;
-
-    ImGui::TextUnformatted("Scene Viewport");
+    constexpr const char* kVisibilityButtonLabel = ICON_CI_EYE " " ICON_CI_CHEVRON_DOWN;
 
     const float header_spacing = ImGui::GetStyle().ItemSpacing.x;
     const bool build_running = state.is_build_running;
@@ -2447,12 +2446,18 @@ void SceneViewportRenderer::RenderUi(
     const char* build_button_tooltip = build_running ? "Stop Build" : "Build";
     const char* play_button_label = runtime_playing ? kCloseRuntimeButtonLabel : kPlayButtonLabel;
     const char* play_button_tooltip = runtime_playing ? "Close Runtime" : "Play";
+    const char* visibility_button_tooltip = "Visibility";
     const float build_button_width = ComputeViewportHeaderButtonWidth(build_button_label);
     const float play_button_width = ComputeViewportHeaderButtonWidth(play_button_label);
     const float header_toolbar_width = build_button_width + play_button_width + header_spacing;
     const float header_toolbar_x = (std::max)(
-        ImGui::GetCursorPosX() + header_spacing,
+        ImGui::GetCursorPosX() + ComputeViewportHeaderButtonWidth(kVisibilityButtonLabel) + header_spacing,
         ImGui::GetWindowContentRegionMax().x - header_toolbar_width);
+
+    if (DrawViewportHeaderButton(kVisibilityButtonLabel, visibility_button_tooltip))
+    {
+        ImGui::OpenPopup("##SceneViewportVisibilityPopup");
+    }
 
     ImGui::SameLine(header_toolbar_x);
     if (DrawViewportHeaderButton(build_button_label, build_button_tooltip))
@@ -2480,10 +2485,21 @@ void SceneViewportRenderer::RenderUi(
         }
     }
 
-    ImGui::Checkbox("Show Physics Colliders", &show_physics_colliders_);
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    if (ImGui::BeginPopup("##SceneViewportVisibilityPopup"))
     {
-        ImGui::SetTooltip("Draw wireframe collider shapes from PhysicsShape settings");
+        ImGui::Checkbox("Physics Colliders", &show_physics_colliders_);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        {
+            ImGui::SetTooltip("Draw wireframe collider shapes from PhysicsShape settings");
+        }
+
+        ImGui::Checkbox("FPS", &show_fps_);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        {
+            ImGui::SetTooltip("Show viewport frames per second");
+        }
+
+        ImGui::EndPopup();
     }
 
     ImGui::Separator();
@@ -3081,8 +3097,12 @@ void SceneViewportRenderer::RenderUi(
             const bool is_text_overlay = attribute.kind == SceneObjectAttributeKind::Text2D;
             const float attr_x = is_text_overlay ? attribute.text_2d.x : attribute.image_2d.x;
             const float attr_y = is_text_overlay ? attribute.text_2d.y : attribute.image_2d.y;
-            const float attr_w = is_text_overlay ? attribute.text_2d.width : attribute.image_2d.width;
-            const float attr_h = is_text_overlay ? attribute.text_2d.height : attribute.image_2d.height;
+            float attr_w = is_text_overlay ? attribute.text_2d.width : attribute.image_2d.width;
+            float attr_h = is_text_overlay ? attribute.text_2d.height : attribute.image_2d.height;
+            if (is_text_overlay)
+            {
+                scene_2d_renderer_.GetText2DRenderSize(state.project_root, attribute.text_2d, attr_w, attr_h);
+            }
 
             const ImVec2 rect_min(min.x + attr_x * overlay_scale_x, min.y + attr_y * overlay_scale_y);
             const ImVec2 rect_max(rect_min.x + attr_w * overlay_scale_x, rect_min.y + attr_h * overlay_scale_y);
@@ -3131,8 +3151,12 @@ void SceneViewportRenderer::RenderUi(
             const bool is_text_overlay = selected_overlay_attribute->kind == SceneObjectAttributeKind::Text2D;
             const float attr_x = is_text_overlay ? selected_overlay_attribute->text_2d.x : selected_overlay_attribute->image_2d.x;
             const float attr_y = is_text_overlay ? selected_overlay_attribute->text_2d.y : selected_overlay_attribute->image_2d.y;
-            const float attr_w = is_text_overlay ? selected_overlay_attribute->text_2d.width : selected_overlay_attribute->image_2d.width;
-            const float attr_h = is_text_overlay ? selected_overlay_attribute->text_2d.height : selected_overlay_attribute->image_2d.height;
+            float attr_w = is_text_overlay ? selected_overlay_attribute->text_2d.width : selected_overlay_attribute->image_2d.width;
+            float attr_h = is_text_overlay ? selected_overlay_attribute->text_2d.height : selected_overlay_attribute->image_2d.height;
+            if (is_text_overlay)
+            {
+                scene_2d_renderer_.GetText2DRenderSize(state.project_root, selected_overlay_attribute->text_2d, attr_w, attr_h);
+            }
             const bool lock_aspect_ratio = is_text_overlay
                 ? selected_overlay_attribute->text_2d.lock_aspect_ratio
                 : selected_overlay_attribute->image_2d.lock_aspect_ratio;
@@ -3335,9 +3359,17 @@ void SceneViewportRenderer::RenderUi(
             pending_project_root_ = state.project_root;
             render_requested_ = true;
 
-            const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
-            const std::string footer = "Viewport " + std::to_string(viewport_fps) + " FPS";
-            draw_list->AddText(ImVec2(min.x + 12.0f, max.y - 24.0f), IM_COL32(145, 152, 163, 255), footer.c_str());
+            if (show_fps_)
+            {
+                const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
+                const std::string footer = std::to_string(viewport_fps) + " FPS";
+                draw_list->AddText(
+                    ImGui::GetFont(),
+                    ImGui::GetFontSize() + 3.0f,
+                    ImVec2(min.x + 12.0f, max.y - 24.0f),
+                    IM_COL32(145, 152, 163, 255),
+                    footer.c_str());
+            }
             ImGui::EndChild();
             return;
         }
@@ -3363,9 +3395,17 @@ void SceneViewportRenderer::RenderUi(
     pending_project_root_ = state.project_root;
     render_requested_ = true;
 
-    const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
-    const std::string footer = "Viewport " + std::to_string(viewport_fps) + " FPS";
-    draw_list->AddText(ImVec2(min.x + 12.0f, max.y - 24.0f), IM_COL32(145, 152, 163, 255), footer.c_str());
+    if (show_fps_)
+    {
+        const int viewport_fps = static_cast<int>(std::round(ImGui::GetIO().Framerate));
+        const std::string footer = std::to_string(viewport_fps) + " FPS";
+        draw_list->AddText(
+            ImGui::GetFont(),
+            ImGui::GetFontSize() + 3.0f,
+            ImVec2(min.x + 12.0f, max.y - 24.0f),
+            IM_COL32(145, 152, 163, 255),
+            footer.c_str());
+    }
     ImGui::EndChild();
 }
 

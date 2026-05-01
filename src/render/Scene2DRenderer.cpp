@@ -915,17 +915,66 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesyst
     return &image_cache_[key];
 }
 
+bool Scene2DRenderer::GetText2DRenderSize(
+    const std::filesystem::path& project_root,
+    const SceneObjectText2DAttributes& text_attr,
+    float& out_width,
+    float& out_height)
+{
+    out_width = (std::max)(1.0f, text_attr.width);
+    out_height = (std::max)(1.0f, text_attr.height);
+
+    if (vulkan_context_ == nullptr || text_attr.text.empty())
+    {
+        return false;
+    }
+
+    const std::filesystem::path font_abs = text_attr.font_path.empty()
+        ? std::filesystem::path{}
+        : (text_attr.font_path.front() == '/' || (text_attr.font_path.size() >= 2 && text_attr.font_path[1] == ':')
+            ? std::filesystem::path(text_attr.font_path)
+            : project_root / text_attr.font_path);
+
+    const float wrap_width = 0.0f;
+    GpuTexture* tex = GetOrRasterizeText(
+        font_abs.generic_string(), text_attr.text, text_attr.font_size, wrap_width);
+    if (tex == nullptr)
+    {
+        return false;
+    }
+
+    if (text_attr.lock_aspect_ratio)
+    {
+        const float natural_width = (std::max)(1.0f, static_cast<float>(tex->width));
+        const float natural_height = (std::max)(1.0f, static_cast<float>(tex->height));
+        const float stored_width = (std::max)(1.0f, text_attr.width);
+        const float stored_height = (std::max)(1.0f, text_attr.height);
+        const float scale_x = stored_width / natural_width;
+        const float scale_y = stored_height / natural_height;
+        const float scale = (std::max)(1.0f, (std::max)(scale_x, scale_y));
+        out_width = natural_width * scale;
+        out_height = natural_height * scale;
+    }
+    else
+    {
+        out_width = (std::max)((std::max)(1.0f, text_attr.width), static_cast<float>(tex->width));
+        out_height = (std::max)((std::max)(1.0f, text_attr.height), static_cast<float>(tex->height));
+    }
+    return true;
+}
+
 Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrRasterizeText(
     const std::string& font_path_abs,
     const std::string& text,
-    float font_size)
+    float font_size,
+    float max_width_px)
 {
     if (font_path_abs.empty() || text.empty())
     {
         return nullptr;
     }
 
-    const TextCacheKey key{font_path_abs, text, font_size};
+    const TextCacheKey key{font_path_abs, text, font_size, max_width_px};
     auto it = text_cache_.find(key);
     if (it != text_cache_.end())
     {
@@ -951,7 +1000,22 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrRasterizeText(
     stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
     const int line_height_px = static_cast<int>(std::ceil((ascent - descent + line_gap) * scale));
 
-    // Measure total width and line count for the text (handle '\n').
+    // Helper: measure pixel advance width of a string.
+    auto measure_px = [&](const std::string& s) -> float
+    {
+        float w = 0.0f;
+        int prev = 0;
+        for (unsigned char ch : s)
+        {
+            int adv = 0, brg = 0;
+            stbtt_GetCodepointHMetrics(&font_info, ch, &adv, &brg);
+            w += (adv + stbtt_GetCodepointKernAdvance(&font_info, prev, ch)) * scale;
+            prev = ch;
+        }
+        return w;
+    };
+
+    // Split the raw text on explicit '\n' first.
     std::vector<std::string> lines;
     {
         std::string current;
@@ -968,6 +1032,76 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrRasterizeText(
             }
         }
         lines.push_back(current);
+    }
+
+    // Word-wrap each line to max_width_px.
+    // Words that are wider than max_width_px on their own are hard-broken
+    // character by character so no text is ever lost.
+    if (max_width_px > 0.0f)
+    {
+        std::vector<std::string> wrapped;
+        for (const std::string& raw : lines)
+        {
+            if (raw.empty())
+            {
+                wrapped.push_back("");
+                continue;
+            }
+
+            std::string cur;   // text accumulated for the current output line
+            std::size_t pos = 0;
+            while (pos <= raw.size())
+            {
+                // Locate the end of the next word (up to the next space or end-of-string).
+                const std::size_t space = raw.find(' ', pos);
+                const std::size_t word_end = (space != std::string::npos) ? space : raw.size();
+                const std::string word = raw.substr(pos, word_end - pos);
+
+                if (!word.empty())
+                {
+                    // Build the candidate line: existing content + space + new word.
+                    const std::string candidate = cur.empty() ? word : (cur + ' ' + word);
+
+                    if (!cur.empty() && measure_px(candidate) > max_width_px)
+                    {
+                        // New word doesn't fit — emit current line and start fresh.
+                        wrapped.push_back(cur);
+                        cur.clear();
+                    }
+
+                    // At this point cur is either empty or still has room.
+                    // Append the word, hard-breaking if the word itself is wider than max_width_px.
+                    if (measure_px(word) > max_width_px)
+                    {
+                        // Hard-break the oversized word character by character.
+                        for (char c : word)
+                        {
+                            const std::string trial = cur + c;
+                            if (!cur.empty() && measure_px(trial) > max_width_px)
+                            {
+                                wrapped.push_back(cur);
+                                cur.clear();
+                            }
+                            cur += c;
+                        }
+                    }
+                    else
+                    {
+                        cur = cur.empty() ? word : (cur + ' ' + word);
+                    }
+                }
+
+                if (space == std::string::npos)
+                {
+                    break; // Processed the last word.
+                }
+                pos = space + 1;
+            }
+
+            // Emit whatever remains on the current output line.
+            wrapped.push_back(cur);
+        }
+        lines = std::move(wrapped);
     }
 
     int total_width = 1;
@@ -1264,16 +1398,20 @@ void Scene2DRenderer::CompositeOverlay(
                         ? std::filesystem::path(t.font_path)
                         : project_root / t.font_path);
 
+                const float wrap_width = 0.0f;
                 GpuTexture* tex = GetOrRasterizeText(
-                    font_abs.generic_string(), t.text, t.font_size);
+                    font_abs.generic_string(), t.text, t.font_size, wrap_width);
                 if (tex == nullptr)
                 {
                     continue;
                 }
 
+                float render_w = t.width;
+                float render_h = t.height;
+                GetText2DRenderSize(project_root, t, render_w, render_h);
                 DrawQuad(cmd, *tex,
                     quad_index,
-                    t.x, t.y, t.width, t.height,
+                    t.x, t.y, render_w, render_h,
                     t.color[0], t.color[1], t.color[2], t.alpha,
                     width, height);
                 ++quad_index;

@@ -32,6 +32,14 @@ public:
         std::uint32_t width,
         std::uint32_t height);
 
+    // Returns the effective rendered width/height for a Text2D attribute.
+    // If lock_aspect_ratio is disabled, size reflects rasterized text bounds.
+    bool GetText2DRenderSize(
+        const std::filesystem::path& project_root,
+        const SceneObjectText2DAttributes& text_attr,
+        float& out_width,
+        float& out_height);
+
 private:
     struct GpuTexture
     {
@@ -48,12 +56,14 @@ private:
         std::string font_path;
         std::string text;
         float font_size = 0.0f;
+        float max_width_px = 0.0f;
 
         bool operator==(const TextCacheKey& other) const
         {
             return font_path == other.font_path &&
                    text == other.text &&
-                   font_size == other.font_size;
+                   font_size == other.font_size &&
+                   max_width_px == other.max_width_px;
         }
     };
 
@@ -64,6 +74,7 @@ private:
             std::size_t h = std::hash<std::string>{}(k.font_path);
             h ^= std::hash<std::string>{}(k.text) + 0x9e3779b9u + (h << 6) + (h >> 2);
             h ^= std::hash<float>{}(k.font_size) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= std::hash<float>{}(k.max_width_px) + 0x9e3779b9u + (h << 6) + (h >> 2);
             return h;
         }
     };
@@ -102,7 +113,8 @@ private:
     GpuTexture* GetOrLoadImage(const std::filesystem::path& path);
     GpuTexture* GetOrRasterizeText(const std::string& font_path_abs,
                                    const std::string& text,
-                                   float font_size);
+                                   float font_size,
+                                   float max_width_px);
 
     bool UploadTexture(const unsigned char* pixels, int width, int height,
                        bool single_channel, GpuTexture& out_tex);

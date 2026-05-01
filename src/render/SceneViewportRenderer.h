@@ -124,6 +124,7 @@ private:
     bool render_requested_ = false;
     bool middle_mouse_panning_ = false;
     bool show_physics_colliders_ = false;
+    bool show_fps_ = true;
     std::uint32_t gizmo_operation_ = 0;
     bool gizmo_local_mode_ = true;
     bool grid_enabled_ = false;

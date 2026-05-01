@@ -48,6 +48,82 @@ std::string ExtractValue(std::string_view line, std::string_view prefix)
     return TrimCopy(std::string(line.substr(prefix.size())));
 }
 
+std::string EscapeSceneString(std::string_view value)
+{
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value)
+    {
+        switch (c)
+        {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            out.push_back(c);
+            break;
+        }
+    }
+    return out;
+}
+
+std::string UnescapeSceneString(std::string_view value)
+{
+    std::string out;
+    out.reserve(value.size());
+    bool escaping = false;
+    for (char c : value)
+    {
+        if (!escaping)
+        {
+            if (c == '\\')
+            {
+                escaping = true;
+            }
+            else
+            {
+                out.push_back(c);
+            }
+            continue;
+        }
+
+        switch (c)
+        {
+        case 'n':
+            out.push_back('\n');
+            break;
+        case 'r':
+            out.push_back('\r');
+            break;
+        case 't':
+            out.push_back('\t');
+            break;
+        case '\\':
+            out.push_back('\\');
+            break;
+        default:
+            out.push_back(c);
+            break;
+        }
+        escaping = false;
+    }
+
+    if (escaping)
+    {
+        out.push_back('\\');
+    }
+    return out;
+}
+
 bool IsSceneObjectStart(std::string_view line)
 {
     return StartsWith(line, "Object:");
@@ -1378,7 +1454,7 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         }
         else if (StartsWith(trimmed, "AttributeText2DText:") && current_attribute != nullptr)
         {
-            current_attribute->text_2d.text = ExtractValue(trimmed, "AttributeText2DText:");
+            current_attribute->text_2d.text = UnescapeSceneString(ExtractValue(trimmed, "AttributeText2DText:"));
         }
         else if (StartsWith(trimmed, "AttributeText2DX:") && current_attribute != nullptr)
         {
@@ -2059,7 +2135,7 @@ bool SetSceneObjectAttributeText2DFontPath(const std::filesystem::path& scene_pa
 
 bool SetSceneObjectAttributeText2DText(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& text)
 {
-    return SetSceneObjectAttributeStringValue("AttributeText2DText", scene_path, object_name, attribute_index, text);
+    return SetSceneObjectAttributeStringValue("AttributeText2DText", scene_path, object_name, attribute_index, EscapeSceneString(text));
 }
 
 bool SetSceneObjectAttributeText2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)

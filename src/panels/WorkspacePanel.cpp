@@ -1,6 +1,7 @@
 #include "panels/WorkspacePanel.h"
 
 #include "imgui.h"
+#include "ui/Codicons.h"
 
 #include <cstdint>
 #include <cstring>
@@ -393,12 +394,20 @@ void WorkspacePanel::RenderGraphViewport(EngineState& state)
         ImGui::TextUnformatted(state.GetOpenGraphDisplayPath().c_str());
         ImGui::SameLine();
 
-        if (ImGui::Button("Save"))
+        // Right-align Save and Reload buttons
+        const std::string save_button_label = ICON_CI_SAVE;
+        const std::string reload_button_label = ICON_CI_REFRESH;
+        float button_width = ImGui::CalcTextSize(save_button_label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+        button_width += ImGui::CalcTextSize(reload_button_label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+        button_width += ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width);
+
+        if (ImGui::Button(save_button_label.c_str()))
         {
             SaveOpenGraph(state);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Reload"))
+        if (ImGui::Button(reload_button_label.c_str()))
         {
             ReloadOpenGraph(state);
         }
@@ -511,12 +520,20 @@ void WorkspacePanel::RenderEditorViewport(EngineState& state)
     ImGui::TextUnformatted(state.GetOpenFileDisplayPath().c_str());
     ImGui::SameLine();
 
-    if (ImGui::Button("Save"))
+    // Right-align Save and Reload buttons
+    const std::string save_button_label = ICON_CI_SAVE;
+    const std::string reload_button_label = ICON_CI_REFRESH;
+    float button_width = ImGui::CalcTextSize(save_button_label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+    button_width += ImGui::CalcTextSize(reload_button_label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+    button_width += ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width);
+
+    if (ImGui::Button(save_button_label.c_str()))
     {
         state.SaveOpenFile();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Reload"))
+    if (ImGui::Button(reload_button_label.c_str()))
     {
         state.OpenTextFile(state.open_file_path);
     }
