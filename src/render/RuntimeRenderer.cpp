@@ -1170,6 +1170,11 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
 
     for (std::size_t material_index = 0; material_index < model_asset_entry.asset.materials.size(); ++material_index)
     {
+        if ((material_index & 7u) == 0u)
+        {
+            SDL_PumpEvents();
+        }
+
         const ModelMaterialAsset& material = model_asset_entry.asset.materials[material_index];
         cache_entry.materials[material_index].base_color = material.base_color;
         cache_entry.materials[material_index].emissive_color = material.emissive_color;
@@ -1194,6 +1199,8 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
                 continue;
             }
 
+            SDL_PumpEvents();
+
             GpuTexture* texture_slot = SelectTextureSlot(cache_entry.material_textures[material_index], texture_index);
             if (texture_slot != nullptr)
             {
@@ -1208,8 +1215,14 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         cache_entry.materials[material_index].emissive_view = cache_entry.material_textures[material_index].emissive.view;
     }
 
+    std::size_t mesh_scan_count = 0;
     for (const ModelMeshAsset& mesh : model_asset_entry.asset.meshes)
     {
+        if ((mesh_scan_count++ & 7u) == 0u)
+        {
+            SDL_PumpEvents();
+        }
+
         GpuMeshSection section;
         section.first_index = static_cast<std::uint32_t>(indices.size());
         section.material_index = mesh.material_index;
@@ -2407,8 +2420,15 @@ bool RuntimeRenderer::BuildQueuedScene(
         return false;
     }
 
+    std::size_t queued_scan_count = 0;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if ((queued_scan_count++ & 31u) == 0u)
+        {
+            // Prevent Windows from flagging the app as hung during heavy first-frame loads.
+            SDL_PumpEvents();
+        }
+
         if (runtime_destroyed_objects_.find(object.name) != runtime_destroyed_objects_.end())
         {
             continue;
@@ -2493,6 +2513,11 @@ bool RuntimeRenderer::BuildQueuedScene(
 
     for (const auto& [name, spawned] : runtime_spawned_objects_)
     {
+        if ((queued_scan_count++ & 31u) == 0u)
+        {
+            SDL_PumpEvents();
+        }
+
         if (runtime_destroyed_objects_.find(name) != runtime_destroyed_objects_.end())
         {
             continue;

@@ -1247,6 +1247,9 @@ void RayTracing::DestroyOutputResources()
     history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     ResetAccumulationState();
 
+        // Mark descriptors dirty so they're rebuilt with new image views on next frame
+        descriptors_dirty_ = true;
+
     if (output_descriptor_set_ != VK_NULL_HANDLE)
     {
         ImGui_ImplVulkan_RemoveTexture(output_descriptor_set_);
@@ -1884,12 +1887,32 @@ bool RayTracing::RenderFrame(
     }
 
     const VkDevice device = vulkan_context_->GetDevice();
-    VkResult result = vkWaitForFences(device, 1, &render_fence_, VK_TRUE, UINT64_MAX);
+    VkResult result = vkGetFenceStatus(device, render_fence_);
+    if (result == VK_NOT_READY)
+    {
+        // Keep the UI responsive instead of blocking the main thread while the GPU finishes.
+        status_message_ = "Viewport RT frame pending";
+        return true;
+    }
     VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
     result = vkResetFences(device, 1, &render_fence_);
     VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
+
     result = vkResetCommandPool(device, command_pool_, 0);
     VulkanContext::CheckVkResult(result);
+    if (result != VK_SUCCESS)
+    {
+        return false;
+    }
 
     // --- Handle pending TLAS work (after fence ensures the previous frame is done) ---
     // Instance buffer and TLAS AS are managed here on the CPU side; the actual
@@ -2144,9 +2167,7 @@ bool RayTracing::RenderFrame(
             return false;
         }
 
-        end_result = vkWaitForFences(device, 1, &render_fence_, VK_TRUE, UINT64_MAX);
-        VulkanContext::CheckVkResult(end_result);
-        return end_result == VK_SUCCESS;
+        return true;
     };
 
     TransitionImageLayout(

@@ -784,6 +784,9 @@ bool EngineApplication::StartRuntimeSession()
 
     SDL_SetWindowPosition(runtime_window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(runtime_window_);
+    SDL_SetWindowAlwaysOnTop(runtime_window_, true);
+    SDL_RaiseWindow(runtime_window_);
+    SDL_PumpEvents();
     state_.is_playing = true;
     state_.playing_scene_path = state_.active_scene_path;
     state_.last_play_error.clear();
