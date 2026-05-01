@@ -1,4 +1,5 @@
 #include "render/Scene2DRenderer.h"
+#include "vfs/AssetVFS.h"
 
 #include <SDL3/SDL.h>
 
@@ -168,6 +169,22 @@ std::vector<unsigned char> ReadFontFile(const std::filesystem::path& path)
         return {};
     }
     return std::vector<unsigned char>(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+std::vector<unsigned char> ReadFontBytes(
+    const std::filesystem::path& path,
+    bool use_pak_streaming)
+{
+    if (use_pak_streaming)
+    {
+        if (!g_asset_reader)
+        {
+            return {};
+        }
+        return ReadAssetFileAsBytes(path.generic_string());
+    }
+
+    return ReadFontFile(path);
 }
 
 // Expand grayscale alpha-only bitmap to RGBA for GPU upload.
@@ -884,9 +901,10 @@ bool Scene2DRenderer::UploadTexture(
     return true;
 }
 
-Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesystem::path& path)
+Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesystem::path& path, bool use_pak_streaming)
 {
-    const std::string key = path.generic_string();
+    const std::string mode_prefix = use_pak_streaming ? "pak:" : "fs:";
+    const std::string key = mode_prefix + path.generic_string();
     auto it = image_cache_.find(key);
     if (it != image_cache_.end())
     {
@@ -896,8 +914,25 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesyst
     int width = 0, height = 0, channels = 0;
     stbi_uc* pixels = nullptr;
 
-    // Try loading from VFS first, then from disk.
-    pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+    if (use_pak_streaming)
+    {
+        const std::vector<std::uint8_t> image_bytes = ReadAssetFileAsBytes(path.generic_string());
+        if (!image_bytes.empty())
+        {
+            pixels = stbi_load_from_memory(
+                image_bytes.data(),
+                static_cast<int>(image_bytes.size()),
+                &width,
+                &height,
+                &channels,
+                4);
+        }
+    }
+    else
+    {
+        pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+    }
+
     if (pixels == nullptr || width <= 0 || height <= 0)
     {
         return nullptr;
@@ -935,9 +970,10 @@ bool Scene2DRenderer::GetText2DRenderSize(
             ? std::filesystem::path(text_attr.font_path)
             : project_root / text_attr.font_path);
 
+    const bool use_pak_streaming = project_root.empty() && g_asset_reader != nullptr;
     const float wrap_width = 0.0f;
     GpuTexture* tex = GetOrRasterizeText(
-        font_abs.generic_string(), text_attr.text, text_attr.font_size, wrap_width);
+        font_abs.generic_string(), text_attr.text, text_attr.font_size, wrap_width, use_pak_streaming);
     if (tex == nullptr)
     {
         return false;
@@ -967,14 +1003,16 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrRasterizeText(
     const std::string& font_path_abs,
     const std::string& text,
     float font_size,
-    float max_width_px)
+    float max_width_px,
+    bool use_pak_streaming)
 {
     if (font_path_abs.empty() || text.empty())
     {
         return nullptr;
     }
 
-    const TextCacheKey key{font_path_abs, text, font_size, max_width_px};
+    const std::string mode_prefix = use_pak_streaming ? "pak:" : "fs:";
+    const TextCacheKey key{mode_prefix + font_path_abs, text, font_size, max_width_px};
     auto it = text_cache_.find(key);
     if (it != text_cache_.end())
     {
@@ -982,7 +1020,7 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrRasterizeText(
     }
 
     // Load font file
-    const std::vector<unsigned char> font_data = ReadFontFile(font_path_abs);
+    const std::vector<unsigned char> font_data = ReadFontBytes(font_path_abs, use_pak_streaming);
     if (font_data.empty())
     {
         return nullptr;
@@ -1277,6 +1315,8 @@ void Scene2DRenderer::CompositeOverlay(
     std::uint32_t width,
     std::uint32_t height)
 {
+        const bool use_pak_streaming = project_root.empty() && g_asset_reader != nullptr;
+
     if (vulkan_context_ == nullptr || target_image == VK_NULL_HANDLE || target_view == VK_NULL_HANDLE)
     {
         return;
@@ -1400,7 +1440,7 @@ void Scene2DRenderer::CompositeOverlay(
 
                 const float wrap_width = 0.0f;
                 GpuTexture* tex = GetOrRasterizeText(
-                    font_abs.generic_string(), t.text, t.font_size, wrap_width);
+                    font_abs.generic_string(), t.text, t.font_size, wrap_width, use_pak_streaming);
                 if (tex == nullptr)
                 {
                     continue;
@@ -1429,7 +1469,7 @@ void Scene2DRenderer::CompositeOverlay(
                         ? std::filesystem::path(img.image_path)
                         : project_root / img.image_path);
 
-                GpuTexture* tex = GetOrLoadImage(img_abs);
+                GpuTexture* tex = GetOrLoadImage(img_abs, use_pak_streaming);
                 if (tex == nullptr)
                 {
                     continue;

@@ -3,6 +3,7 @@
 #include "app/VulkanContext.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
+#include "components/EditorComponent.h"
 #include "graph/GraphDocument.h"
 #include "graph/NodeLibrary.h"
 #include "render/SceneViewportRenderer.h"
@@ -41,6 +42,7 @@ private:
     std::string saved_graph_contents_;
     SceneViewportRenderer scene_view_renderer_;
     SceneViewportCameraState scene_view_camera_{};
+    EditorComponent editor_component_;
     std::filesystem::path cached_scene_path_;
     std::filesystem::file_time_type cached_scene_write_time_{};
     SceneMetadata cached_scene_metadata_{};
@@ -57,7 +59,6 @@ private:
     void SyncGraphDocumentFromUi(EngineState& state);
     void RenderSceneViewport(EngineState& state);
     void RenderGraphViewport(EngineState& state);
-    void RenderEditorViewport(EngineState& state);
     void RenderNodeLibrary();
     void RenderNodeLibrarySection(const GraphNodeDefinition& definition);
     void HandleGraphNodeDrop(EngineState& state);

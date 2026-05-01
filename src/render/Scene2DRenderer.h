@@ -110,11 +110,12 @@ private:
     bool EnsurePipeline();
     bool EnsureVertexIndexBuffers();
 
-    GpuTexture* GetOrLoadImage(const std::filesystem::path& path);
+    GpuTexture* GetOrLoadImage(const std::filesystem::path& path, bool use_pak_streaming);
     GpuTexture* GetOrRasterizeText(const std::string& font_path_abs,
                                    const std::string& text,
                                    float font_size,
-                                   float max_width_px);
+                                   float max_width_px,
+                                   bool use_pak_streaming);
 
     bool UploadTexture(const unsigned char* pixels, int width, int height,
                        bool single_channel, GpuTexture& out_tex);

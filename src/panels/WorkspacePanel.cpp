@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 #include "ui/Codicons.h"
+#include "components/EditorComponent.h"
 
 #include <cstdint>
 #include <cstring>
@@ -125,7 +126,7 @@ void WorkspacePanel::Render(EngineState& state)
         {
             state.CompleteTabRequest(WorkspaceTab::Editor);
             new_active_tab = WorkspaceTab::Editor;
-            RenderEditorViewport(state);
+            editor_component_.Render(state);
             ImGui::EndTabItem();
         }
 
@@ -505,60 +506,4 @@ void WorkspacePanel::HandleGraphNodeDrop(EngineState& state)
     }
 
     ImGui::EndDragDropTarget();
-}
-
-void WorkspacePanel::RenderEditorViewport(EngineState& state)
-{
-    if (!state.HasOpenFile())
-    {
-        ImGui::TextUnformatted("Text Editor");
-        ImGui::Separator();
-        ImGui::TextWrapped("Select a supported text file from the Files panel to open it here.");
-        return;
-    }
-
-    ImGui::TextUnformatted(state.GetOpenFileDisplayPath().c_str());
-    ImGui::SameLine();
-
-    // Right-align Save and Reload buttons
-    const std::string save_button_label = ICON_CI_SAVE;
-    const std::string reload_button_label = ICON_CI_REFRESH;
-    float button_width = ImGui::CalcTextSize(save_button_label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
-    button_width += ImGui::CalcTextSize(reload_button_label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
-    button_width += ImGui::GetStyle().ItemSpacing.x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width);
-
-    if (ImGui::Button(save_button_label.c_str()))
-    {
-        state.SaveOpenFile();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(reload_button_label.c_str()))
-    {
-        state.OpenTextFile(state.open_file_path);
-    }
-
-    if (state.open_file_dirty)
-    {
-        ImGui::SameLine();
-        ImGui::TextUnformatted("(modified)");
-    }
-
-    ImGui::Separator();
-
-    ImGuiInputTextFlags flags = ImGuiInputTextFlags_AllowTabInput;
-    if (!state.wrap_editor_text)
-    {
-        flags |= ImGuiInputTextFlags_NoHorizontalScroll;
-    }
-    if (ImGui::InputTextMultiline(
-            "##TextEditor",
-            state.editor_buffer.data(),
-            state.editor_buffer.size(),
-            ImGui::GetContentRegionAvail(),
-            flags))
-    {
-        state.SyncEditorTextFromBuffer();
-        state.open_file_dirty = state.open_file_contents != state.saved_file_contents;
-    }
 }

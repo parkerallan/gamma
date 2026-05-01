@@ -599,6 +599,19 @@ void EngineApplication::RunLoop()
 {
     while (running_)
     {
+        const bool wants_text_input = state_.active_tab == WorkspaceTab::Editor && state_.HasOpenFile() && window_ != nullptr;
+        if (wants_text_input)
+        {
+            if (!SDL_TextInputActive(window_))
+            {
+                SDL_StartTextInput(window_);
+            }
+        }
+        else if (window_ != nullptr && SDL_TextInputActive(window_))
+        {
+            SDL_StopTextInput(window_);
+        }
+
         ProcessEvents();
         HandleBuildRequests();
         HandlePlayRequests();

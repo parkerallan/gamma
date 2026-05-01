@@ -114,6 +114,17 @@ if(NOT imguizmo_POPULATED)
     FetchContent_Populate(imguizmo)
 endif()
 
+FetchContent_Declare(
+    imguicolortextedit
+    GIT_REPOSITORY https://github.com/BalazsJako/ImGuiColorTextEdit.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(imguicolortextedit)
+if(NOT imguicolortextedit_POPULATED)
+    FetchContent_Populate(imguicolortextedit)
+endif()
+
 set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
@@ -246,6 +257,7 @@ endif()
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
 set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
 set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
+set(IMGUICOLORTEXTEDIT_DIR ${imguicolortextedit_SOURCE_DIR})
 
 # ---------------------------------------------------------------------------
 # ENGINE_BUILD_GAME=ON  → build only the standalone game target
@@ -345,9 +357,16 @@ target_include_directories(imguizmo
 
 target_link_libraries(imguizmo PUBLIC imgui)
 
+add_library(imguicolortextedit STATIC
+    ${IMGUICOLORTEXTEDIT_DIR}/TextEditor.cpp
+)
+target_include_directories(imguicolortextedit PUBLIC ${IMGUICOLORTEXTEDIT_DIR})
+target_link_libraries(imguicolortextedit PUBLIC imgui)
+
 if(MSVC)
     target_compile_options(imnodeflow PRIVATE /wd4100 /wd4244)
     target_compile_options(imguizmo PRIVATE /wd4100 /wd4244 /wd4456)
+    target_compile_options(imguicolortextedit PRIVATE /W0)
 endif()
 
 add_executable(engine
@@ -360,6 +379,7 @@ add_executable(engine
     src/assets/SceneMetadata.cpp
     src/vfs/AssetVFS.cpp
     src/components/CreationMenu.cpp
+    src/components/EditorComponent.cpp
     src/components/FileContextMenu.cpp
     src/components/SceneObjectAttributesEditor.cpp
     src/components/BuildSettingsComponent.cpp
@@ -400,6 +420,7 @@ target_link_libraries(engine PRIVATE
     imgui
     imguizmo
     imnodeflow
+    imguicolortextedit
     lua_runtime
     joltphysics
     nlohmann_json::nlohmann_json
@@ -445,6 +466,7 @@ if(MSVC)
         "/external:I${IMGUI_DIR}/backends"
         "/external:I${assimp_SOURCE_DIR}/include"
         "/external:I${stb_SOURCE_DIR}"
+        "/external:I${IMGUICOLORTEXTEDIT_DIR}"
     )
 
     # Hide console window for engine Release builds while keeping Debug

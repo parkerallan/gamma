@@ -1210,8 +1210,6 @@ struct EngineState
             return false;
         }
 
-        SyncEditorTextFromBuffer();
-
         std::ofstream output(open_file_path, std::ios::binary | std::ios::trunc);
         if (!output)
         {
