@@ -937,6 +937,7 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
     }
 
     scene_2d_renderer_.Initialize(context);
+    skybox_renderer_.Initialize(context);
 
     return true;
 }
@@ -1001,6 +1002,7 @@ void RuntimeRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 
 void RuntimeRenderer::Shutdown()
 {
+    skybox_renderer_.Shutdown();
     ShutdownScriptRuntime();
     physics_world_.Shutdown();
     scene_2d_renderer_.Shutdown();
@@ -2782,6 +2784,8 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     {
         return false;
     }
+
+    ray_tracing_.SetSkyboxTexture(skybox_renderer_.ResolveSkyboxView(scene_metadata, project_root_));
 
     if (!ray_tracing_.RenderFrame(
             lighting,

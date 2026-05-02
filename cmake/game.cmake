@@ -93,6 +93,7 @@ add_executable(game
     src/render/Raytracing.cpp
     src/render/PhysicsWorld.cpp
     src/render/Scene2DRenderer.cpp
+    src/render/SkyboxRenderer.cpp
     src/render/RuntimeRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/vfs/AssetVFS.cpp
@@ -115,6 +116,7 @@ target_compile_definitions(game PRIVATE
 target_link_libraries(game PRIVATE
     SDL3::SDL3-static
     imgui
+    tinyexr
     lua_runtime
     joltphysics
     nlohmann_json::nlohmann_json

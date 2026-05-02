@@ -29,6 +29,7 @@ enum class SceneObjectAttributeKind
     TriggerVolume,
     Text2D,
     Image2D,
+    Skybox,
 };
 
 struct SceneObjectEnvironmentLightAttributes
@@ -117,6 +118,11 @@ struct SceneObjectImage2DAttributes
     bool lock_aspect_ratio = false;
 };
 
+struct SceneObjectSkyboxAttributes
+{
+    std::string image_path;
+};
+
 struct SceneObjectAttribute
 {
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
@@ -129,6 +135,7 @@ struct SceneObjectAttribute
     SceneObjectTriggerVolumeAttributes trigger_box{};
     SceneObjectText2DAttributes text_2d{};
     SceneObjectImage2DAttributes image_2d{};
+    SceneObjectSkyboxAttributes skybox{};
 };
 
 struct SceneObjectMetadata
@@ -248,6 +255,7 @@ bool SetSceneObjectAttributeImage2DSize(const std::filesystem::path& scene_path,
 bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint);
 bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
+bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);

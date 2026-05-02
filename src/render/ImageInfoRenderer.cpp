@@ -3,12 +3,233 @@
 #include "imgui_impl_vulkan.h"
 
 #include <stb_image.h>
+#include <tinyexr.h>
 
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <future>
+#include <string>
+#include <vector>
 
 namespace
 {
+constexpr int kMaxPreviewDimension = 1024;
+
+struct PreviewSize
+{
+    int width = 0;
+    int height = 0;
+};
+
+PreviewSize ComputePreviewSize(int source_width, int source_height)
+{
+    if (source_width <= 0 || source_height <= 0)
+    {
+        return {};
+    }
+
+    const int max_dimension = (std::max)(source_width, source_height);
+    if (max_dimension <= kMaxPreviewDimension)
+    {
+        return {source_width, source_height};
+    }
+
+    const float scale = static_cast<float>(kMaxPreviewDimension) / static_cast<float>(max_dimension);
+    return {
+        (std::max)(1, static_cast<int>(std::round(static_cast<float>(source_width) * scale))),
+        (std::max)(1, static_cast<int>(std::round(static_cast<float>(source_height) * scale)))};
+}
+
+std::string GetLowerExtension(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+    return extension;
+}
+
+bool IsAsyncPreviewExtension(const std::filesystem::path& path)
+{
+    const std::string extension = GetLowerExtension(path);
+    return extension == ".hdr" || extension == ".exr";
+}
+
+std::uint8_t LinearToPreviewByte(float value)
+{
+    const float clamped_linear = (std::max)(0.0f, value);
+    const float mapped = clamped_linear / (1.0f + clamped_linear);
+    const float gamma = std::pow((std::max)(mapped, 0.0f), 1.0f / 2.2f);
+    const float byte_value = std::round((std::clamp)(gamma, 0.0f, 1.0f) * 255.0f);
+    return static_cast<std::uint8_t>(byte_value);
+}
+
+std::vector<std::uint8_t> ConvertFloatRgbaToPreviewBytes(const float* pixels, int width, int height)
+{
+    if (pixels == nullptr || width <= 0 || height <= 0)
+    {
+        return {};
+    }
+
+    const std::size_t pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<std::uint8_t> converted(pixel_count * 4u, 0);
+    for (std::size_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index)
+    {
+        const std::size_t src_offset = pixel_index * 4u;
+        converted[src_offset + 0] = LinearToPreviewByte(pixels[src_offset + 0]);
+        converted[src_offset + 1] = LinearToPreviewByte(pixels[src_offset + 1]);
+        converted[src_offset + 2] = LinearToPreviewByte(pixels[src_offset + 2]);
+        converted[src_offset + 3] = static_cast<std::uint8_t>(
+            std::round((std::clamp)(pixels[src_offset + 3], 0.0f, 1.0f) * 255.0f));
+    }
+
+    return converted;
+}
+
+std::vector<std::uint8_t> ConvertFloatRgbaToPreviewBytes(
+    const float* pixels,
+    int source_width,
+    int source_height,
+    int target_width,
+    int target_height)
+{
+    if (pixels == nullptr || source_width <= 0 || source_height <= 0 || target_width <= 0 || target_height <= 0)
+    {
+        return {};
+    }
+
+    std::vector<std::uint8_t> converted(static_cast<std::size_t>(target_width) * static_cast<std::size_t>(target_height) * 4u, 0);
+    const float x_scale = static_cast<float>(source_width) / static_cast<float>(target_width);
+    const float y_scale = static_cast<float>(source_height) / static_cast<float>(target_height);
+    for (int y = 0; y < target_height; ++y)
+    {
+        const int source_y = (std::min)(source_height - 1, static_cast<int>(y * y_scale));
+        for (int x = 0; x < target_width; ++x)
+        {
+            const int source_x = (std::min)(source_width - 1, static_cast<int>(x * x_scale));
+            const std::size_t src_offset = (static_cast<std::size_t>(source_y) * static_cast<std::size_t>(source_width) + static_cast<std::size_t>(source_x)) * 4u;
+            const std::size_t dst_offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(target_width) + static_cast<std::size_t>(x)) * 4u;
+            converted[dst_offset + 0] = LinearToPreviewByte(pixels[src_offset + 0]);
+            converted[dst_offset + 1] = LinearToPreviewByte(pixels[src_offset + 1]);
+            converted[dst_offset + 2] = LinearToPreviewByte(pixels[src_offset + 2]);
+            converted[dst_offset + 3] = static_cast<std::uint8_t>(
+                std::round((std::clamp)(pixels[src_offset + 3], 0.0f, 1.0f) * 255.0f));
+        }
+    }
+
+    return converted;
+}
+
+std::vector<std::uint8_t> ResizeRgbaToPreviewBytes(
+    const std::uint8_t* pixels,
+    int source_width,
+    int source_height,
+    int target_width,
+    int target_height)
+{
+    if (pixels == nullptr || source_width <= 0 || source_height <= 0 || target_width <= 0 || target_height <= 0)
+    {
+        return {};
+    }
+
+    if (source_width == target_width && source_height == target_height)
+    {
+        const std::size_t size = static_cast<std::size_t>(source_width) * static_cast<std::size_t>(source_height) * 4u;
+        return std::vector<std::uint8_t>(pixels, pixels + size);
+    }
+
+    std::vector<std::uint8_t> resized(static_cast<std::size_t>(target_width) * static_cast<std::size_t>(target_height) * 4u, 0);
+    const float x_scale = static_cast<float>(source_width) / static_cast<float>(target_width);
+    const float y_scale = static_cast<float>(source_height) / static_cast<float>(target_height);
+    for (int y = 0; y < target_height; ++y)
+    {
+        const int source_y = (std::min)(source_height - 1, static_cast<int>(y * y_scale));
+        for (int x = 0; x < target_width; ++x)
+        {
+            const int source_x = (std::min)(source_width - 1, static_cast<int>(x * x_scale));
+            const std::size_t src_offset = (static_cast<std::size_t>(source_y) * static_cast<std::size_t>(source_width) + static_cast<std::size_t>(source_x)) * 4u;
+            const std::size_t dst_offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(target_width) + static_cast<std::size_t>(x)) * 4u;
+            resized[dst_offset + 0] = pixels[src_offset + 0];
+            resized[dst_offset + 1] = pixels[src_offset + 1];
+            resized[dst_offset + 2] = pixels[src_offset + 2];
+            resized[dst_offset + 3] = pixels[src_offset + 3];
+        }
+    }
+
+    return resized;
+}
+
+bool LoadPreviewPixels(
+    const std::filesystem::path& path,
+    std::vector<std::uint8_t>& pixels,
+    int& width,
+    int& height)
+{
+    width = 0;
+    height = 0;
+    pixels.clear();
+
+    const std::string extension = GetLowerExtension(path);
+    if (extension == ".exr")
+    {
+        float* exr_pixels = nullptr;
+        const char* error_message = nullptr;
+        int result = LoadEXR(&exr_pixels, &width, &height, path.string().c_str(), &error_message);
+        if (result != TINYEXR_SUCCESS || exr_pixels == nullptr)
+        {
+            if (error_message != nullptr)
+            {
+                FreeEXRErrorMessage(error_message);
+            }
+            return false;
+        }
+
+        const PreviewSize preview_size = ComputePreviewSize(width, height);
+        pixels = ConvertFloatRgbaToPreviewBytes(exr_pixels, width, height, preview_size.width, preview_size.height);
+        width = preview_size.width;
+        height = preview_size.height;
+        std::free(exr_pixels);
+        return !pixels.empty();
+    }
+
+    if (extension == ".hdr")
+    {
+        int channels = 0;
+        float* hdr_pixels = stbi_loadf(path.string().c_str(), &width, &height, &channels, 4);
+        if (hdr_pixels == nullptr)
+        {
+            return false;
+        }
+
+        const PreviewSize preview_size = ComputePreviewSize(width, height);
+        pixels = ConvertFloatRgbaToPreviewBytes(hdr_pixels, width, height, preview_size.width, preview_size.height);
+        width = preview_size.width;
+        height = preview_size.height;
+        stbi_image_free(hdr_pixels);
+        return !pixels.empty();
+    }
+
+    int channels = 0;
+    unsigned char* ldr_pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+    if (ldr_pixels == nullptr)
+    {
+        return false;
+    }
+
+    const PreviewSize preview_size = ComputePreviewSize(width, height);
+    pixels = ResizeRgbaToPreviewBytes(ldr_pixels, width, height, preview_size.width, preview_size.height);
+    width = preview_size.width;
+    height = preview_size.height;
+    stbi_image_free(ldr_pixels);
+    return !pixels.empty();
+}
+
 std::uint32_t FindMemoryType(VkPhysicalDevice physical_device, std::uint32_t type_filter, VkMemoryPropertyFlags properties)
 {
     VkPhysicalDeviceMemoryProperties memory_properties = {};
@@ -390,6 +611,10 @@ void ImageInfoRenderer::ClearImagePreview()
     cached_image_preview_write_time_ = std::filesystem::file_time_type{};
     cached_image_preview_width_ = 0;
     cached_image_preview_height_ = 0;
+
+    pending_preview_active_ = false;
+    pending_preview_path_.clear();
+    pending_preview_write_time_ = std::filesystem::file_time_type{};
 }
 
 ImTextureID ImageInfoRenderer::GetImagePreview(const std::filesystem::path& path, VulkanContext* vulkan_context)
@@ -413,78 +638,200 @@ ImTextureID ImageInfoRenderer::GetImagePreview(const std::filesystem::path& path
         return reinterpret_cast<ImTextureID>(cached_image_preview_descriptor_set_);
     }
 
-    ClearImagePreview();
+    const bool use_async_decode = IsAsyncPreviewExtension(path);
 
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
-    if (pixels == nullptr)
+    const bool failed_cache_match =
+        !error &&
+        failed_preview_path_ == path &&
+        failed_preview_write_time_ == write_time;
+    if (failed_cache_match)
     {
         return ImTextureID{};
     }
 
-    if (!CreateImage(
-            vulkan_context->GetPhysicalDevice(),
-            vulkan_context->GetDevice(),
-            static_cast<std::uint32_t>(width),
-            static_cast<std::uint32_t>(height),
-            VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            cached_image_preview_image_,
-            cached_image_preview_memory_,
-            cached_image_preview_view_))
+    if (pending_preview_active_)
     {
-        stbi_image_free(pixels);
-        return ImTextureID{};
+        if (!use_async_decode)
+        {
+            // LDR previews stay synchronous and should not be blocked by a pending HDR/EXR decode.
+        }
+        else
+        {
+        if (pending_preview_future_.valid() &&
+            pending_preview_future_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+        {
+            DecodedPreviewResult result = pending_preview_future_.get();
+            pending_preview_active_ = false;
+            pending_preview_path_.clear();
+            pending_preview_write_time_ = std::filesystem::file_time_type{};
+
+            if (!result.success)
+            {
+                failed_preview_path_ = result.path;
+                failed_preview_write_time_ = result.write_time;
+            }
+            else if (!error && result.path == path && result.write_time == write_time)
+            {
+                ClearImagePreview();
+
+                if (!CreateImage(
+                        vulkan_context->GetPhysicalDevice(),
+                        vulkan_context->GetDevice(),
+                        static_cast<std::uint32_t>(result.width),
+                        static_cast<std::uint32_t>(result.height),
+                        VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                        cached_image_preview_image_,
+                        cached_image_preview_memory_,
+                        cached_image_preview_view_))
+                {
+                    return ImTextureID{};
+                }
+
+                if (!UploadImagePreview(
+                        *vulkan_context,
+                        result.pixels.data(),
+                        static_cast<std::uint32_t>(result.width),
+                        static_cast<std::uint32_t>(result.height),
+                        cached_image_preview_image_))
+                {
+                    ClearImagePreview();
+                    return ImTextureID{};
+                }
+
+                VkSamplerCreateInfo sampler_info = {};
+                sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+                sampler_info.magFilter = VK_FILTER_LINEAR;
+                sampler_info.minFilter = VK_FILTER_LINEAR;
+                sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+                sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                sampler_info.maxLod = 1.0f;
+
+                VkResult vk_result = vkCreateSampler(vulkan_context->GetDevice(), &sampler_info, vulkan_context->GetAllocator(), &cached_image_preview_sampler_);
+                VulkanContext::CheckVkResult(vk_result);
+                if (vk_result != VK_SUCCESS)
+                {
+                    ClearImagePreview();
+                    return ImTextureID{};
+                }
+
+                cached_image_preview_descriptor_set_ = ImGui_ImplVulkan_AddTexture(
+                    cached_image_preview_sampler_,
+                    cached_image_preview_view_,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                if (cached_image_preview_descriptor_set_ == VK_NULL_HANDLE)
+                {
+                    ClearImagePreview();
+                    return ImTextureID{};
+                }
+
+                cached_image_preview_context_ = vulkan_context;
+                cached_image_preview_path_ = path;
+                cached_image_preview_write_time_ = write_time;
+                cached_image_preview_width_ = result.width;
+                cached_image_preview_height_ = result.height;
+                failed_preview_path_.clear();
+                failed_preview_write_time_ = std::filesystem::file_time_type{};
+
+                return reinterpret_cast<ImTextureID>(cached_image_preview_descriptor_set_);
+            }
+        }
+
+            return ImTextureID{};
+        }
     }
 
-    if (!UploadImagePreview(
-            *vulkan_context,
-            pixels,
-            static_cast<std::uint32_t>(width),
-            static_cast<std::uint32_t>(height),
-            cached_image_preview_image_))
+    if (!use_async_decode)
     {
-        stbi_image_free(pixels);
         ClearImagePreview();
-        return ImTextureID{};
+
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> pixels;
+        if (!LoadPreviewPixels(path, pixels, width, height))
+        {
+            return ImTextureID{};
+        }
+
+        if (!CreateImage(
+                vulkan_context->GetPhysicalDevice(),
+                vulkan_context->GetDevice(),
+                static_cast<std::uint32_t>(width),
+                static_cast<std::uint32_t>(height),
+                VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                cached_image_preview_image_,
+                cached_image_preview_memory_,
+                cached_image_preview_view_))
+        {
+            return ImTextureID{};
+        }
+
+        if (!UploadImagePreview(
+                *vulkan_context,
+                pixels.data(),
+                static_cast<std::uint32_t>(width),
+                static_cast<std::uint32_t>(height),
+                cached_image_preview_image_))
+        {
+            ClearImagePreview();
+            return ImTextureID{};
+        }
+
+        VkSamplerCreateInfo sampler_info = {};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = VK_FILTER_LINEAR;
+        sampler_info.minFilter = VK_FILTER_LINEAR;
+        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.maxLod = 1.0f;
+
+        VkResult vk_result = vkCreateSampler(vulkan_context->GetDevice(), &sampler_info, vulkan_context->GetAllocator(), &cached_image_preview_sampler_);
+        VulkanContext::CheckVkResult(vk_result);
+        if (vk_result != VK_SUCCESS)
+        {
+            ClearImagePreview();
+            return ImTextureID{};
+        }
+
+        cached_image_preview_descriptor_set_ = ImGui_ImplVulkan_AddTexture(
+            cached_image_preview_sampler_,
+            cached_image_preview_view_,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (cached_image_preview_descriptor_set_ == VK_NULL_HANDLE)
+        {
+            ClearImagePreview();
+            return ImTextureID{};
+        }
+
+        cached_image_preview_context_ = vulkan_context;
+        cached_image_preview_path_ = path;
+        cached_image_preview_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+        cached_image_preview_width_ = width;
+        cached_image_preview_height_ = height;
+        return reinterpret_cast<ImTextureID>(cached_image_preview_descriptor_set_);
     }
 
-    stbi_image_free(pixels);
-
-    VkSamplerCreateInfo sampler_info = {};
-    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_info.magFilter = VK_FILTER_LINEAR;
-    sampler_info.minFilter = VK_FILTER_LINEAR;
-    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_info.maxLod = 1.0f;
-
-    VkResult result = vkCreateSampler(vulkan_context->GetDevice(), &sampler_info, vulkan_context->GetAllocator(), &cached_image_preview_sampler_);
-    VulkanContext::CheckVkResult(result);
-    if (result != VK_SUCCESS)
+    pending_preview_path_ = path;
+    pending_preview_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+    pending_preview_active_ = true;
+    pending_preview_future_ = std::async(std::launch::async, [path, source_write_time = pending_preview_write_time_]()
     {
-        ClearImagePreview();
-        return ImTextureID{};
-    }
+        DecodedPreviewResult result;
+        result.path = path;
+        result.write_time = source_write_time;
+        result.success = LoadPreviewPixels(path, result.pixels, result.width, result.height);
+        return result;
+    });
 
-    cached_image_preview_descriptor_set_ = ImGui_ImplVulkan_AddTexture(
-        cached_image_preview_sampler_,
-        cached_image_preview_view_,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (cached_image_preview_descriptor_set_ == VK_NULL_HANDLE)
-    {
-        ClearImagePreview();
-        return ImTextureID{};
-    }
+    return ImTextureID{};
+}
 
-    cached_image_preview_context_ = vulkan_context;
-    cached_image_preview_path_ = path;
-    cached_image_preview_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
-    cached_image_preview_width_ = width;
-    cached_image_preview_height_ = height;
-    return reinterpret_cast<ImTextureID>(cached_image_preview_descriptor_set_);
+bool ImageInfoRenderer::IsPreviewLoading(const std::filesystem::path& path) const
+{
+    return pending_preview_active_ && pending_preview_path_ == path;
 }

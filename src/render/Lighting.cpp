@@ -240,6 +240,7 @@ ResolvedSceneLighting ResolveSceneLighting(
                 break;
 
             case SceneObjectAttributeKind::Camera:
+            case SceneObjectAttributeKind::Skybox:
             case SceneObjectAttributeKind::None:
             default:
                 break;

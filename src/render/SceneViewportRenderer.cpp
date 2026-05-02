@@ -2104,6 +2104,7 @@ bool SceneViewportRenderer::Initialize(VulkanContext* context)
     vulkan_context_ = context;
     ray_tracing_.Initialize(context);
     scene_2d_renderer_.Initialize(context);
+    skybox_renderer_.Initialize(context);
     return vulkan_context_ != nullptr;
 }
 
@@ -2177,6 +2178,7 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 
 void SceneViewportRenderer::Shutdown()
 {
+    skybox_renderer_.Shutdown();
     scene_2d_renderer_.Shutdown();
     ray_tracing_.Shutdown();
 
@@ -3583,6 +3585,9 @@ void SceneViewportRenderer::RenderGpu()
     {
         return;
     }
+
+    ray_tracing_.SetSkyboxTexture(
+        skybox_renderer_.ResolveSkyboxView(pending_scene_metadata_, pending_project_root_));
 
     if (!ray_tracing_.RenderFrame(
             resolved_lighting_,

@@ -716,6 +716,30 @@ void InfoPanel::RenderImageMetadata(const std::filesystem::path& path, const Ima
         ImGui::Image(preview_image, preview_size);
         ImGui::Spacing();
     }
+    else if (image_info_renderer_.IsPreviewLoading(path))
+    {
+        const float available_width = ImGui::GetContentRegionAvail().x;
+        const float preview_width = (std::max)(120.0f, available_width > 0.0f ? available_width : 220.0f);
+        const ImVec2 loading_min = ImGui::GetCursorScreenPos();
+        const ImVec2 loading_size(preview_width, 120.0f);
+        const ImVec2 loading_max(loading_min.x + loading_size.x, loading_min.y + loading_size.y);
+
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddRectFilled(loading_min, loading_max, IM_COL32(34, 38, 44, 255), 6.0f);
+        draw_list->AddRect(loading_min, loading_max, IM_COL32(82, 88, 98, 255), 6.0f, 0, 1.0f);
+
+        const char* loading_message = "Loading preview...";
+        const ImVec2 text_size = ImGui::CalcTextSize(loading_message);
+        draw_list->AddText(
+            ImVec2(
+                loading_min.x + (loading_size.x - text_size.x) * 0.5f,
+                loading_min.y + (loading_size.y - text_size.y) * 0.5f),
+            IM_COL32(200, 205, 215, 255),
+            loading_message);
+
+        ImGui::Dummy(loading_size);
+        ImGui::Spacing();
+    }
 
     ImGui::Text("Resolution: %d x %d", metadata.width, metadata.height);
     ImGui::Text("Channels: %d", metadata.channel_count);

@@ -1,6 +1,8 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
 
+const float kPi = 3.1415926535;
+
 struct PrimaryPayload
 {
     vec4 color;
@@ -25,14 +27,25 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 spot_light_data;
     vec4 grid_data;
     vec4 grid_origin_extent;
+    vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
 } scene_uniforms;
+
+layout(set = 0, binding = 8) uniform sampler2D skybox_texture;
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;
 
 vec3 evaluate_sky(vec3 ray_direction)
 {
+    if (scene_uniforms.skybox_data.x > 0.5)
+    {
+        vec3 direction = normalize(ray_direction);
+        float u = atan(direction.z, direction.x) / (2.0 * kPi) + 0.5;
+        float v = acos(clamp(direction.y, -1.0, 1.0)) / kPi;
+        return texture(skybox_texture, vec2(fract(u), clamp(v, 0.0, 1.0))).rgb;
+    }
+
     vec3 ambient = scene_uniforms.ambient_light.rgb * max(scene_uniforms.ambient_light.a, 0.35);
     vec3 horizon = max(vec3(0.10, 0.11, 0.13), ambient * 0.7 + vec3(0.05, 0.05, 0.06));
     vec3 zenith = max(vec3(0.18, 0.22, 0.30), ambient * 1.3 + vec3(0.08, 0.10, 0.14));

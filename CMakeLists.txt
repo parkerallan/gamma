@@ -167,6 +167,30 @@ if(NOT stb_POPULATED)
 endif()
 
 FetchContent_Declare(
+    tinyexr
+    GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
+    GIT_TAG v1.0.13
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(tinyexr)
+if(NOT tinyexr_POPULATED)
+    FetchContent_Populate(tinyexr)
+endif()
+
+add_library(tinyexr STATIC
+    ${tinyexr_SOURCE_DIR}/tinyexr.cc
+    ${tinyexr_SOURCE_DIR}/deps/miniz/miniz.c
+)
+target_include_directories(tinyexr PUBLIC
+    ${tinyexr_SOURCE_DIR}
+    ${tinyexr_SOURCE_DIR}/deps/miniz
+)
+target_compile_definitions(tinyexr PUBLIC
+    TINYEXR_USE_THREAD=1
+    TINYEXR_MAX_THREADS=8
+)
+
+FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG v3.11.3
@@ -399,6 +423,7 @@ add_executable(engine
     src/render/RuntimeScriptAPI.cpp
     src/render/PhysicsWorld.cpp
     src/render/Scene2DRenderer.cpp
+    src/render/SkyboxRenderer.cpp
     src/render/SceneViewportRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/render/FontInfoRenderer.cpp
@@ -421,6 +446,7 @@ target_link_libraries(engine PRIVATE
     imguizmo
     imnodeflow
     imguicolortextedit
+    tinyexr
     lua_runtime
     joltphysics
     nlohmann_json::nlohmann_json

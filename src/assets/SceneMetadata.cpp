@@ -501,7 +501,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeImage2DHeight:") ||
     StartsWith(line, "AttributeImage2DTint:") ||
     StartsWith(line, "AttributeImage2DAlpha:") ||
-    StartsWith(line, "AttributeImage2DLockAspectRatio:");
+    StartsWith(line, "AttributeImage2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeSkyboxImagePath:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -861,6 +862,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Text 2D";
     case SceneObjectAttributeKind::Image2D:
         return "Image 2D";
+    case SceneObjectAttributeKind::Skybox:
+        return "Skybox";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -889,6 +892,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Text2D";
     case SceneObjectAttributeKind::Image2D:
         return "Image2D";
+    case SceneObjectAttributeKind::Skybox:
+        return "Skybox";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -933,6 +938,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Image2D")
     {
         return SceneObjectAttributeKind::Image2D;
+    }
+    if (trimmed == "Skybox")
+    {
+        return SceneObjectAttributeKind::Skybox;
     }
 
     return SceneObjectAttributeKind::None;
@@ -1519,6 +1528,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeImage2DLockAspectRatio:") && current_attribute != nullptr)
         {
             ParseBool(ExtractValue(trimmed, "AttributeImage2DLockAspectRatio:"), current_attribute->image_2d.lock_aspect_ratio);
+        }
+        else if (StartsWith(trimmed, "AttributeSkyboxImagePath:") && current_attribute != nullptr)
+        {
+            current_attribute->skybox.image_path = ExtractValue(trimmed, "AttributeSkyboxImagePath:");
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -2224,6 +2237,11 @@ bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
 {
     return SetSceneObjectAttributeBoolean("AttributeImage2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
+}
+
+bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeSkyboxImagePath", scene_path, object_name, attribute_index, image_path);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)

@@ -22,6 +22,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::TriggerVolume,
     SceneObjectAttributeKind::Text2D,
     SceneObjectAttributeKind::Image2D,
+    SceneObjectAttributeKind::Skybox,
 };
 
 constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
@@ -239,7 +240,8 @@ bool RenderAttributeSection(
         if (attribute.kind != SceneObjectAttributeKind::Rigidbody &&
             attribute.kind != SceneObjectAttributeKind::TriggerVolume &&
             attribute.kind != SceneObjectAttributeKind::Text2D &&
-            attribute.kind != SceneObjectAttributeKind::Image2D)
+            attribute.kind != SceneObjectAttributeKind::Image2D &&
+            attribute.kind != SceneObjectAttributeKind::Skybox)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
             {
@@ -826,6 +828,39 @@ bool RenderAttributeSection(
                 {
                     return SetSceneObjectAttributeImage2DAlpha(state.selected_item_path, object.name, attribute_index, std::clamp(alpha, 0.0f, 1.0f));
                 }) || changed;
+            }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Skybox:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_image_label = attribute.skybox.image_path.empty()
+                ? std::string("Drop Skybox (.hdr/.exr)")
+                : std::filesystem::path(attribute.skybox.image_path).filename().string();
+            ImGui::Button(current_image_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+                {
+                    const char* payload_text = static_cast<const char*>(payload->Data);
+                    const std::size_t payload_size = payload->DataSize > 0
+                        ? static_cast<std::size_t>(payload->DataSize - 1)
+                        : 0;
+                    const std::filesystem::path dropped_path(std::string(payload_text, payload_size));
+                    if (HasAnyExtension(dropped_path, {".hdr", ".exr"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "skybox image path", [&]()
+                        {
+                            return SetSceneObjectAttributeSkyboxImagePath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                }
+                ImGui::EndDragDropTarget();
             }
 
             break;

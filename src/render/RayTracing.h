@@ -99,6 +99,7 @@ public:
         float grid_origin_x,
         float grid_origin_z,
         float grid_extent);
+    void SetSkyboxTexture(VkImageView skybox_view);
 
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
@@ -170,6 +171,7 @@ private:
         std::array<float, 4> spot_light_data = {0.0f, 0.1f, 0.0f, 0.0f};
         std::array<float, 4> grid_data = {0.0f, 1.0f, 0.0f, 0.0f};
         std::array<float, 4> grid_origin_extent = {0.0f, 0.0f, 0.0f, 0.0f};
+        std::array<float, 4> skybox_data = {0.0f, 0.0f, 0.0f, 0.0f};
         std::uint32_t mesh_count = 0;
         std::uint32_t material_count = 0;
         std::uint32_t section_count = 0;
@@ -211,6 +213,7 @@ private:
     VkImage fallback_texture_image_ = VK_NULL_HANDLE;
     VkDeviceMemory fallback_texture_memory_ = VK_NULL_HANDLE;
     VkImageView fallback_texture_view_ = VK_NULL_HANDLE;
+    VkImageView skybox_texture_view_ = VK_NULL_HANDLE;
     VkSampler texture_sampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;

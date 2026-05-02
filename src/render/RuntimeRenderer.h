@@ -7,6 +7,7 @@
 #include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
 #include "render/Scene2DRenderer.h"
+#include "render/SkyboxRenderer.h"
 
 #include <array>
 #include <cstdint>
@@ -211,7 +212,8 @@ private:
 
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
-        Scene2DRenderer scene_2d_renderer_{};
+    Scene2DRenderer scene_2d_renderer_{};
+    SkyboxRenderer skybox_renderer_{};
     std::filesystem::path project_root_;
     std::filesystem::path scene_path_;
     std::string active_camera_object_name_;

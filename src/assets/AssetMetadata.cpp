@@ -4,6 +4,7 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#include <tinyexr.h>
 
 #include <algorithm>
 #include <cctype>
@@ -154,7 +155,8 @@ bool ImageMetadata::IsSupportedPath(const std::filesystem::path& path)
         extension == ".bmp" ||
         extension == ".psd" ||
         extension == ".gif" ||
-        extension == ".hdr";
+    extension == ".hdr" ||
+    extension == ".exr";
 }
 
 bool FontMetadata::IsSupportedPath(const std::filesystem::path& path)
@@ -256,6 +258,62 @@ ImageMetadata LoadImageMetadata(const std::filesystem::path& path)
     if (!ImageMetadata::IsSupportedPath(path))
     {
         metadata.error_message = "Unsupported image format.";
+        return metadata;
+    }
+
+    const std::string extension = GetLowerExtension(path);
+    if (extension == ".exr")
+    {
+        EXRVersion version;
+        int result = ParseEXRVersionFromFile(&version, path.string().c_str());
+        if (result != TINYEXR_SUCCESS)
+        {
+            metadata.error_message = "Failed to read EXR version.";
+            return metadata;
+        }
+
+        if (version.multipart)
+        {
+            metadata.error_message = "Multipart EXR metadata is not supported in this panel.";
+            return metadata;
+        }
+
+        EXRHeader header;
+        InitEXRHeader(&header);
+        const char* error_message = nullptr;
+        result = ParseEXRHeaderFromFile(&header, &version, path.string().c_str(), &error_message);
+        if (result != TINYEXR_SUCCESS)
+        {
+            metadata.error_message = error_message != nullptr ? error_message : "Failed to parse EXR header.";
+            if (error_message != nullptr)
+            {
+                FreeEXRErrorMessage(error_message);
+            }
+            FreeEXRHeader(&header);
+            return metadata;
+        }
+
+        metadata.width = header.data_window.max_x - header.data_window.min_x + 1;
+        metadata.height = header.data_window.max_y - header.data_window.min_y + 1;
+        metadata.channel_count = header.num_channels;
+        if (header.num_channels > 0 && header.pixel_types != nullptr)
+        {
+            if (header.pixel_types[0] == TINYEXR_PIXELTYPE_HALF)
+            {
+                metadata.bits_per_channel = 16;
+            }
+            else
+            {
+                metadata.bits_per_channel = 32;
+            }
+        }
+        else
+        {
+            metadata.bits_per_channel = 32;
+        }
+
+        metadata.parsed = true;
+        FreeEXRHeader(&header);
         return metadata;
     }
 

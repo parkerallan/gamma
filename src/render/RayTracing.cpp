@@ -1396,6 +1396,7 @@ void RayTracing::DestroyPipelineResources()
             vkDestroySampler(device, texture_sampler_, allocator);
             texture_sampler_ = VK_NULL_HANDLE;
         }
+        skybox_texture_view_ = VK_NULL_HANDLE;
         if (fallback_texture_view_ != VK_NULL_HANDLE)
         {
             vkDestroyImageView(device, fallback_texture_view_, allocator);
@@ -1421,6 +1422,7 @@ void RayTracing::DestroyPipelineResources()
         pipeline_layout_ = VK_NULL_HANDLE;
         descriptor_set_layout_ = VK_NULL_HANDLE;
         texture_sampler_ = VK_NULL_HANDLE;
+        skybox_texture_view_ = VK_NULL_HANDLE;
         fallback_texture_view_ = VK_NULL_HANDLE;
         fallback_texture_image_ = VK_NULL_HANDLE;
         fallback_texture_memory_ = VK_NULL_HANDLE;
@@ -1536,7 +1538,7 @@ bool RayTracing::EnsurePipelineResources()
 
     if (descriptor_set_layout_ == VK_NULL_HANDLE)
     {
-        std::array<VkDescriptorSetLayoutBinding, 8> bindings = {};
+        std::array<VkDescriptorSetLayoutBinding, 9> bindings = {};
         bindings[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, nullptr};
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
         bindings[2] = {
@@ -1553,6 +1555,7 @@ bool RayTracing::EnsurePipelineResources()
         bindings[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR, nullptr};
         bindings[6] = {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxTextures, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR, nullptr};
         bindings[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
+        bindings[8] = {8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_MISS_BIT_KHR, nullptr};
 
         VkDescriptorSetLayoutCreateInfo layout_info = {};
         layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1788,6 +1791,11 @@ bool RayTracing::UpdateDescriptors()
     history_image_info.imageView = history_view_;
     history_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo skybox_image_info = {};
+    skybox_image_info.sampler = texture_sampler_;
+    skybox_image_info.imageView = skybox_texture_view_ != VK_NULL_HANDLE ? skybox_texture_view_ : fallback_texture_view_;
+    skybox_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorBufferInfo uniform_info = {};
     uniform_info.buffer = uniform_buffer_.buffer;
     uniform_info.range = sizeof(UniformBlock);
@@ -1804,7 +1812,7 @@ bool RayTracing::UpdateDescriptors()
     material_info.buffer = material_record_buffer_.buffer;
     material_info.range = material_record_buffer_.size;
 
-    std::array<VkWriteDescriptorSet, 8> writes = {};
+    std::array<VkWriteDescriptorSet, 9> writes = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     writes[0].pNext = &acceleration_write;
     writes[0].dstSet = descriptor_set_;
@@ -1861,8 +1869,27 @@ bool RayTracing::UpdateDescriptors()
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[7].pImageInfo = &history_image_info;
 
+    writes[8] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[8].dstSet = descriptor_set_;
+    writes[8].dstBinding = 8;
+    writes[8].descriptorCount = 1;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[8].pImageInfo = &skybox_image_info;
+
     vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
+}
+
+void RayTracing::SetSkyboxTexture(VkImageView skybox_view)
+{
+    if (skybox_texture_view_ == skybox_view)
+    {
+        return;
+    }
+
+    skybox_texture_view_ = skybox_view;
+    descriptors_dirty_ = true;
+    ResetAccumulationState();
 }
 
 bool RayTracing::RenderFrame(
@@ -2235,6 +2262,7 @@ bool RayTracing::RenderFrame(
     uniforms.spot_light_data = lighting.spot_light_data;
     uniforms.grid_data = {grid_enabled ? 1.0f : 0.0f, grid_spacing, 0.0f, 0.0f};
     uniforms.grid_origin_extent = {grid_origin_x, 0.0f, grid_origin_z, grid_extent};
+    uniforms.skybox_data = {skybox_texture_view_ != VK_NULL_HANDLE ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
     uniforms.mesh_count = static_cast<std::uint32_t>(mesh_records_cpu_.size());
     uniforms.material_count = static_cast<std::uint32_t>(material_records_cpu_.size());
     uniforms.section_count = static_cast<std::uint32_t>(section_records_cpu_.size());
