@@ -3588,6 +3588,8 @@ void SceneViewportRenderer::RenderGpu()
 
     ray_tracing_.SetSkyboxTexture(
         skybox_renderer_.ResolveSkyboxView(pending_scene_metadata_, pending_project_root_));
+    ray_tracing_.SetSkyboxRotation(
+        skybox_renderer_.ResolveSkyboxRotationDegrees(pending_scene_metadata_));
 
     if (!ray_tracing_.RenderFrame(
             resolved_lighting_,

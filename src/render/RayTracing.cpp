@@ -1892,6 +1892,17 @@ void RayTracing::SetSkyboxTexture(VkImageView skybox_view)
     ResetAccumulationState();
 }
 
+void RayTracing::SetSkyboxRotation(float rotation_degrees)
+{
+    if (skybox_rotation_degrees_ == rotation_degrees)
+    {
+        return;
+    }
+
+    skybox_rotation_degrees_ = rotation_degrees;
+    ResetAccumulationState();
+}
+
 bool RayTracing::RenderFrame(
     const ResolvedSceneLighting& lighting,
     const std::array<float, 16>& view_inverse,
@@ -2262,7 +2273,12 @@ bool RayTracing::RenderFrame(
     uniforms.spot_light_data = lighting.spot_light_data;
     uniforms.grid_data = {grid_enabled ? 1.0f : 0.0f, grid_spacing, 0.0f, 0.0f};
     uniforms.grid_origin_extent = {grid_origin_x, 0.0f, grid_origin_z, grid_extent};
-    uniforms.skybox_data = {skybox_texture_view_ != VK_NULL_HANDLE ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    constexpr float kDegreesToRadians = 0.01745329251994329577f;
+    uniforms.skybox_data = {
+        skybox_texture_view_ != VK_NULL_HANDLE ? 1.0f : 0.0f,
+        skybox_rotation_degrees_ * kDegreesToRadians,
+        0.0f,
+        0.0f};
     uniforms.mesh_count = static_cast<std::uint32_t>(mesh_records_cpu_.size());
     uniforms.material_count = static_cast<std::uint32_t>(material_records_cpu_.size());
     uniforms.section_count = static_cast<std::uint32_t>(section_records_cpu_.size());

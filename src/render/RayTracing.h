@@ -100,6 +100,7 @@ public:
         float grid_origin_z,
         float grid_extent);
     void SetSkyboxTexture(VkImageView skybox_view);
+    void SetSkyboxRotation(float rotation_degrees);
 
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
@@ -214,6 +215,7 @@ private:
     VkDeviceMemory fallback_texture_memory_ = VK_NULL_HANDLE;
     VkImageView fallback_texture_view_ = VK_NULL_HANDLE;
     VkImageView skybox_texture_view_ = VK_NULL_HANDLE;
+    float skybox_rotation_degrees_ = 0.0f;
     VkSampler texture_sampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;

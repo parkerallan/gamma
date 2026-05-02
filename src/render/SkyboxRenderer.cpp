@@ -487,6 +487,28 @@ VkImageView SkyboxRenderer::ResolveSkyboxView(const SceneMetadata& scene_metadat
     return texture != nullptr ? texture->view : VK_NULL_HANDLE;
 }
 
+float SkyboxRenderer::ResolveSkyboxRotationDegrees(const SceneMetadata& scene_metadata) const
+{
+    const std::filesystem::path scene_skybox_path = FindSceneSkyboxPath(scene_metadata);
+    if (scene_skybox_path.empty())
+    {
+        return 0.0f;
+    }
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        for (const SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind == SceneObjectAttributeKind::Skybox && !attribute.skybox.image_path.empty())
+            {
+                return attribute.skybox.rotation_degrees;
+            }
+        }
+    }
+
+    return 0.0f;
+}
+
 void SkyboxRenderer::ReleaseTexture(GpuTexture& texture)
 {
     if (vulkan_context_ == nullptr)

@@ -863,6 +863,45 @@ bool RenderAttributeSection(
                 ImGui::EndDragDropTarget();
             }
 
+            static bool rotation_drag_active = false;
+            static std::string rotation_drag_object_name;
+            static std::size_t rotation_drag_attribute_index = 0;
+            static float rotation_drag_value = 0.0f;
+
+            const bool same_rotation_drag_target =
+                rotation_drag_active &&
+                rotation_drag_object_name == object.name &&
+                rotation_drag_attribute_index == attribute_index;
+
+            float rotation_degrees = same_rotation_drag_target
+                ? rotation_drag_value
+                : attribute.skybox.rotation_degrees;
+
+            if (ImGui::DragFloat("Rotation (deg)", &rotation_degrees, 0.25f, -3600.0f, 3600.0f, "%.2f"))
+            {
+                rotation_drag_active = true;
+                rotation_drag_object_name = object.name;
+                rotation_drag_attribute_index = attribute_index;
+                rotation_drag_value = rotation_degrees;
+            }
+
+            if (same_rotation_drag_target && ImGui::IsItemDeactivatedAfterEdit())
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "skybox rotation", [&]()
+                {
+                    return SetSceneObjectAttributeSkyboxRotation(
+                        state.selected_item_path,
+                        object.name,
+                        attribute_index,
+                        rotation_drag_value);
+                }) || changed;
+
+                rotation_drag_active = false;
+                rotation_drag_object_name.clear();
+                rotation_drag_attribute_index = 0;
+                rotation_drag_value = 0.0f;
+            }
+
             break;
         }
 

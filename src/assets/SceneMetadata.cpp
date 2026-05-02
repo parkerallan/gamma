@@ -502,7 +502,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeImage2DTint:") ||
     StartsWith(line, "AttributeImage2DAlpha:") ||
     StartsWith(line, "AttributeImage2DLockAspectRatio:") ||
-    StartsWith(line, "AttributeSkyboxImagePath:");
+    StartsWith(line, "AttributeSkyboxImagePath:") ||
+    StartsWith(line, "AttributeSkyboxRotation:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -1533,6 +1534,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             current_attribute->skybox.image_path = ExtractValue(trimmed, "AttributeSkyboxImagePath:");
         }
+        else if (StartsWith(trimmed, "AttributeSkyboxRotation:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeSkyboxRotation:"), current_attribute->skybox.rotation_degrees);
+        }
         else if (StartsWith(trimmed, "Model:"))
         {
             current_attribute = nullptr;
@@ -2242,6 +2247,11 @@ bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& 
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path)
 {
     return SetSceneObjectAttributeStringValue("AttributeSkyboxImagePath", scene_path, object_name, attribute_index, image_path);
+}
+
+bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees)
+{
+    return SetSceneObjectAttributeScalar("AttributeSkyboxRotation", scene_path, object_name, attribute_index, rotation_degrees);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)

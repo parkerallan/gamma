@@ -20,6 +20,7 @@ public:
     // Resolves and uploads the active scene skybox texture if needed.
     // Returns VK_NULL_HANDLE when no valid skybox is configured.
     VkImageView ResolveSkyboxView(const SceneMetadata& scene_metadata, const std::filesystem::path& project_root);
+    float ResolveSkyboxRotationDegrees(const SceneMetadata& scene_metadata) const;
 
 private:
     struct GpuTexture

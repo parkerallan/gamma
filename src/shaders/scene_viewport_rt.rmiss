@@ -2,6 +2,7 @@
 #extension GL_EXT_ray_tracing : require
 
 const float kPi = 3.1415926535;
+const float kTwoPi = 6.2831853070;
 
 struct PrimaryPayload
 {
@@ -41,7 +42,7 @@ vec3 evaluate_sky(vec3 ray_direction)
     if (scene_uniforms.skybox_data.x > 0.5)
     {
         vec3 direction = normalize(ray_direction);
-        float u = atan(direction.z, direction.x) / (2.0 * kPi) + 0.5;
+        float u = atan(direction.z, direction.x) / kTwoPi + 0.5 + scene_uniforms.skybox_data.y / kTwoPi;
         float v = acos(clamp(direction.y, -1.0, 1.0)) / kPi;
         return texture(skybox_texture, vec2(fract(u), clamp(v, 0.0, 1.0))).rgb;
     }

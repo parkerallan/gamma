@@ -121,6 +121,7 @@ struct SceneObjectImage2DAttributes
 struct SceneObjectSkyboxAttributes
 {
     std::string image_path;
+    float rotation_degrees = 0.0f;
 };
 
 struct SceneObjectAttribute
@@ -256,6 +257,7 @@ bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path,
 bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
+bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);
