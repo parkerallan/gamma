@@ -1256,23 +1256,21 @@ void Scene2DRenderer::DrawQuad(
     VkCommandBuffer cmd,
     const GpuTexture& tex,
     std::uint32_t quad_index,
-    float x_px, float y_px, float w_px, float h_px,
-    float r, float g, float b, float a,
-    std::uint32_t viewport_w, std::uint32_t viewport_h)
+    float x_norm, float y_norm, float w_norm, float h_norm,
+    float r, float g, float b, float a)
 {
     if (tex.descriptor_set == VK_NULL_HANDLE || quad_index >= max_quads_)
     {
         return;
     }
 
-    // Convert top-left pixel coords to NDC.
-    const float vw = static_cast<float>(viewport_w);
-    const float vh = static_cast<float>(viewport_h);
-
-    const float ndc_x0 = (x_px / vw) * 2.0f - 1.0f;
-    const float ndc_x1 = ((x_px + w_px) / vw) * 2.0f - 1.0f;
-    const float ndc_y0 = 1.0f - (y_px / vh) * 2.0f;
-    const float ndc_y1 = 1.0f - ((y_px + h_px) / vh) * 2.0f;
+    // Convert normalized (0-1) coordinates directly to NDC.
+    // Normalized coordinates: (0,0) = top-left, (1,1) = bottom-right
+    // NDC: (-1,-1) = bottom-left, (1,1) = top-right
+    const float ndc_x0 = x_norm * 2.0f - 1.0f;
+    const float ndc_x1 = (x_norm + w_norm) * 2.0f - 1.0f;
+    const float ndc_y0 = 1.0f - y_norm * 2.0f;
+    const float ndc_y1 = 1.0f - (y_norm + h_norm) * 2.0f;
 
     // Quad: top-left, top-right, bottom-right, bottom-left
     const Vertex2D verts[4] = {
@@ -1414,6 +1412,12 @@ void Scene2DRenderer::CompositeOverlay(
     scissor.extent.height = height;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    const float safe_ref_width = static_cast<float>((std::max)(1u, scene_metadata.reference_viewport_width));
+    const float safe_ref_height = static_cast<float>((std::max)(1u, scene_metadata.reference_viewport_height));
+    const float scale_x = static_cast<float>(width) / safe_ref_width;
+    const float scale_y = static_cast<float>(height) / safe_ref_height;
+    const float overlay_size_scale = (std::min)(scale_x, scale_y);
+
     std::uint32_t quad_index = 0;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
@@ -1449,11 +1453,24 @@ void Scene2DRenderer::CompositeOverlay(
                 float render_w = t.width;
                 float render_h = t.height;
                 GetText2DRenderSize(project_root, t, render_w, render_h);
+                
+                const float screen_w = render_w * overlay_size_scale;
+                const float screen_h = render_h * overlay_size_scale;
+                const float reference_range_x = (std::max)(safe_ref_width - render_w, 1.0f);
+                const float reference_range_y = (std::max)(safe_ref_height - render_h, 1.0f);
+                const float screen_range_x = (std::max)(static_cast<float>(width) - screen_w, 0.0f);
+                const float screen_range_y = (std::max)(static_cast<float>(height) - screen_h, 0.0f);
+                const float screen_x = (t.x / reference_range_x) * screen_range_x;
+                const float screen_y = (t.y / reference_range_y) * screen_range_y;
+                const float norm_x = screen_x / static_cast<float>((std::max)(1u, width));
+                const float norm_y = screen_y / static_cast<float>((std::max)(1u, height));
+                const float norm_w = screen_w / static_cast<float>((std::max)(1u, width));
+                const float norm_h = screen_h / static_cast<float>((std::max)(1u, height));
+                
                 DrawQuad(cmd, *tex,
                     quad_index,
-                    t.x, t.y, render_w, render_h,
-                    t.color[0], t.color[1], t.color[2], t.alpha,
-                    width, height);
+                    norm_x, norm_y, norm_w, norm_h,
+                    t.color[0], t.color[1], t.color[2], t.alpha);
                 ++quad_index;
             }
             else if (attr.kind == SceneObjectAttributeKind::Image2D)
@@ -1475,11 +1492,23 @@ void Scene2DRenderer::CompositeOverlay(
                     continue;
                 }
 
+                const float screen_w = img.width * overlay_size_scale;
+                const float screen_h = img.height * overlay_size_scale;
+                const float reference_range_x = (std::max)(safe_ref_width - img.width, 1.0f);
+                const float reference_range_y = (std::max)(safe_ref_height - img.height, 1.0f);
+                const float screen_range_x = (std::max)(static_cast<float>(width) - screen_w, 0.0f);
+                const float screen_range_y = (std::max)(static_cast<float>(height) - screen_h, 0.0f);
+                const float screen_x = (img.x / reference_range_x) * screen_range_x;
+                const float screen_y = (img.y / reference_range_y) * screen_range_y;
+                const float norm_x = screen_x / static_cast<float>((std::max)(1u, width));
+                const float norm_y = screen_y / static_cast<float>((std::max)(1u, height));
+                const float norm_w = screen_w / static_cast<float>((std::max)(1u, width));
+                const float norm_h = screen_h / static_cast<float>((std::max)(1u, height));
+                
                 DrawQuad(cmd, *tex,
                     quad_index,
-                    img.x, img.y, img.width, img.height,
-                    img.tint[0], img.tint[1], img.tint[2], img.alpha,
-                    width, height);
+                    norm_x, norm_y, norm_w, norm_h,
+                    img.tint[0], img.tint[1], img.tint[2], img.alpha);
                 ++quad_index;
             }
         }

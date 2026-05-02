@@ -122,9 +122,12 @@ private:
 
     VkFramebuffer GetOrCreateFramebuffer(VkImageView view, std::uint32_t w, std::uint32_t h);
 
+    // Draw a quad with normalized (0-1) coordinates that scale with viewport size.
+    // x_norm, y_norm, w_norm, h_norm should be in 0-1 range where:
+    // - (0,0) is top-left, (1,1) is bottom-right
+    // - coordinates automatically scale with viewport_w and viewport_h
     void DrawQuad(VkCommandBuffer cmd, const GpuTexture& tex,
                   std::uint32_t quad_index,
-                  float x_px, float y_px, float w_px, float h_px,
-                  float r, float g, float b, float a,
-                  std::uint32_t viewport_w, std::uint32_t viewport_h);
+                  float x_norm, float y_norm, float w_norm, float h_norm,
+                  float r, float g, float b, float a);
 };

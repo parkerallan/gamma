@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -173,6 +174,10 @@ struct SceneMetadata
     std::string error_message;
     std::string scene_name;
     std::vector<SceneObjectMetadata> objects;
+    // Reference viewport size for scaling 2D overlays when viewport is resized.
+    // Text and image positions are stored relative to this reference resolution.
+    std::uint32_t reference_viewport_width = 1920;
+    std::uint32_t reference_viewport_height = 1080;
 };
 
 struct ActiveSceneCameraSelection
@@ -258,6 +263,7 @@ bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
 bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees);
+bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
 bool ClearSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name);

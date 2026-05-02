@@ -1983,6 +1983,66 @@ constexpr float kViewportHeaderButtonHorizontalPadding = 8.0f;
 constexpr float kViewportHeaderButtonVerticalPadding = 4.0f;
 constexpr float kViewportHeaderButtonMinWidth = 28.0f;
 
+struct ViewportResolutionPreset
+{
+    const char* label = "";
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
+constexpr std::array<ViewportResolutionPreset, 7> kViewportResolutionPresets = {{
+    {"Free", 0, 0},
+    {"1280 x 720 (16:9)", 1280, 720},
+    {"1920 x 1080 (16:9)", 1920, 1080},
+    {"2560 x 1080 (21:9)", 2560, 1080},
+    {"3440 x 1440 (21:9)", 3440, 1440},
+    {"3840 x 1080 (32:9)", 3840, 1080},
+    {"5120 x 1440 (32:9)", 5120, 1440},
+}};
+
+float ComputeViewportAspectRatio(const ViewportResolutionPreset& preset)
+{
+    if (preset.width == 0 || preset.height == 0)
+    {
+        return 0.0f;
+    }
+
+    return static_cast<float>(preset.width) / static_cast<float>(preset.height);
+}
+
+int FindBestViewportResolutionPresetIndex(std::uint32_t width, std::uint32_t height)
+{
+    if (width == 0 || height == 0)
+    {
+        return 0;
+    }
+
+    for (std::size_t index = 1; index < kViewportResolutionPresets.size(); ++index)
+    {
+        const ViewportResolutionPreset& preset = kViewportResolutionPresets[index];
+        if (preset.width == width && preset.height == height)
+        {
+            return static_cast<int>(index);
+        }
+    }
+
+    const float source_aspect = static_cast<float>(width) / static_cast<float>(height);
+    float smallest_delta = std::numeric_limits<float>::max();
+    int best_index = 0;
+    for (std::size_t index = 1; index < kViewportResolutionPresets.size(); ++index)
+    {
+        const float preset_aspect = ComputeViewportAspectRatio(kViewportResolutionPresets[index]);
+        const float delta = std::abs(preset_aspect - source_aspect);
+        if (delta < smallest_delta)
+        {
+            smallest_delta = delta;
+            best_index = static_cast<int>(index);
+        }
+    }
+
+    return best_index;
+}
+
 float ComputeViewportHeaderButtonWidth(const char* label)
 {
     const float button_width = ImGui::CalcTextSize(label).x + kViewportHeaderButtonHorizontalPadding * 2.0f;
@@ -2449,17 +2509,62 @@ void SceneViewportRenderer::RenderUi(
     const char* play_button_label = runtime_playing ? kCloseRuntimeButtonLabel : kPlayButtonLabel;
     const char* play_button_tooltip = runtime_playing ? "Close Runtime" : "Play";
     const char* visibility_button_tooltip = "Visibility";
+    const char* resolution_tooltip = "Viewport aspect preview";
+    static std::filesystem::path active_resolution_scene_path;
+    static int selected_resolution_preset_index = 2;
+    if (state.active_scene_path != active_resolution_scene_path)
+    {
+        selected_resolution_preset_index = FindBestViewportResolutionPresetIndex(
+            scene_metadata.reference_viewport_width,
+            scene_metadata.reference_viewport_height);
+        active_resolution_scene_path = state.active_scene_path;
+    }
+
+    selected_resolution_preset_index = std::clamp(
+        selected_resolution_preset_index,
+        0,
+        static_cast<int>(kViewportResolutionPresets.size()) - 1);
+
     const float build_button_width = ComputeViewportHeaderButtonWidth(build_button_label);
     const float play_button_width = ComputeViewportHeaderButtonWidth(play_button_label);
     const float header_toolbar_width = build_button_width + play_button_width + header_spacing;
-    const float header_toolbar_x = (std::max)(
-        ImGui::GetCursorPosX() + ComputeViewportHeaderButtonWidth(kVisibilityButtonLabel) + header_spacing,
-        ImGui::GetWindowContentRegionMax().x - header_toolbar_width);
 
     if (DrawViewportHeaderButton(kVisibilityButtonLabel, visibility_button_tooltip))
     {
         ImGui::OpenPopup("##SceneViewportVisibilityPopup");
     }
+
+    ImGui::SameLine(0.0f, header_spacing);
+    ImGui::SetNextItemWidth(170.0f);
+    if (ImGui::BeginCombo(
+            "##SceneViewportResolutionPreset",
+            kViewportResolutionPresets[static_cast<std::size_t>(selected_resolution_preset_index)].label,
+            ImGuiComboFlags_HeightLargest))
+    {
+        for (std::size_t index = 0; index < kViewportResolutionPresets.size(); ++index)
+        {
+            const bool is_selected = static_cast<int>(index) == selected_resolution_preset_index;
+            if (ImGui::Selectable(kViewportResolutionPresets[index].label, is_selected))
+            {
+                selected_resolution_preset_index = static_cast<int>(index);
+            }
+
+            if (is_selected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    {
+        ImGui::SetTooltip("%s", resolution_tooltip);
+    }
+
+    const float header_toolbar_x = (std::max)(
+        ImGui::GetCursorPosX() + header_spacing,
+        ImGui::GetWindowContentRegionMax().x - header_toolbar_width);
 
     ImGui::SameLine(header_toolbar_x);
     if (DrawViewportHeaderButton(build_button_label, build_button_tooltip))
@@ -2512,7 +2617,37 @@ void SceneViewportRenderer::RenderUi(
         return;
     }
 
-    ImGui::BeginChild("##SceneViewportCanvas", available, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const ViewportResolutionPreset& selected_preset =
+        kViewportResolutionPresets[static_cast<std::size_t>(selected_resolution_preset_index)];
+    ImVec2 canvas_size = available;
+    const float target_aspect_ratio = ComputeViewportAspectRatio(selected_preset);
+    if (target_aspect_ratio > 0.0f)
+    {
+        const float available_aspect_ratio = available.x / available.y;
+        if (available_aspect_ratio > target_aspect_ratio)
+        {
+            canvas_size.y = available.y;
+            canvas_size.x = available.y * target_aspect_ratio;
+        }
+        else
+        {
+            canvas_size.x = available.x;
+            canvas_size.y = available.x / target_aspect_ratio;
+        }
+    }
+
+    if (canvas_size.x <= 4.0f || canvas_size.y <= 4.0f)
+    {
+        return;
+    }
+
+    const ImVec2 host_cursor = ImGui::GetCursorPos();
+    const ImVec2 canvas_offset(
+        (available.x - canvas_size.x) * 0.5f,
+        (available.y - canvas_size.y) * 0.5f);
+    ImGui::SetCursorPos(ImVec2(host_cursor.x + canvas_offset.x, host_cursor.y + canvas_offset.y));
+
+    ImGui::BeginChild("##SceneViewportCanvas", canvas_size, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 min = ImGui::GetWindowPos();
     const ImVec2 max = ImVec2(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
     const float viewport_width = max.x - min.x;
@@ -2545,8 +2680,8 @@ void SceneViewportRenderer::RenderUi(
     draw_list->AddRectFilled(min, max, IM_COL32(24, 28, 32, 255), 8.0f);
 
     const ImVec2 framebuffer_scale = ImGui::GetIO().DisplayFramebufferScale;
-    const std::uint32_t target_width = static_cast<std::uint32_t>((std::max)(1.0f, std::round(available.x * framebuffer_scale.x)));
-    const std::uint32_t target_height = static_cast<std::uint32_t>((std::max)(1.0f, std::round(available.y * framebuffer_scale.y)));
+    const std::uint32_t target_width = static_cast<std::uint32_t>((std::max)(1.0f, std::round(viewport_width * framebuffer_scale.x)));
+    const std::uint32_t target_height = static_cast<std::uint32_t>((std::max)(1.0f, std::round(viewport_height * framebuffer_scale.y)));
 
     if (vulkan_context_ == nullptr || !ray_tracing_.EnsureViewportOutput(target_width, target_height))
     {
@@ -3081,8 +3216,15 @@ void SceneViewportRenderer::RenderUi(
     }
 
     std::string overlay_hit_object_name;
-    const float overlay_scale_x = viewport_width / static_cast<float>((std::max)(1u, target_width));
-    const float overlay_scale_y = viewport_height / static_cast<float>((std::max)(1u, target_height));
+    // Calculate scaling factors for overlay rendering.
+    // Overlays are stored in reference viewport coordinates and need to scale based on:
+    // 1. Reference resolution to normalized (0-1)
+    // 2. Normalized to current viewport pixels
+    const float reference_width = static_cast<float>((std::max)(1u, active_scene_metadata.reference_viewport_width));
+    const float reference_height = static_cast<float>((std::max)(1u, active_scene_metadata.reference_viewport_height));
+    const float overlay_scale_x = viewport_width / reference_width;
+    const float overlay_scale_y = viewport_height / reference_height;
+    const float overlay_size_scale = (std::min)(overlay_scale_x, overlay_scale_y);
     const ImVec2 overlay_mouse_pos = ImGui::GetMousePos();
     for (auto object_it = active_scene_metadata.objects.rbegin(); object_it != active_scene_metadata.objects.rend(); ++object_it)
     {
@@ -3106,8 +3248,16 @@ void SceneViewportRenderer::RenderUi(
                 scene_2d_renderer_.GetText2DRenderSize(state.project_root, attribute.text_2d, attr_w, attr_h);
             }
 
-            const ImVec2 rect_min(min.x + attr_x * overlay_scale_x, min.y + attr_y * overlay_scale_y);
-            const ImVec2 rect_max(rect_min.x + attr_w * overlay_scale_x, rect_min.y + attr_h * overlay_scale_y);
+            const float reference_range_x = (std::max)(reference_width - attr_w, 1.0f);
+            const float reference_range_y = (std::max)(reference_height - attr_h, 1.0f);
+            const float screen_w = attr_w * overlay_size_scale;
+            const float screen_h = attr_h * overlay_size_scale;
+            const float screen_range_x = (std::max)(viewport_width - screen_w, 0.0f);
+            const float screen_range_y = (std::max)(viewport_height - screen_h, 0.0f);
+            const ImVec2 rect_min(
+                min.x + (attr_x / reference_range_x) * screen_range_x,
+                min.y + (attr_y / reference_range_y) * screen_range_y);
+            const ImVec2 rect_max(rect_min.x + screen_w, rect_min.y + screen_h);
             if (overlay_mouse_pos.x >= rect_min.x && overlay_mouse_pos.x <= rect_max.x &&
                 overlay_mouse_pos.y >= rect_min.y && overlay_mouse_pos.y <= rect_max.y)
             {
@@ -3187,10 +3337,16 @@ void SceneViewportRenderer::RenderUi(
                 overlay_h = attr_h;
             }
 
-            const float scale_x = viewport_width / static_cast<float>((std::max)(1u, target_width));
-            const float scale_y = viewport_height / static_cast<float>((std::max)(1u, target_height));
-            const ImVec2 rect_min(min.x + overlay_x * scale_x, min.y + overlay_y * scale_y);
-            const ImVec2 rect_max(rect_min.x + overlay_w * scale_x, rect_min.y + overlay_h * scale_y);
+            const float reference_range_x = (std::max)(reference_width - overlay_w, 1.0f);
+            const float reference_range_y = (std::max)(reference_height - overlay_h, 1.0f);
+            const float screen_w = overlay_w * overlay_size_scale;
+            const float screen_h = overlay_h * overlay_size_scale;
+            const float screen_range_x = (std::max)(viewport_width - screen_w, 0.0f);
+            const float screen_range_y = (std::max)(viewport_height - screen_h, 0.0f);
+            const ImVec2 rect_min(
+                min.x + (overlay_x / reference_range_x) * screen_range_x,
+                min.y + (overlay_y / reference_range_y) * screen_range_y);
+            const ImVec2 rect_max(rect_min.x + screen_w, rect_min.y + screen_h);
             const ImVec2 resize_handle_min(rect_max.x - 8.0f, rect_max.y - 8.0f);
 
             draw_list->AddRect(rect_min, rect_max, IM_COL32(250, 196, 52, 255), 0.0f, 0, 2.0f);
@@ -3298,8 +3454,14 @@ void SceneViewportRenderer::RenderUi(
 
             if ((overlay_dragging || overlay_resizing) && allow_overlay_interaction)
             {
-                const float delta_x = io.MouseDelta.x / scale_x;
-                const float delta_y = io.MouseDelta.y / scale_y;
+                const float position_scale_x = screen_range_x / reference_range_x;
+                const float position_scale_y = screen_range_y / reference_range_y;
+                const float safe_position_scale_x = (std::max)(position_scale_x, 0.0001f);
+                const float safe_position_scale_y = (std::max)(position_scale_y, 0.0001f);
+                const float delta_x = io.MouseDelta.x / safe_position_scale_x;
+                const float delta_y = io.MouseDelta.y / safe_position_scale_y;
+                const float size_delta_x = io.MouseDelta.x / overlay_size_scale;
+                const float size_delta_y = io.MouseDelta.y / overlay_size_scale;
                 if (overlay_dragging)
                 {
                     overlay_x += delta_x;
@@ -3312,7 +3474,7 @@ void SceneViewportRenderer::RenderUi(
                         const float aspect = (std::max)(overlay_h, 1.0f) > 0.0f
                             ? (overlay_w / (std::max)(overlay_h, 1.0f))
                             : 1.0f;
-                        const float diagonal_delta = std::abs(delta_x) >= std::abs(delta_y) ? delta_x : delta_y;
+                        const float diagonal_delta = std::abs(size_delta_x) >= std::abs(size_delta_y) ? size_delta_x : size_delta_y;
                         const float next_w = (std::max)(1.0f, overlay_w + diagonal_delta);
                         const float safe_aspect = (std::max)(aspect, 0.0001f);
                         overlay_w = next_w;
@@ -3320,8 +3482,8 @@ void SceneViewportRenderer::RenderUi(
                     }
                     else
                     {
-                        overlay_w = (std::max)(1.0f, overlay_w + delta_x);
-                        overlay_h = (std::max)(1.0f, overlay_h + delta_y);
+                        overlay_w = (std::max)(1.0f, overlay_w + size_delta_x);
+                        overlay_h = (std::max)(1.0f, overlay_h + size_delta_y);
                     }
                 }
 

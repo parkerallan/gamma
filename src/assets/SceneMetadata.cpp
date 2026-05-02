@@ -250,6 +250,19 @@ bool ParseBool(std::string_view value, bool& result)
     return false;
 }
 
+bool ParseUnsignedInteger(std::string_view value, std::uint32_t& result)
+{
+    std::istringstream stream{std::string(value)};
+    std::uint32_t parsed = 0;
+    if (!(stream >> parsed))
+    {
+        return false;
+    }
+
+    result = parsed;
+    return true;
+}
+
 SceneObjectPhysicsShape ParseSceneObjectPhysicsShape(std::string_view value)
 {
     const std::string normalized = ToLowerCopy(TrimCopy(std::string(value)));
@@ -1221,6 +1234,18 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             metadata.scene_name = ExtractValue(trimmed, "Scene:");
             current_object = nullptr;
             current_attribute = nullptr;
+            continue;
+        }
+
+        if (StartsWith(trimmed, "ReferenceViewportWidth:"))
+        {
+            ParseUnsignedInteger(ExtractValue(trimmed, "ReferenceViewportWidth:"), metadata.reference_viewport_width);
+            continue;
+        }
+
+        if (StartsWith(trimmed, "ReferenceViewportHeight:"))
+        {
+            ParseUnsignedInteger(ExtractValue(trimmed, "ReferenceViewportHeight:"), metadata.reference_viewport_height);
             continue;
         }
 
@@ -2252,6 +2277,67 @@ bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees)
 {
     return SetSceneObjectAttributeScalar("AttributeSkyboxRotation", scene_path, object_name, attribute_index, rotation_degrees);
+}
+
+bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height)
+{
+    if (width == 0 || height == 0)
+    {
+        return false;
+    }
+
+    std::vector<std::string> lines = ReadSceneLines(scene_path);
+    if (lines.empty() && !std::filesystem::exists(scene_path))
+    {
+        return false;
+    }
+
+    const std::string width_line = "ReferenceViewportWidth: " + std::to_string(width);
+    const std::string height_line = "ReferenceViewportHeight: " + std::to_string(height);
+
+    bool width_found = false;
+    bool height_found = false;
+    std::size_t insert_index = lines.size();
+    for (std::size_t index = 0; index < lines.size(); ++index)
+    {
+        const std::string trimmed = TrimCopy(lines[index]);
+        if (insert_index == lines.size() && IsSceneObjectStart(trimmed))
+        {
+            insert_index = index;
+        }
+
+        if (StartsWith(trimmed, "ReferenceViewportWidth:"))
+        {
+            lines[index] = width_line;
+            width_found = true;
+            continue;
+        }
+
+        if (StartsWith(trimmed, "ReferenceViewportHeight:"))
+        {
+            lines[index] = height_line;
+            height_found = true;
+            continue;
+        }
+    }
+
+    if (insert_index == lines.size())
+    {
+        insert_index = lines.size();
+    }
+
+    if (!width_found)
+    {
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index), width_line);
+        ++insert_index;
+    }
+
+    if (!height_found)
+    {
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index), height_line);
+    }
+
+    return WriteSceneLines(scene_path, lines);
 }
 
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path)
