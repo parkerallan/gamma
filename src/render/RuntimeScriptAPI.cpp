@@ -475,6 +475,32 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return 1;
     };
 
+    const auto access_int = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
+    {
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
+
+            setter(*attribute, static_cast<int>(luaL_checkinteger(lua_state, 2)));
+            renderer->HandleScriptAttributeMutation(kind, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushinteger(lua_state, static_cast<lua_Integer>(getter(*attribute)));
+        return 1;
+    };
+
     const auto access_vec2 = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
     {
         if (is_setter)
@@ -749,6 +775,10 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_float(SceneObjectAttributeKind::Text2D,
             [](const SceneObjectAttribute& attribute) { return attribute.text_2d.alpha; },
             [](SceneObjectAttribute& attribute, float value) { attribute.text_2d.alpha = std::clamp(value, 0.0f, 1.0f); });
+    case ScriptAttributeAccessorId::Text2DPriority:
+        return access_int(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.priority; },
+            [](SceneObjectAttribute& attribute, int value) { attribute.text_2d.priority = value; });
     case ScriptAttributeAccessorId::Image2DImagePath:
         return access_string(SceneObjectAttributeKind::Image2D,
             [](const SceneObjectAttribute& attribute) { return attribute.image_2d.image_path; },
@@ -781,6 +811,10 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_float(SceneObjectAttributeKind::Image2D,
             [](const SceneObjectAttribute& attribute) { return attribute.image_2d.alpha; },
             [](SceneObjectAttribute& attribute, float value) { attribute.image_2d.alpha = std::clamp(value, 0.0f, 1.0f); });
+    case ScriptAttributeAccessorId::Image2DPriority:
+        return access_int(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.image_2d.priority; },
+            [](SceneObjectAttribute& attribute, int value) { attribute.image_2d.priority = value; });
     case ScriptAttributeAccessorId::SkyboxImagePath:
         return access_string(SceneObjectAttributeKind::Skybox,
             [](const SceneObjectAttribute& attribute) { return attribute.skybox.image_path; },

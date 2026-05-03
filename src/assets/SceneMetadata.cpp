@@ -214,6 +214,29 @@ std::string FormatColor3(const SceneColor3& value)
     return stream.str();
 }
 
+std::string FormatInteger(int value)
+{
+    return std::to_string(value);
+}
+
+bool ParseInteger(std::string_view value, int& result)
+{
+    const std::string trimmed = TrimCopy(std::string(value));
+    if (trimmed.empty())
+    {
+        return false;
+    }
+    try
+    {
+        result = std::stoi(trimmed);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 std::string FormatScalar(float value)
 {
     std::ostringstream stream;
@@ -507,6 +530,7 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeText2DColor:") ||
     StartsWith(line, "AttributeText2DAlpha:") ||
     StartsWith(line, "AttributeText2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeText2DPriority:") ||
     StartsWith(line, "AttributeImage2DImagePath:") ||
     StartsWith(line, "AttributeImage2DX:") ||
     StartsWith(line, "AttributeImage2DY:") ||
@@ -515,6 +539,7 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeImage2DTint:") ||
     StartsWith(line, "AttributeImage2DAlpha:") ||
     StartsWith(line, "AttributeImage2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeImage2DPriority:") ||
     StartsWith(line, "AttributeSkyboxImagePath:") ||
     StartsWith(line, "AttributeSkyboxRotation:");
 }
@@ -1523,6 +1548,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseBool(ExtractValue(trimmed, "AttributeText2DLockAspectRatio:"), current_attribute->text_2d.lock_aspect_ratio);
         }
+        else if (StartsWith(trimmed, "AttributeText2DPriority:") && current_attribute != nullptr)
+        {
+            ParseInteger(ExtractValue(trimmed, "AttributeText2DPriority:"), current_attribute->text_2d.priority);
+        }
         else if (StartsWith(trimmed, "AttributeImage2DImagePath:") && current_attribute != nullptr)
         {
             current_attribute->image_2d.image_path = ExtractValue(trimmed, "AttributeImage2DImagePath:");
@@ -1554,6 +1583,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeImage2DLockAspectRatio:") && current_attribute != nullptr)
         {
             ParseBool(ExtractValue(trimmed, "AttributeImage2DLockAspectRatio:"), current_attribute->image_2d.lock_aspect_ratio);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DPriority:") && current_attribute != nullptr)
+        {
+            ParseInteger(ExtractValue(trimmed, "AttributeImage2DPriority:"), current_attribute->image_2d.priority);
         }
         else if (StartsWith(trimmed, "AttributeSkyboxImagePath:") && current_attribute != nullptr)
         {
@@ -2220,6 +2253,37 @@ bool SetSceneObjectAttributeText2DAlpha(const std::filesystem::path& scene_path,
     return SetSceneObjectAttributeScalar("AttributeText2DAlpha", scene_path, object_name, attribute_index, alpha);
 }
 
+bool SetSceneObjectAttributeText2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string("AttributeText2DPriority") + ":";
+        const std::string new_line = std::string("AttributeText2DPriority") + ": " + FormatInteger(priority);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
 bool SetSceneObjectAttributeText2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
 {
     return SetSceneObjectAttributeBoolean("AttributeText2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
@@ -2262,6 +2326,37 @@ bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path,
 bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha)
 {
     return SetSceneObjectAttributeScalar("AttributeImage2DAlpha", scene_path, object_name, attribute_index, alpha);
+}
+
+bool SetSceneObjectAttributeImage2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string("AttributeImage2DPriority") + ":";
+        const std::string new_line = std::string("AttributeImage2DPriority") + ": " + FormatInteger(priority);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
 }
 
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)

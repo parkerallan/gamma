@@ -105,6 +105,7 @@ struct SceneObjectText2DAttributes
     SceneColor3 color = {1.0f, 1.0f, 1.0f};
     float alpha = 1.0f;
     bool lock_aspect_ratio = false;
+    int priority = 1;
 };
 
 struct SceneObjectImage2DAttributes
@@ -117,6 +118,7 @@ struct SceneObjectImage2DAttributes
     SceneColor3 tint = {1.0f, 1.0f, 1.0f};
     float alpha = 1.0f;
     bool lock_aspect_ratio = false;
+    int priority = 1;
 };
 
 struct SceneObjectSkyboxAttributes
@@ -254,12 +256,14 @@ bool SetSceneObjectAttributeText2DSize(const std::filesystem::path& scene_path, 
 bool SetSceneObjectAttributeText2DFontSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float font_size);
 bool SetSceneObjectAttributeText2DColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color);
 bool SetSceneObjectAttributeText2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
+bool SetSceneObjectAttributeText2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority);
 bool SetSceneObjectAttributeText2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
 bool SetSceneObjectAttributeImage2DImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
 bool SetSceneObjectAttributeImage2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y);
 bool SetSceneObjectAttributeImage2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height);
 bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint);
 bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
+bool SetSceneObjectAttributeImage2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority);
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
 bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees);

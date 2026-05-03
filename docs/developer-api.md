@@ -94,10 +94,10 @@ Methods: `Shape(name[, value])`, `Dynamic(name[, enabled])`, `LockRotationX(name
 Methods: `HalfExtent(name[, x, y, z])`
 
 #### `Engine.Text2DAttr`
-Methods: `FontPath(name[, path])`, `Text(name[, text])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `FontSize(name[, value])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`
+Methods: `FontPath(name[, path])`, `Text(name[, text])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `FontSize(name[, value])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
 
 #### `Engine.Image2DAttr`
-Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`
+Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
 
 #### `Engine.SkyboxAttr`
 Methods: `ImagePath(name[, path])`, `Rotation(name[, value])`
@@ -111,7 +111,15 @@ Engine.RigidbodyAttr.Shape("Crate", "Box")
 Engine.CameraAttr.Active("GameplayCamera", true)
 Engine.Text2DAttr.Text("DialogueBox", "Hello there")
 local message = Engine.Text2DAttr.Text("DialogueBox")
+Engine.Text2DAttr.Priority("DialogueBox", 10)  -- Higher priority = rendered behind
+Engine.Image2DAttr.Priority("UIBackground", 1)  -- Lower priority = rendered on top
 ```
+
+**Priority Notes:**
+- `Priority` is an integer that controls the stacking order of Text2D and Image2D overlays.
+- Lower priority values render on top (drawn last); higher values render behind (drawn first).
+- Default priority is `1` for all overlays.
+- Example: Priority 1 will render on top of Priority 10. If priorities are equal, overlays are rendered in creation order.
 
 ### `Time`
 

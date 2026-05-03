@@ -720,6 +720,15 @@ bool RenderAttributeSection(
                 }) || changed;
             }
 
+            int priority_text = attribute.text_2d.priority;
+            if (ImGui::DragInt("Priority", &priority_text))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "text 2D priority", [&]()
+                {
+                    return SetSceneObjectAttributeText2DPriority(state.selected_item_path, object.name, attribute_index, priority_text);
+                }) || changed;
+            }
+
             break;
         }
 
@@ -827,6 +836,15 @@ bool RenderAttributeSection(
                 changed = SaveSceneObjectAttributeEdit(state, object, "image 2D alpha", [&]()
                 {
                     return SetSceneObjectAttributeImage2DAlpha(state.selected_item_path, object.name, attribute_index, std::clamp(alpha, 0.0f, 1.0f));
+                }) || changed;
+            }
+
+            int priority_image = attribute.image_2d.priority;
+            if (ImGui::DragInt("Priority", &priority_image))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "image 2D priority", [&]()
+                {
+                    return SetSceneObjectAttributeImage2DPriority(state.selected_item_path, object.name, attribute_index, priority_image);
                 }) || changed;
             }
 

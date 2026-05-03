@@ -1721,19 +1721,55 @@ void Scene2DRenderer::CompositeOverlay(
     const float scale_y = static_cast<float>(height) / safe_ref_height;
     const float overlay_size_scale = (std::min)(scale_x, scale_y);
 
-    std::uint32_t quad_index = 0;
-    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    // Collect overlays (Text2D and Image2D) with their priorities, then sort by priority (lower priority first = render in front)
+    struct OverlayEntry
     {
-        for (const SceneObjectAttribute& attr : object.attributes)
+        std::size_t object_index;
+        std::size_t attr_index;
+        int priority;
+    };
+    
+    std::vector<OverlayEntry> overlay_entries;
+    for (std::size_t obj_idx = 0; obj_idx < scene_metadata.objects.size(); ++obj_idx)
+    {
+        const SceneObjectMetadata& object = scene_metadata.objects[obj_idx];
+        for (std::size_t attr_idx = 0; attr_idx < object.attributes.size(); ++attr_idx)
         {
-            if (quad_index >= max_quads_)
-            {
-                break;
-            }
-
+            const SceneObjectAttribute& attr = object.attributes[attr_idx];
             if (attr.kind == SceneObjectAttributeKind::Text2D)
             {
                 const SceneObjectText2DAttributes& t = attr.text_2d;
+                overlay_entries.push_back({obj_idx, attr_idx, t.priority});
+            }
+            else if (attr.kind == SceneObjectAttributeKind::Image2D)
+            {
+                const SceneObjectImage2DAttributes& img = attr.image_2d;
+                if (img.image_path.empty())
+                {
+                    continue;
+                }
+                overlay_entries.push_back({obj_idx, attr_idx, img.priority});
+            }
+        }
+    }
+
+    // Sort by priority descending (higher priority drawn first = behind, lower priority drawn last = on top)
+    std::stable_sort(overlay_entries.begin(), overlay_entries.end(),
+        [](const OverlayEntry& a, const OverlayEntry& b) { return a.priority > b.priority; });
+
+    std::uint32_t quad_index = 0;
+    for (const OverlayEntry& entry : overlay_entries)
+    {
+        if (quad_index >= max_quads_)
+        {
+            break;
+        }
+
+        const SceneObjectMetadata& object = scene_metadata.objects[entry.object_index];
+        const SceneObjectAttribute& attr = object.attributes[entry.attr_index];
+        if (attr.kind == SceneObjectAttributeKind::Text2D)
+        {
+            const SceneObjectText2DAttributes& t = attr.text_2d;
                 if (t.text.empty())
                 {
                     continue;
@@ -1840,12 +1876,6 @@ void Scene2DRenderer::CompositeOverlay(
                     img.tint[0], img.tint[1], img.tint[2], img.alpha);
                 ++quad_index;
             }
-        }
-
-        if (quad_index >= max_quads_)
-        {
-            break;
-        }
     }
 
     vkCmdEndRenderPass(cmd);
