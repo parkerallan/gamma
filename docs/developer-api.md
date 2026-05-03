@@ -66,6 +66,20 @@ Quick summary: Gets an object's scale. Returns `x, y, z` or `nil` if not found.
 local sx, sy, sz = Engine.GetObjectScale("Crate")
 ```
 
+#### `Engine.SetText2DText(name, text)`
+Quick summary: Overrides the first `Text2D` attribute on an object for the active Play session without rewriting the scene file.
+
+```lua
+Engine.SetText2DText("DialogueBox", "Hello there")
+```
+
+#### `Engine.GetText2DText(name)`
+Quick summary: Gets the current runtime text for the first `Text2D` attribute on an object. Returns the override if one exists, otherwise the scene-authored text, or `nil` if no `Text2D` attribute exists.
+
+```lua
+local message = Engine.GetText2DText("DialogueBox")
+```
+
 ### `Time`
 
 `Time` exposes fields, not functions.

@@ -308,6 +308,40 @@ int RuntimeRenderer::LuaGetObjectScale(lua_State* lua_state)
     return 3;
 }
 
+int RuntimeRenderer::LuaSetText2DText(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const char* text = luaL_optstring(lua_state, 2, "");
+    renderer->SetScriptText2DText(object_name, text);
+    return 0;
+}
+
+int RuntimeRenderer::LuaGetText2DText(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    std::string text;
+    if (!renderer->TryGetScriptText2DText(object_name, text))
+    {
+        lua_pushnil(lua_state);
+        return 1;
+    }
+
+    lua_pushstring(lua_state, text.c_str());
+    return 1;
+}
+
 int RuntimeRenderer::LuaInputIsKeyDown(lua_State* lua_state)
 {
     const char* key_name = luaL_checkstring(lua_state, 1);

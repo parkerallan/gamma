@@ -89,6 +89,59 @@ float DegreesToRadians(float degrees)
     return degrees * (kPi / 180.0f);
 }
 
+bool NearlyEqualFloat(float left, float right, float epsilon = 0.0001f)
+{
+    return std::abs(left - right) <= epsilon;
+}
+
+bool NearlyEqualVector3(const SceneVector3& left, const SceneVector3& right)
+{
+    return NearlyEqualFloat(left[0], right[0]) &&
+        NearlyEqualFloat(left[1], right[1]) &&
+        NearlyEqualFloat(left[2], right[2]);
+}
+
+bool PhysicsRelevantObjectDataMatches(const SceneObjectMetadata& left, const SceneObjectMetadata& right)
+{
+    return left.name == right.name &&
+        left.parent_name == right.parent_name &&
+        NearlyEqualVector3(left.position, right.position) &&
+        NearlyEqualVector3(left.rotation, right.rotation) &&
+        NearlyEqualVector3(left.scale, right.scale) &&
+        left.model_path == right.model_path &&
+        left.physics_shape == right.physics_shape &&
+        left.physics_is_dynamic == right.physics_is_dynamic &&
+        left.physics_is_trigger == right.physics_is_trigger &&
+        left.physics_lock_rotation_x == right.physics_lock_rotation_x &&
+        left.physics_lock_rotation_y == right.physics_lock_rotation_y &&
+        left.physics_lock_rotation_z == right.physics_lock_rotation_z &&
+        NearlyEqualFloat(left.physics_mass, right.physics_mass) &&
+        NearlyEqualFloat(left.physics_friction, right.physics_friction) &&
+        NearlyEqualFloat(left.physics_radius, right.physics_radius) &&
+        NearlyEqualFloat(left.physics_capsule_half_height, right.physics_capsule_half_height) &&
+        NearlyEqualVector3(left.physics_half_extent, right.physics_half_extent) &&
+        NearlyEqualFloat(left.physics_linear_damping, right.physics_linear_damping) &&
+        NearlyEqualFloat(left.physics_angular_damping, right.physics_angular_damping);
+}
+
+bool SceneChangeRequiresPhysicsReset(const SceneMetadata& previous, const SceneMetadata& current)
+{
+    if (previous.objects.size() != current.objects.size())
+    {
+        return true;
+    }
+
+    for (std::size_t index = 0; index < previous.objects.size(); ++index)
+    {
+        if (!PhysicsRelevantObjectDataMatches(previous.objects[index], current.objects[index]))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void SetIdentity(float* matrix)
 {
     for (int index = 0; index < 16; ++index)
@@ -1022,6 +1075,7 @@ void RuntimeRenderer::Shutdown()
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
+    script_text_2d_overrides_.clear();
     script_active_instance_key_.clear();
     script_active_object_name_.clear();
     script_prev_keys_down_.clear();
@@ -1079,6 +1133,7 @@ bool RuntimeRenderer::StartSession(
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
+    script_text_2d_overrides_.clear();
     script_active_instance_key_.clear();
     script_active_object_name_.clear();
     script_prev_keys_down_.clear();
@@ -1135,12 +1190,13 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
     if (!cache_valid)
     {
         const bool scene_changed = has_cached_scene_metadata_ && cached_scene_path_ == scene_path_;
+        const SceneMetadata previous_scene_metadata = cached_scene_metadata_;
         cached_scene_path_ = scene_path_;
         cached_scene_write_time_ = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
         cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
         has_cached_scene_metadata_ = true;
 
-        if (scene_changed)
+        if (scene_changed && SceneChangeRequiresPhysicsReset(previous_scene_metadata, cached_scene_metadata_))
         {
             physics_world_built_ = false;
             physics_object_transforms_.clear();
@@ -1387,6 +1443,14 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushlightuserdata(script_lua_state_, this);
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectScale, 1);
     lua_setfield(script_lua_state_, -2, "GetObjectScale");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetText2DText, 1);
+    lua_setfield(script_lua_state_, -2, "SetText2DText");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetText2DText, 1);
+    lua_setfield(script_lua_state_, -2, "GetText2DText");
 
     lua_setglobal(script_lua_state_, "Engine");
 
@@ -1881,6 +1945,7 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
         script_object_position_overrides_.clear();
         script_object_rotation_overrides_.clear();
         script_object_scale_overrides_.clear();
+        script_text_2d_overrides_.clear();
         script_active_instance_key_.clear();
         script_active_object_name_.clear();
         script_prev_keys_down_.clear();
@@ -2248,6 +2313,7 @@ void RuntimeRenderer::DestroyRuntimeObject(const std::string& object_name)
     script_object_position_overrides_.erase(object_name);
     script_object_rotation_overrides_.erase(object_name);
     script_object_scale_overrides_.erase(object_name);
+    script_text_2d_overrides_.erase(object_name);
 
     std::vector<std::string> instances_to_remove;
     for (const auto& [instance_key, instance] : script_instances_)
@@ -2398,6 +2464,77 @@ bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, Sc
         return true;
     }
     return false;
+}
+
+void RuntimeRenderer::SetScriptText2DText(const std::string& object_name, const std::string& text)
+{
+    if (object_name.empty())
+    {
+        return;
+    }
+
+    script_text_2d_overrides_[object_name] = text;
+}
+
+bool RuntimeRenderer::TryGetScriptText2DText(const std::string& object_name, std::string& text) const
+{
+    const auto override_it = script_text_2d_overrides_.find(object_name);
+    if (override_it != script_text_2d_overrides_.end())
+    {
+        text = override_it->second;
+        return true;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        for (const SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind != SceneObjectAttributeKind::Text2D)
+            {
+                continue;
+            }
+
+            text = attribute.text_2d.text;
+            return true;
+        }
+
+        return false;
+    }
+
+    return false;
+}
+
+void RuntimeRenderer::ApplyScriptText2DOverrides(SceneMetadata& scene_metadata) const
+{
+    if (script_text_2d_overrides_.empty())
+    {
+        return;
+    }
+
+    for (SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        const auto override_it = script_text_2d_overrides_.find(object.name);
+        if (override_it == script_text_2d_overrides_.end())
+        {
+            continue;
+        }
+
+        for (SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind != SceneObjectAttributeKind::Text2D)
+            {
+                continue;
+            }
+
+            attribute.text_2d.text = override_it->second;
+            break;
+        }
+    }
 }
 
 bool RuntimeRenderer::BuildQueuedScene(
@@ -2805,8 +2942,17 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         return false;
     }
 
+    const SceneMetadata* overlay_scene_metadata = &scene_metadata;
+    SceneMetadata overlay_scene_metadata_copy;
+    if (!script_text_2d_overrides_.empty())
+    {
+        overlay_scene_metadata_copy = scene_metadata;
+        ApplyScriptText2DOverrides(overlay_scene_metadata_copy);
+        overlay_scene_metadata = &overlay_scene_metadata_copy;
+    }
+
     scene_2d_renderer_.CompositeOverlay(
-        scene_metadata,
+        *overlay_scene_metadata,
         project_root_,
         ray_tracing_.GetOutputImage(),
         ray_tracing_.GetOutputImageView(),
