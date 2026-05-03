@@ -2,6 +2,11 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <string>
+
 extern "C"
 {
 #include <lua.h>
@@ -10,6 +15,76 @@ extern "C"
 
 namespace
 {
+RuntimeRenderer* GetRuntimeRenderer(lua_State* lua_state)
+{
+    return static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+}
+
+int GetAttributeAccessorId(lua_State* lua_state)
+{
+    return static_cast<int>(lua_tointeger(lua_state, lua_upvalueindex(2)));
+}
+
+std::string ToLowerAscii(std::string value)
+{
+    for (char& ch : value)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+const char* ToScriptPhysicsShapeName(SceneObjectPhysicsShape shape)
+{
+    switch (shape)
+    {
+    case SceneObjectPhysicsShape::None:
+        return "None";
+    case SceneObjectPhysicsShape::Box:
+        return "Box";
+    case SceneObjectPhysicsShape::Sphere:
+        return "Sphere";
+    case SceneObjectPhysicsShape::Capsule:
+        return "Capsule";
+    case SceneObjectPhysicsShape::Mesh:
+        return "Mesh";
+    default:
+        return "None";
+    }
+}
+
+bool TryParsePhysicsShape(std::string value, SceneObjectPhysicsShape& shape)
+{
+    value = ToLowerAscii(std::move(value));
+    if (value == "none")
+    {
+        shape = SceneObjectPhysicsShape::None;
+        return true;
+    }
+    if (value == "box")
+    {
+        shape = SceneObjectPhysicsShape::Box;
+        return true;
+    }
+    if (value == "sphere")
+    {
+        shape = SceneObjectPhysicsShape::Sphere;
+        return true;
+    }
+    if (value == "capsule")
+    {
+        shape = SceneObjectPhysicsShape::Capsule;
+        return true;
+    }
+    if (value == "mesh")
+    {
+        shape = SceneObjectPhysicsShape::Mesh;
+        return true;
+    }
+
+    return false;
+}
+
 int PushFilteredCollisionsToLua(
     lua_State* lua_state,
     const std::vector<PhysicsCollisionEvent>& collisions,
@@ -308,38 +383,415 @@ int RuntimeRenderer::LuaGetObjectScale(lua_State* lua_state)
     return 3;
 }
 
-int RuntimeRenderer::LuaSetText2DText(lua_State* lua_state)
+int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
 {
-    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    RuntimeRenderer* const renderer = GetRuntimeRenderer(lua_state);
     if (renderer == nullptr)
     {
         return luaL_error(lua_state, "Runtime renderer is unavailable");
     }
 
     const char* object_name = luaL_checkstring(lua_state, 1);
-    const char* text = luaL_optstring(lua_state, 2, "");
-    renderer->SetScriptText2DText(object_name, text);
-    return 0;
-}
+    const ScriptAttributeAccessorId accessor_id = static_cast<ScriptAttributeAccessorId>(GetAttributeAccessorId(lua_state));
+    const bool is_setter = lua_gettop(lua_state) >= 2;
 
-int RuntimeRenderer::LuaGetText2DText(lua_State* lua_state)
-{
-    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
-    if (renderer == nullptr)
+    const auto access_string = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
     {
-        return luaL_error(lua_state, "Runtime renderer is unavailable");
-    }
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
 
-    const char* object_name = luaL_checkstring(lua_state, 1);
-    std::string text;
-    if (!renderer->TryGetScriptText2DText(object_name, text))
+            const char* value = luaL_optstring(lua_state, 2, "");
+            setter(*attribute, value != nullptr ? value : "");
+            renderer->HandleScriptAttributeMutation(kind, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        const std::string value = getter(*attribute);
+        lua_pushstring(lua_state, value.c_str());
+        return 1;
+    };
+
+    const auto access_float = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
     {
-        lua_pushnil(lua_state);
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
+
+            setter(*attribute, static_cast<float>(luaL_checknumber(lua_state, 2)));
+            renderer->HandleScriptAttributeMutation(kind, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushnumber(lua_state, static_cast<lua_Number>(getter(*attribute)));
+        return 1;
+    };
+
+    const auto access_bool = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
+    {
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
+
+            setter(*attribute, lua_toboolean(lua_state, 2) != 0);
+            renderer->HandleScriptAttributeMutation(kind, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushboolean(lua_state, getter(*attribute) ? 1 : 0);
+        return 1;
+    };
+
+    const auto access_vec2 = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
+    {
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
+
+            setter(
+                *attribute,
+                static_cast<float>(luaL_checknumber(lua_state, 2)),
+                static_cast<float>(luaL_checknumber(lua_state, 3)));
+            renderer->HandleScriptAttributeMutation(kind, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        const std::array<float, 2> value = getter(*attribute);
+        lua_pushnumber(lua_state, static_cast<lua_Number>(value[0]));
+        lua_pushnumber(lua_state, static_cast<lua_Number>(value[1]));
+        return 2;
+    };
+
+    const auto access_vec3 = [&](SceneObjectAttributeKind kind, auto getter, auto setter) -> int
+    {
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
+
+            setter(
+                *attribute,
+                static_cast<float>(luaL_checknumber(lua_state, 2)),
+                static_cast<float>(luaL_checknumber(lua_state, 3)),
+                static_cast<float>(luaL_checknumber(lua_state, 4)));
+            renderer->HandleScriptAttributeMutation(kind, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, kind);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        const SceneVector3 value = getter(*attribute);
+        lua_pushnumber(lua_state, static_cast<lua_Number>(value[0]));
+        lua_pushnumber(lua_state, static_cast<lua_Number>(value[1]));
+        lua_pushnumber(lua_state, static_cast<lua_Number>(value[2]));
+        return 3;
+    };
+
+    switch (accessor_id)
+    {
+    case ScriptAttributeAccessorId::EnvironmentLightColor:
+        return access_vec3(SceneObjectAttributeKind::EnvironmentLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.environment_light.color; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.environment_light.color = {x, y, z}; });
+    case ScriptAttributeAccessorId::EnvironmentLightIntensity:
+        return access_float(SceneObjectAttributeKind::EnvironmentLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.environment_light.intensity; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.environment_light.intensity = value; });
+    case ScriptAttributeAccessorId::DirectionalLightColor:
+        return access_vec3(SceneObjectAttributeKind::DirectionalLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.directional_light.color; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.directional_light.color = {x, y, z}; });
+    case ScriptAttributeAccessorId::DirectionalLightIntensity:
+        return access_float(SceneObjectAttributeKind::DirectionalLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.directional_light.intensity; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.directional_light.intensity = value; });
+    case ScriptAttributeAccessorId::PointLightColor:
+        return access_vec3(SceneObjectAttributeKind::PointLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.point_light.color; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.point_light.color = {x, y, z}; });
+    case ScriptAttributeAccessorId::PointLightIntensity:
+        return access_float(SceneObjectAttributeKind::PointLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.point_light.intensity; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.point_light.intensity = value; });
+    case ScriptAttributeAccessorId::PointLightRange:
+        return access_float(SceneObjectAttributeKind::PointLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.point_light.range; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.point_light.range = (std::max)(0.01f, value); });
+    case ScriptAttributeAccessorId::PointLightRadius:
+        return access_float(SceneObjectAttributeKind::PointLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.point_light.source_radius; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.point_light.source_radius = (std::max)(0.01f, value); });
+    case ScriptAttributeAccessorId::PointLightHaloIntensity:
+        return access_float(SceneObjectAttributeKind::PointLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.point_light.halo_intensity; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.point_light.halo_intensity = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::PointLightHaloRadius:
+        return access_float(SceneObjectAttributeKind::PointLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.point_light.halo_radius; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.point_light.halo_radius = (std::max)(0.01f, value); });
+    case ScriptAttributeAccessorId::SpotLightColor:
+        return access_vec3(SceneObjectAttributeKind::SpotLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.spot_light.color; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.spot_light.color = {x, y, z}; });
+    case ScriptAttributeAccessorId::SpotLightIntensity:
+        return access_float(SceneObjectAttributeKind::SpotLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.spot_light.intensity; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.spot_light.intensity = value; });
+    case ScriptAttributeAccessorId::SpotLightRange:
+        return access_float(SceneObjectAttributeKind::SpotLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.spot_light.range; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.spot_light.range = (std::max)(0.01f, value); });
+    case ScriptAttributeAccessorId::SpotLightInnerCone:
+        return access_float(SceneObjectAttributeKind::SpotLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.spot_light.inner_cone_degrees; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.spot_light.inner_cone_degrees = std::clamp(value, 0.1f, 89.0f); });
+    case ScriptAttributeAccessorId::SpotLightOuterCone:
+        return access_float(SceneObjectAttributeKind::SpotLight,
+            [](const SceneObjectAttribute& attribute) { return attribute.spot_light.outer_cone_degrees; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.spot_light.outer_cone_degrees = std::clamp(value, 0.1f, 89.0f); });
+    case ScriptAttributeAccessorId::CameraFieldOfView:
+        return access_float(SceneObjectAttributeKind::Camera,
+            [](const SceneObjectAttribute& attribute) { return attribute.camera.field_of_view_degrees; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.camera.field_of_view_degrees = std::clamp(value, 1.0f, 179.0f); });
+    case ScriptAttributeAccessorId::CameraNearClip:
+        return access_float(SceneObjectAttributeKind::Camera,
+            [](const SceneObjectAttribute& attribute) { return attribute.camera.near_clip; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.camera.near_clip = (std::max)(0.001f, value); });
+    case ScriptAttributeAccessorId::CameraFarClip:
+        return access_float(SceneObjectAttributeKind::Camera,
+            [](const SceneObjectAttribute& attribute) { return attribute.camera.far_clip; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.camera.far_clip = (std::max)(0.1f, value); });
+    case ScriptAttributeAccessorId::CameraActive:
+        return access_bool(SceneObjectAttributeKind::Camera,
+            [](const SceneObjectAttribute& attribute) { return attribute.camera.active; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.camera.active = value; });
+    case ScriptAttributeAccessorId::RigidbodyShape:
+    {
+        if (is_setter)
+        {
+            SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Rigidbody);
+            if (attribute == nullptr)
+            {
+                return 0;
+            }
+
+            SceneObjectPhysicsShape shape = SceneObjectPhysicsShape::None;
+            if (!TryParsePhysicsShape(luaL_checkstring(lua_state, 2), shape))
+            {
+                return luaL_error(lua_state, "Unknown rigidbody shape. Expected None, Box, Sphere, Capsule, or Mesh");
+            }
+
+            attribute->rigidbody.shape = shape;
+            if (shape == SceneObjectPhysicsShape::Mesh)
+            {
+                attribute->rigidbody.is_dynamic = false;
+            }
+            renderer->HandleScriptAttributeMutation(SceneObjectAttributeKind::Rigidbody, accessor_id);
+            return 0;
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Rigidbody);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushstring(lua_state, ToScriptPhysicsShapeName(attribute->rigidbody.shape));
         return 1;
     }
-
-    lua_pushstring(lua_state, text.c_str());
-    return 1;
+    case ScriptAttributeAccessorId::RigidbodyDynamic:
+        return access_bool(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.is_dynamic; },
+            [](SceneObjectAttribute& attribute, bool value)
+            {
+                attribute.rigidbody.is_dynamic = attribute.rigidbody.shape == SceneObjectPhysicsShape::Mesh ? false : value;
+            });
+    case ScriptAttributeAccessorId::RigidbodyLockRotationX:
+        return access_bool(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.lock_rotation_x; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.rigidbody.lock_rotation_x = value; });
+    case ScriptAttributeAccessorId::RigidbodyLockRotationY:
+        return access_bool(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.lock_rotation_y; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.rigidbody.lock_rotation_y = value; });
+    case ScriptAttributeAccessorId::RigidbodyLockRotationZ:
+        return access_bool(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.lock_rotation_z; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.rigidbody.lock_rotation_z = value; });
+    case ScriptAttributeAccessorId::RigidbodyMass:
+        return access_float(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.mass; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.rigidbody.mass = (std::max)(0.001f, value); });
+    case ScriptAttributeAccessorId::RigidbodyFriction:
+        return access_float(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.friction; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.rigidbody.friction = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::RigidbodyRadius:
+        return access_float(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.radius; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.rigidbody.radius = (std::max)(0.01f, value); });
+    case ScriptAttributeAccessorId::RigidbodyCapsuleHalfHeight:
+        return access_float(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.capsule_half_height; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.rigidbody.capsule_half_height = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::RigidbodyHalfExtent:
+        return access_vec3(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.half_extent; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z)
+            {
+                attribute.rigidbody.half_extent = {(std::max)(0.01f, x), (std::max)(0.01f, y), (std::max)(0.01f, z)};
+            });
+    case ScriptAttributeAccessorId::RigidbodyLinearDamping:
+        return access_float(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.linear_damping; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.rigidbody.linear_damping = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::RigidbodyAngularDamping:
+        return access_float(SceneObjectAttributeKind::Rigidbody,
+            [](const SceneObjectAttribute& attribute) { return attribute.rigidbody.angular_damping; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.rigidbody.angular_damping = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::TriggerVolumeHalfExtent:
+        return access_vec3(SceneObjectAttributeKind::TriggerVolume,
+            [](const SceneObjectAttribute& attribute) { return attribute.trigger_box.half_extent; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z)
+            {
+                attribute.trigger_box.half_extent = {(std::max)(0.01f, x), (std::max)(0.01f, y), (std::max)(0.01f, z)};
+            });
+    case ScriptAttributeAccessorId::Text2DFontPath:
+        return access_string(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.font_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.text_2d.font_path = value; });
+    case ScriptAttributeAccessorId::Text2DText:
+        return access_string(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.text; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.text_2d.text = value; });
+    case ScriptAttributeAccessorId::Text2DPosition:
+        return access_vec2(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.text_2d.x, attribute.text_2d.y}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.text_2d.x = x;
+                attribute.text_2d.y = y;
+            });
+    case ScriptAttributeAccessorId::Text2DSize:
+        return access_vec2(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.text_2d.width, attribute.text_2d.height}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.text_2d.width = (std::max)(1.0f, x);
+                attribute.text_2d.height = (std::max)(1.0f, y);
+            });
+    case ScriptAttributeAccessorId::Text2DLockAspectRatio:
+        return access_bool(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.lock_aspect_ratio; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.text_2d.lock_aspect_ratio = value; });
+    case ScriptAttributeAccessorId::Text2DFontSize:
+        return access_float(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.font_size; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.text_2d.font_size = (std::max)(1.0f, value); });
+    case ScriptAttributeAccessorId::Text2DColor:
+        return access_vec3(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.color; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.text_2d.color = {x, y, z}; });
+    case ScriptAttributeAccessorId::Text2DAlpha:
+        return access_float(SceneObjectAttributeKind::Text2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.text_2d.alpha; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.text_2d.alpha = std::clamp(value, 0.0f, 1.0f); });
+    case ScriptAttributeAccessorId::Image2DImagePath:
+        return access_string(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.image_2d.image_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.image_2d.image_path = value; });
+    case ScriptAttributeAccessorId::Image2DPosition:
+        return access_vec2(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.image_2d.x, attribute.image_2d.y}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.image_2d.x = x;
+                attribute.image_2d.y = y;
+            });
+    case ScriptAttributeAccessorId::Image2DSize:
+        return access_vec2(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.image_2d.width, attribute.image_2d.height}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.image_2d.width = (std::max)(1.0f, x);
+                attribute.image_2d.height = (std::max)(1.0f, y);
+            });
+    case ScriptAttributeAccessorId::Image2DLockAspectRatio:
+        return access_bool(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.image_2d.lock_aspect_ratio; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.image_2d.lock_aspect_ratio = value; });
+    case ScriptAttributeAccessorId::Image2DTint:
+        return access_vec3(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.image_2d.tint; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.image_2d.tint = {x, y, z}; });
+    case ScriptAttributeAccessorId::Image2DAlpha:
+        return access_float(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.image_2d.alpha; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.image_2d.alpha = std::clamp(value, 0.0f, 1.0f); });
+    case ScriptAttributeAccessorId::SkyboxImagePath:
+        return access_string(SceneObjectAttributeKind::Skybox,
+            [](const SceneObjectAttribute& attribute) { return attribute.skybox.image_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.skybox.image_path = value; });
+    case ScriptAttributeAccessorId::SkyboxRotation:
+        return access_float(SceneObjectAttributeKind::Skybox,
+            [](const SceneObjectAttribute& attribute) { return attribute.skybox.rotation_degrees; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.skybox.rotation_degrees = value; });
+    default:
+        return luaL_error(lua_state, "Unknown attribute accessor");
+    }
 }
 
 int RuntimeRenderer::LuaInputIsKeyDown(lua_State* lua_state)

@@ -1075,7 +1075,6 @@ void RuntimeRenderer::Shutdown()
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
-    script_text_2d_overrides_.clear();
     script_active_instance_key_.clear();
     script_active_object_name_.clear();
     script_prev_keys_down_.clear();
@@ -1133,7 +1132,6 @@ bool RuntimeRenderer::StartSession(
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
-    script_text_2d_overrides_.clear();
     script_active_instance_key_.clear();
     script_active_object_name_.clear();
     script_prev_keys_down_.clear();
@@ -1444,13 +1442,84 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectScale, 1);
     lua_setfield(script_lua_state_, -2, "GetObjectScale");
 
-    lua_pushlightuserdata(script_lua_state_, this);
-    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetText2DText, 1);
-    lua_setfield(script_lua_state_, -2, "SetText2DText");
+    struct AttributeAccessorBinding
+    {
+        const char* table_name;
+        const char* method_name;
+        ScriptAttributeAccessorId accessor_id;
+    };
 
-    lua_pushlightuserdata(script_lua_state_, this);
-    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetText2DText, 1);
-    lua_setfield(script_lua_state_, -2, "GetText2DText");
+    const AttributeAccessorBinding attribute_bindings[] = {
+        {"EnvironmentLightAttr", "Color", ScriptAttributeAccessorId::EnvironmentLightColor},
+        {"EnvironmentLightAttr", "Intensity", ScriptAttributeAccessorId::EnvironmentLightIntensity},
+        {"DirectionalLightAttr", "Color", ScriptAttributeAccessorId::DirectionalLightColor},
+        {"DirectionalLightAttr", "Intensity", ScriptAttributeAccessorId::DirectionalLightIntensity},
+        {"PointLightAttr", "Color", ScriptAttributeAccessorId::PointLightColor},
+        {"PointLightAttr", "Intensity", ScriptAttributeAccessorId::PointLightIntensity},
+        {"PointLightAttr", "Range", ScriptAttributeAccessorId::PointLightRange},
+        {"PointLightAttr", "Radius", ScriptAttributeAccessorId::PointLightRadius},
+        {"PointLightAttr", "HaloIntensity", ScriptAttributeAccessorId::PointLightHaloIntensity},
+        {"PointLightAttr", "HaloRadius", ScriptAttributeAccessorId::PointLightHaloRadius},
+        {"SpotLightAttr", "Color", ScriptAttributeAccessorId::SpotLightColor},
+        {"SpotLightAttr", "Intensity", ScriptAttributeAccessorId::SpotLightIntensity},
+        {"SpotLightAttr", "Range", ScriptAttributeAccessorId::SpotLightRange},
+        {"SpotLightAttr", "InnerCone", ScriptAttributeAccessorId::SpotLightInnerCone},
+        {"SpotLightAttr", "OuterCone", ScriptAttributeAccessorId::SpotLightOuterCone},
+        {"CameraAttr", "FieldOfView", ScriptAttributeAccessorId::CameraFieldOfView},
+        {"CameraAttr", "NearClip", ScriptAttributeAccessorId::CameraNearClip},
+        {"CameraAttr", "FarClip", ScriptAttributeAccessorId::CameraFarClip},
+        {"CameraAttr", "Active", ScriptAttributeAccessorId::CameraActive},
+        {"RigidbodyAttr", "Shape", ScriptAttributeAccessorId::RigidbodyShape},
+        {"RigidbodyAttr", "Dynamic", ScriptAttributeAccessorId::RigidbodyDynamic},
+        {"RigidbodyAttr", "LockRotationX", ScriptAttributeAccessorId::RigidbodyLockRotationX},
+        {"RigidbodyAttr", "LockRotationY", ScriptAttributeAccessorId::RigidbodyLockRotationY},
+        {"RigidbodyAttr", "LockRotationZ", ScriptAttributeAccessorId::RigidbodyLockRotationZ},
+        {"RigidbodyAttr", "Mass", ScriptAttributeAccessorId::RigidbodyMass},
+        {"RigidbodyAttr", "Friction", ScriptAttributeAccessorId::RigidbodyFriction},
+        {"RigidbodyAttr", "Radius", ScriptAttributeAccessorId::RigidbodyRadius},
+        {"RigidbodyAttr", "CapsuleHalfHeight", ScriptAttributeAccessorId::RigidbodyCapsuleHalfHeight},
+        {"RigidbodyAttr", "HalfExtent", ScriptAttributeAccessorId::RigidbodyHalfExtent},
+        {"RigidbodyAttr", "LinearDamping", ScriptAttributeAccessorId::RigidbodyLinearDamping},
+        {"RigidbodyAttr", "AngularDamping", ScriptAttributeAccessorId::RigidbodyAngularDamping},
+        {"TriggerVolumeAttr", "HalfExtent", ScriptAttributeAccessorId::TriggerVolumeHalfExtent},
+        {"Text2DAttr", "FontPath", ScriptAttributeAccessorId::Text2DFontPath},
+        {"Text2DAttr", "Text", ScriptAttributeAccessorId::Text2DText},
+        {"Text2DAttr", "Position", ScriptAttributeAccessorId::Text2DPosition},
+        {"Text2DAttr", "Size", ScriptAttributeAccessorId::Text2DSize},
+        {"Text2DAttr", "LockAspectRatio", ScriptAttributeAccessorId::Text2DLockAspectRatio},
+        {"Text2DAttr", "FontSize", ScriptAttributeAccessorId::Text2DFontSize},
+        {"Text2DAttr", "Color", ScriptAttributeAccessorId::Text2DColor},
+        {"Text2DAttr", "Alpha", ScriptAttributeAccessorId::Text2DAlpha},
+        {"Image2DAttr", "ImagePath", ScriptAttributeAccessorId::Image2DImagePath},
+        {"Image2DAttr", "Position", ScriptAttributeAccessorId::Image2DPosition},
+        {"Image2DAttr", "Size", ScriptAttributeAccessorId::Image2DSize},
+        {"Image2DAttr", "LockAspectRatio", ScriptAttributeAccessorId::Image2DLockAspectRatio},
+        {"Image2DAttr", "Tint", ScriptAttributeAccessorId::Image2DTint},
+        {"Image2DAttr", "Alpha", ScriptAttributeAccessorId::Image2DAlpha},
+        {"SkyboxAttr", "ImagePath", ScriptAttributeAccessorId::SkyboxImagePath},
+        {"SkyboxAttr", "Rotation", ScriptAttributeAccessorId::SkyboxRotation},
+    };
+
+    const auto bind_attribute_accessor = [&](const char* table_name, const char* method_name, ScriptAttributeAccessorId accessor_id)
+    {
+        lua_getfield(script_lua_state_, -1, table_name);
+        if (lua_isnil(script_lua_state_, -1))
+        {
+            lua_pop(script_lua_state_, 1);
+            lua_newtable(script_lua_state_);
+        }
+
+        lua_pushlightuserdata(script_lua_state_, this);
+        lua_pushinteger(script_lua_state_, static_cast<lua_Integer>(accessor_id));
+        lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAttributeAccessor, 2);
+        lua_setfield(script_lua_state_, -2, method_name);
+        lua_setfield(script_lua_state_, -2, table_name);
+    };
+
+    for (const AttributeAccessorBinding& binding : attribute_bindings)
+    {
+        bind_attribute_accessor(binding.table_name, binding.method_name, binding.accessor_id);
+    }
 
     lua_setglobal(script_lua_state_, "Engine");
 
@@ -1945,7 +2014,6 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
         script_object_position_overrides_.clear();
         script_object_rotation_overrides_.clear();
         script_object_scale_overrides_.clear();
-        script_text_2d_overrides_.clear();
         script_active_instance_key_.clear();
         script_active_object_name_.clear();
         script_prev_keys_down_.clear();
@@ -2313,7 +2381,6 @@ void RuntimeRenderer::DestroyRuntimeObject(const std::string& object_name)
     script_object_position_overrides_.erase(object_name);
     script_object_rotation_overrides_.erase(object_name);
     script_object_scale_overrides_.erase(object_name);
-    script_text_2d_overrides_.erase(object_name);
 
     std::vector<std::string> instances_to_remove;
     for (const auto& [instance_key, instance] : script_instances_)
@@ -2466,23 +2533,53 @@ bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, Sc
     return false;
 }
 
-void RuntimeRenderer::SetScriptText2DText(const std::string& object_name, const std::string& text)
+SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
+    const std::string& object_name,
+    SceneObjectAttributeKind kind,
+    std::size_t occurrence_index)
 {
     if (object_name.empty())
     {
-        return;
+        return nullptr;
     }
 
-    script_text_2d_overrides_[object_name] = text;
+    for (SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        std::size_t current_occurrence = 0;
+        for (SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind != kind)
+            {
+                continue;
+            }
+
+            if (current_occurrence == occurrence_index)
+            {
+                return &attribute;
+            }
+
+            ++current_occurrence;
+        }
+
+        return nullptr;
+    }
+
+    return nullptr;
 }
 
-bool RuntimeRenderer::TryGetScriptText2DText(const std::string& object_name, std::string& text) const
+const SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
+    const std::string& object_name,
+    SceneObjectAttributeKind kind,
+    std::size_t occurrence_index) const
 {
-    const auto override_it = script_text_2d_overrides_.find(object_name);
-    if (override_it != script_text_2d_overrides_.end())
+    if (object_name.empty())
     {
-        text = override_it->second;
-        return true;
+        return nullptr;
     }
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
@@ -2492,48 +2589,59 @@ bool RuntimeRenderer::TryGetScriptText2DText(const std::string& object_name, std
             continue;
         }
 
+        std::size_t current_occurrence = 0;
         for (const SceneObjectAttribute& attribute : object.attributes)
         {
-            if (attribute.kind != SceneObjectAttributeKind::Text2D)
+            if (attribute.kind != kind)
             {
                 continue;
             }
 
-            text = attribute.text_2d.text;
-            return true;
+            if (current_occurrence == occurrence_index)
+            {
+                return &attribute;
+            }
+
+            ++current_occurrence;
         }
 
-        return false;
+        return nullptr;
     }
 
-    return false;
+    return nullptr;
 }
 
-void RuntimeRenderer::ApplyScriptText2DOverrides(SceneMetadata& scene_metadata) const
+void RuntimeRenderer::RefreshActiveScriptCameraSelection()
 {
-    if (script_text_2d_overrides_.empty())
+    const ActiveSceneCameraSelection new_camera = FindActiveSceneCamera(cached_scene_metadata_);
+    if (!new_camera.found)
     {
         return;
     }
 
-    for (SceneObjectMetadata& object : scene_metadata.objects)
+    active_camera_object_name_ = new_camera.object_name;
+    active_camera_attribute_index_ = new_camera.attribute_index;
+}
+
+void RuntimeRenderer::HandleScriptAttributeMutation(SceneObjectAttributeKind kind, ScriptAttributeAccessorId accessor_id)
+{
+    switch (kind)
     {
-        const auto override_it = script_text_2d_overrides_.find(object.name);
-        if (override_it == script_text_2d_overrides_.end())
-        {
-            continue;
-        }
+    case SceneObjectAttributeKind::Rigidbody:
+    case SceneObjectAttributeKind::TriggerVolume:
+        physics_world_built_ = false;
+        physics_object_transforms_.clear();
+        break;
 
-        for (SceneObjectAttribute& attribute : object.attributes)
+    case SceneObjectAttributeKind::Camera:
+        if (accessor_id == ScriptAttributeAccessorId::CameraActive)
         {
-            if (attribute.kind != SceneObjectAttributeKind::Text2D)
-            {
-                continue;
-            }
-
-            attribute.text_2d.text = override_it->second;
-            break;
+            RefreshActiveScriptCameraSelection();
         }
+        break;
+
+    default:
+        break;
     }
 }
 
@@ -2942,17 +3050,8 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         return false;
     }
 
-    const SceneMetadata* overlay_scene_metadata = &scene_metadata;
-    SceneMetadata overlay_scene_metadata_copy;
-    if (!script_text_2d_overrides_.empty())
-    {
-        overlay_scene_metadata_copy = scene_metadata;
-        ApplyScriptText2DOverrides(overlay_scene_metadata_copy);
-        overlay_scene_metadata = &overlay_scene_metadata_copy;
-    }
-
     scene_2d_renderer_.CompositeOverlay(
-        *overlay_scene_metadata,
+        scene_metadata,
         project_root_,
         ray_tracing_.GetOutputImage(),
         ray_tracing_.GetOutputImageView(),

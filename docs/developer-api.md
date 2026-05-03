@@ -66,18 +66,51 @@ Quick summary: Gets an object's scale. Returns `x, y, z` or `nil` if not found.
 local sx, sy, sz = Engine.GetObjectScale("Crate")
 ```
 
-#### `Engine.SetText2DText(name, text)`
-Quick summary: Overrides the first `Text2D` attribute on an object for the active Play session without rewriting the scene file.
+### `Engine` attribute tables
+
+Quick summary: Attribute tables expose the first matching attribute on an object. Calling a method with only `name` reads the value. Passing additional values writes the value for the active Play session without rewriting the scene file.
+
+#### `Engine.EnvironmentLightAttr`
+Methods: `Color(name[, r, g, b])`, `Intensity(name[, value])`
+
+#### `Engine.DirectionalLightAttr`
+Methods: `Color(name[, r, g, b])`, `Intensity(name[, value])`
+
+#### `Engine.PointLightAttr`
+Methods: `Color(name[, r, g, b])`, `Intensity(name[, value])`, `Range(name[, value])`, `Radius(name[, value])`, `HaloIntensity(name[, value])`, `HaloRadius(name[, value])`
+
+#### `Engine.SpotLightAttr`
+Methods: `Color(name[, r, g, b])`, `Intensity(name[, value])`, `Range(name[, value])`, `InnerCone(name[, value])`, `OuterCone(name[, value])`
+
+#### `Engine.CameraAttr`
+Methods: `FieldOfView(name[, value])`, `NearClip(name[, value])`, `FarClip(name[, value])`, `Active(name[, enabled])`
+
+#### `Engine.RigidbodyAttr`
+Methods: `Shape(name[, value])`, `Dynamic(name[, enabled])`, `LockRotationX(name[, enabled])`, `LockRotationY(name[, enabled])`, `LockRotationZ(name[, enabled])`, `Mass(name[, value])`, `Friction(name[, value])`, `Radius(name[, value])`, `CapsuleHalfHeight(name[, value])`, `HalfExtent(name[, x, y, z])`, `LinearDamping(name[, value])`, `AngularDamping(name[, value])`
+
+`Shape` uses the strings `"None"`, `"Box"`, `"Sphere"`, `"Capsule"`, and `"Mesh"`.
+
+#### `Engine.TriggerVolumeAttr`
+Methods: `HalfExtent(name[, x, y, z])`
+
+#### `Engine.Text2DAttr`
+Methods: `FontPath(name[, path])`, `Text(name[, text])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `FontSize(name[, value])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`
+
+#### `Engine.Image2DAttr`
+Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`
+
+#### `Engine.SkyboxAttr`
+Methods: `ImagePath(name[, path])`, `Rotation(name[, value])`
+
+Example:
 
 ```lua
-Engine.SetText2DText("DialogueBox", "Hello there")
-```
-
-#### `Engine.GetText2DText(name)`
-Quick summary: Gets the current runtime text for the first `Text2D` attribute on an object. Returns the override if one exists, otherwise the scene-authored text, or `nil` if no `Text2D` attribute exists.
-
-```lua
-local message = Engine.GetText2DText("DialogueBox")
+local r, g, b = Engine.PointLightAttr.Color("Lamp")
+Engine.PointLightAttr.Color("Lamp", 1.0, 0.8, 0.6)
+Engine.RigidbodyAttr.Shape("Crate", "Box")
+Engine.CameraAttr.Active("GameplayCamera", true)
+Engine.Text2DAttr.Text("DialogueBox", "Hello there")
+local message = Engine.Text2DAttr.Text("DialogueBox")
 ```
 
 ### `Time`

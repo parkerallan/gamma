@@ -168,9 +168,61 @@ private:
     bool TryGetScriptObjectRotation(const std::string& object_name, SceneVector3& rotation) const;
     void SetScriptObjectScale(const std::string& object_name, const SceneVector3& scale);
     bool TryGetScriptObjectScale(const std::string& object_name, SceneVector3& scale) const;
-    void SetScriptText2DText(const std::string& object_name, const std::string& text);
-    bool TryGetScriptText2DText(const std::string& object_name, std::string& text) const;
-    void ApplyScriptText2DOverrides(SceneMetadata& scene_metadata) const;
+    SceneObjectAttribute* FindScriptAttribute(const std::string& object_name, SceneObjectAttributeKind kind, std::size_t occurrence_index = 0);
+    const SceneObjectAttribute* FindScriptAttribute(const std::string& object_name, SceneObjectAttributeKind kind, std::size_t occurrence_index = 0) const;
+    enum class ScriptAttributeAccessorId
+    {
+        EnvironmentLightColor = 1,
+        EnvironmentLightIntensity,
+        DirectionalLightColor,
+        DirectionalLightIntensity,
+        PointLightColor,
+        PointLightIntensity,
+        PointLightRange,
+        PointLightRadius,
+        PointLightHaloIntensity,
+        PointLightHaloRadius,
+        SpotLightColor,
+        SpotLightIntensity,
+        SpotLightRange,
+        SpotLightInnerCone,
+        SpotLightOuterCone,
+        CameraFieldOfView,
+        CameraNearClip,
+        CameraFarClip,
+        CameraActive,
+        RigidbodyShape,
+        RigidbodyDynamic,
+        RigidbodyLockRotationX,
+        RigidbodyLockRotationY,
+        RigidbodyLockRotationZ,
+        RigidbodyMass,
+        RigidbodyFriction,
+        RigidbodyRadius,
+        RigidbodyCapsuleHalfHeight,
+        RigidbodyHalfExtent,
+        RigidbodyLinearDamping,
+        RigidbodyAngularDamping,
+        TriggerVolumeHalfExtent,
+        Text2DFontPath,
+        Text2DText,
+        Text2DPosition,
+        Text2DSize,
+        Text2DLockAspectRatio,
+        Text2DFontSize,
+        Text2DColor,
+        Text2DAlpha,
+        Image2DImagePath,
+        Image2DPosition,
+        Image2DSize,
+        Image2DLockAspectRatio,
+        Image2DTint,
+        Image2DAlpha,
+        SkyboxImagePath,
+        SkyboxRotation,
+    };
+    void RefreshActiveScriptCameraSelection();
+    void HandleScriptAttributeMutation(SceneObjectAttributeKind kind, ScriptAttributeAccessorId accessor_id);
     static int LuaLog(lua_State* lua_state);
     static int LuaSetObjectPosition(lua_State* lua_state);
     static int LuaGetObjectPosition(lua_State* lua_state);
@@ -178,8 +230,7 @@ private:
     static int LuaGetObjectRotation(lua_State* lua_state);
     static int LuaSetObjectScale(lua_State* lua_state);
     static int LuaGetObjectScale(lua_State* lua_state);
-    static int LuaSetText2DText(lua_State* lua_state);
-    static int LuaGetText2DText(lua_State* lua_state);
+    static int LuaAttributeAccessor(lua_State* lua_state);
     static int LuaInputIsKeyDown(lua_State* lua_state);
     static int LuaInputWasKeyPressed(lua_State* lua_state);
     static int LuaInputMousePosition(lua_State* lua_state);
@@ -245,7 +296,6 @@ private:
     std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_rotation_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_scale_overrides_;
-    std::unordered_map<std::string, std::string> script_text_2d_overrides_;
     std::string script_active_instance_key_;
     std::string script_active_object_name_;
     std::vector<bool> script_prev_keys_down_;
