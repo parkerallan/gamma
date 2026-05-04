@@ -803,6 +803,8 @@ bool EngineApplication::StartRuntimeSession()
     state_.is_playing = true;
     state_.playing_scene_path = state_.active_scene_path;
     state_.last_play_error.clear();
+    focus_performance_panel_next_frame_ = true;
+    focus_log_panel_next_frame_ = false;
     state_.AddLog("Runtime window opened for Play");
     return true;
 }
@@ -824,6 +826,8 @@ void EngineApplication::StopRuntimeSession()
 
     state_.is_playing = false;
     state_.playing_scene_path.clear();
+    focus_log_panel_next_frame_ = true;
+    focus_performance_panel_next_frame_ = false;
 }
 
 void EngineApplication::RenderRuntimeWindow()
@@ -904,7 +908,23 @@ void EngineApplication::RenderUI()
     workspace_panel_.Render(state_);
     settings_panel_.Render(state_);
     info_panel_.Render(state_, &vulkan_context_);
+
     log_panel_.Render(state_);
+
+    performance_panel_.Render(state_, runtime_renderer_);
+
+    if (focus_log_panel_next_frame_ && state_.show_log_panel)
+    {
+        ImGui::SetWindowFocus("Log");
+    }
+
+    if (focus_performance_panel_next_frame_ && state_.show_performance_panel)
+    {
+        ImGui::SetWindowFocus("Performance");
+    }
+
+    focus_log_panel_next_frame_ = false;
+    focus_performance_panel_next_frame_ = false;
 }
 
 void EngineApplication::RenderMainMenuBar()
@@ -1064,6 +1084,7 @@ void EngineApplication::RenderMainMenuBar()
         ImGui::MenuItem("Settings", nullptr, &state_.show_settings_panel);
         ImGui::MenuItem("Info", nullptr, &state_.show_info_panel);
         ImGui::MenuItem("Log", nullptr, &state_.show_log_panel);
+        ImGui::MenuItem("Performance", nullptr, &state_.show_performance_panel);
         ImGui::EndMenu();
     }
 
@@ -1182,6 +1203,7 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
     ImGui::DockBuilderDockWindow("Workspace", center_id);
     ImGui::DockBuilderDockWindow("Settings", center_id);
     ImGui::DockBuilderDockWindow("Info", right_id);
+    ImGui::DockBuilderDockWindow("Performance", bottom_id);
     ImGui::DockBuilderDockWindow("Log", bottom_id);
     ImGui::DockBuilderFinish(dockspace_id);
 

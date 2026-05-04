@@ -5,6 +5,7 @@
 #include "panels/FilesPanel.h"
 #include "panels/InfoPanel.h"
 #include "panels/LogPanel.h"
+#include "panels/PerformancePanel.h"
 #include "panels/SettingsPanel.h"
 #include "panels/VersionControlPanel.h"
 #include "panels/WorkspacePanel.h"
@@ -34,6 +35,8 @@ private:
     RuntimeRenderer runtime_renderer_{};
     float display_scale_ = 1.0f;
     bool running_ = false;
+    bool focus_log_panel_next_frame_ = true;
+    bool focus_performance_panel_next_frame_ = false;
 
     EngineState state_;
     FilesPanel files_panel_;
@@ -42,6 +45,7 @@ private:
     SettingsPanel settings_panel_;
     InfoPanel info_panel_;
     LogPanel log_panel_;
+    PerformancePanel performance_panel_;
 
     // Background game build
     std::thread build_thread_;

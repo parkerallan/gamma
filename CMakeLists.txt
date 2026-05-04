@@ -416,6 +416,7 @@ add_executable(engine
     src/panels/FilesPanel.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
+    src/panels/PerformancePanel.cpp
     src/panels/VersionControlPanel.cpp
     src/render/Lighting.cpp
     src/render/Raytracing.cpp

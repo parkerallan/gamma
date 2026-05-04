@@ -22,6 +22,20 @@ struct lua_State;
 class RuntimeRenderer
 {
 public:
+    struct RuntimePerformanceStats
+    {
+        bool valid = false;
+        float frame_time_ms = 0.0f;
+        float fps = 0.0f;
+        float physics_time_ms = 0.0f;
+        float scripts_time_ms = 0.0f;
+        float render_time_ms = 0.0f;
+        float overlay_2d_time_ms = 0.0f;
+        float animation_time_ms = 0.0f;
+        float audio_time_ms = 0.0f;
+        float video_time_ms = 0.0f;
+    };
+
     bool Initialize(VulkanContext* context);
     void Shutdown();
     bool StartSession(
@@ -35,6 +49,7 @@ public:
     VkImageLayout GetOutputLayout() const { return ray_tracing_.GetOutputLayout(); }
     std::uint32_t GetOutputWidth() const { return ray_tracing_.GetOutputWidth(); }
     std::uint32_t GetOutputHeight() const { return ray_tracing_.GetOutputHeight(); }
+    const RuntimePerformanceStats& GetPerformanceStats() const { return performance_stats_; }
 
     struct CachedModelAssetEntry
     {
@@ -306,4 +321,5 @@ private:
     std::uint64_t script_session_start_ms_ = 0;
     std::vector<QueuedSceneObject> queued_objects_;
     std::string pending_scene_load_path_;
+    RuntimePerformanceStats performance_stats_{};
 };

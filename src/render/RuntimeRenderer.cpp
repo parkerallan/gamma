@@ -23,6 +23,23 @@ namespace
 {
 constexpr float kPi = 3.1415926535f;
 
+float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
+{
+    if (end_ticks <= start_ticks)
+    {
+        return 0.0f;
+    }
+
+    const std::uint64_t frequency = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+    if (frequency == 0)
+    {
+        return 0.0f;
+    }
+
+    const std::uint64_t delta_ticks = end_ticks - start_ticks;
+    return static_cast<float>(static_cast<double>(delta_ticks) * 1000.0 / static_cast<double>(frequency));
+}
+
 struct Vec3
 {
     float x = 0.0f;
@@ -1088,6 +1105,7 @@ void RuntimeRenderer::Shutdown()
     scene_path_.clear();
     active_camera_object_name_.clear();
     active_camera_attribute_index_ = 0;
+    performance_stats_ = RuntimePerformanceStats{};
     vulkan_context_ = nullptr;
 }
 
@@ -1142,6 +1160,7 @@ bool RuntimeRenderer::StartSession(
     script_last_tick_ms_ = now_ms;
     script_session_start_ms_ = now_ms;
     physics_world_built_ = false;
+    performance_stats_ = RuntimePerformanceStats{};
     return true;
 }
 
@@ -2928,6 +2947,9 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
 
 bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t target_height, std::string* error_message)
 {
+    performance_stats_ = RuntimePerformanceStats{};
+    const std::uint64_t frame_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+
     if (vulkan_context_ == nullptr || scene_path_.empty())
     {
         if (error_message != nullptr)
@@ -3013,6 +3035,7 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     // Step physics and push simulated positions into the position overrides.
     if (physics_world_.IsInitialized())
     {
+        const std::uint64_t physics_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
         const float phys_dt = (script_last_tick_ms_ != 0 && now_ms >= script_last_tick_ms_)
             ? static_cast<float>(now_ms - script_last_tick_ms_) / 1000.0f
@@ -3025,16 +3048,24 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
             // Physics is authoritative for dynamic body positions.
             SetScriptObjectPosition(name, pos);
         }
+        performance_stats_.physics_time_ms = TicksToMilliseconds(
+            physics_start_ticks,
+            static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
     }
 
+    const std::uint64_t scripts_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     if (!UpdateScriptsForFrame(error_message))
     {
         return false;
     }
+    performance_stats_.scripts_time_ms = TicksToMilliseconds(
+        scripts_start_ticks,
+        static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
 
     ray_tracing_.SetSkyboxTexture(skybox_renderer_.ResolveSkyboxView(scene_metadata, project_root_));
     ray_tracing_.SetSkyboxRotation(skybox_renderer_.ResolveSkyboxRotationDegrees(scene_metadata));
 
+    const std::uint64_t render_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     if (!ray_tracing_.RenderFrame(
             lighting,
             view_inverse,
@@ -3051,7 +3082,11 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         }
         return false;
     }
+    performance_stats_.render_time_ms = TicksToMilliseconds(
+        render_start_ticks,
+        static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
 
+    const std::uint64_t overlay_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     scene_2d_renderer_.CompositeOverlay(
         scene_metadata,
         project_root_,
@@ -3059,6 +3094,17 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         ray_tracing_.GetOutputImageView(),
         ray_tracing_.GetOutputWidth(),
         ray_tracing_.GetOutputHeight());
+
+    performance_stats_.overlay_2d_time_ms = TicksToMilliseconds(
+        overlay_start_ticks,
+        static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+    performance_stats_.frame_time_ms = TicksToMilliseconds(
+        frame_start_ticks,
+        static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+    performance_stats_.fps = performance_stats_.frame_time_ms > 0.0001f
+        ? 1000.0f / performance_stats_.frame_time_ms
+        : 0.0f;
+    performance_stats_.valid = true;
 
     return true;
 }
