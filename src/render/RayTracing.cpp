@@ -1605,13 +1605,13 @@ bool RayTracing::EnsurePipelineResources()
 
     if (pipeline_ == VK_NULL_HANDLE)
     {
-        VkShaderModule raygen_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt.rgen.spv"));
-        VkShaderModule miss_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt.rmiss.spv"));
-        VkShaderModule shadow_miss_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt_shadow.rmiss.spv"));
-        VkShaderModule closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt.rchit.spv"));
-        VkShaderModule shadow_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt_shadow.rchit.spv"));
-        VkShaderModule primary_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt_primary.rahit.spv"));
-        VkShaderModule shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("scene_viewport_rt_shadow.rahit.spv"));
+        VkShaderModule raygen_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt.rgen.spv"));
+        VkShaderModule miss_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt.rmiss.spv"));
+        VkShaderModule shadow_miss_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_shadow.rmiss.spv"));
+        VkShaderModule closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt.rchit.spv"));
+        VkShaderModule shadow_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_shadow.rchit.spv"));
+        VkShaderModule primary_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_primary.rahit.spv"));
+        VkShaderModule shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_shadow.rahit.spv"));
         if (raygen_shader == VK_NULL_HANDLE ||
             miss_shader == VK_NULL_HANDLE ||
             shadow_miss_shader == VK_NULL_HANDLE ||
