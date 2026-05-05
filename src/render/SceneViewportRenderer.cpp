@@ -2227,6 +2227,17 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
         ReleaseTexture(material_textures.normal);
         ReleaseTexture(material_textures.occlusion);
         ReleaseTexture(material_textures.emissive);
+        ReleaseTexture(material_textures.transmission);
+        ReleaseTexture(material_textures.specular);
+        ReleaseTexture(material_textures.specular_color);
+        ReleaseTexture(material_textures.sheen_color);
+        ReleaseTexture(material_textures.sheen_roughness);
+        ReleaseTexture(material_textures.iridescence);
+        ReleaseTexture(material_textures.iridescence_thickness);
+        ReleaseTexture(material_textures.volume_thickness);
+        ReleaseTexture(material_textures.clearcoat);
+        ReleaseTexture(material_textures.clearcoat_roughness);
+        ReleaseTexture(material_textures.clearcoat_normal);
     }
 
     entry.vertex_count = 0;
@@ -2286,10 +2297,26 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         const ModelMaterialAsset& material = resolved_model.asset->materials[material_index];
         cache_entry.materials[material_index].base_color = material.base_color;
         cache_entry.materials[material_index].emissive_color = material.emissive_color;
+        cache_entry.materials[material_index].attenuation_color = material.attenuation_color;
+        cache_entry.materials[material_index].specular_color = material.specular_color;
+        cache_entry.materials[material_index].sheen_color = material.sheen_color;
         cache_entry.materials[material_index].metallic_factor = material.metallic_factor;
         cache_entry.materials[material_index].roughness_factor = material.roughness_factor;
         cache_entry.materials[material_index].normal_scale = material.normal_scale;
         cache_entry.materials[material_index].occlusion_strength = material.occlusion_strength;
+        cache_entry.materials[material_index].specular_factor = material.specular_factor;
+        cache_entry.materials[material_index].sheen_roughness_factor = material.sheen_roughness_factor;
+        cache_entry.materials[material_index].iridescence_factor = material.iridescence_factor;
+        cache_entry.materials[material_index].iridescence_ior = material.iridescence_ior;
+        cache_entry.materials[material_index].iridescence_thickness_minimum = material.iridescence_thickness_minimum;
+        cache_entry.materials[material_index].iridescence_thickness_maximum = material.iridescence_thickness_maximum;
+        cache_entry.materials[material_index].index_of_refraction = material.index_of_refraction;
+        cache_entry.materials[material_index].transmission_factor = material.transmission_factor;
+        cache_entry.materials[material_index].volume_thickness_factor = material.volume_thickness_factor;
+        cache_entry.materials[material_index].attenuation_distance = material.attenuation_distance;
+        cache_entry.materials[material_index].clearcoat_factor = material.clearcoat_factor;
+        cache_entry.materials[material_index].clearcoat_roughness_factor = material.clearcoat_roughness_factor;
+        cache_entry.materials[material_index].clearcoat_normal_scale = material.clearcoat_normal_scale;
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
         if (material.base_color_texture.valid)
         {
@@ -2331,12 +2358,111 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
                 material.emissive_texture,
                 cache_entry.material_textures[material_index].emissive);
         }
+        if (material.transmission_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.transmission_texture,
+                cache_entry.material_textures[material_index].transmission);
+        }
+        if (material.specular_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.specular_texture,
+                cache_entry.material_textures[material_index].specular);
+        }
+        if (material.specular_color_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.specular_color_texture,
+                cache_entry.material_textures[material_index].specular_color);
+        }
+        if (material.sheen_color_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.sheen_color_texture,
+                cache_entry.material_textures[material_index].sheen_color);
+        }
+        if (material.sheen_roughness_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.sheen_roughness_texture,
+                cache_entry.material_textures[material_index].sheen_roughness);
+        }
+        if (material.iridescence_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.iridescence_texture,
+                cache_entry.material_textures[material_index].iridescence);
+        }
+        if (material.iridescence_thickness_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.iridescence_thickness_texture,
+                cache_entry.material_textures[material_index].iridescence_thickness);
+        }
+        if (material.volume_thickness_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.volume_thickness_texture,
+                cache_entry.material_textures[material_index].volume_thickness);
+        }
+        if (material.clearcoat_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.clearcoat_texture,
+                cache_entry.material_textures[material_index].clearcoat);
+        }
+        if (material.clearcoat_roughness_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.clearcoat_roughness_texture,
+                cache_entry.material_textures[material_index].clearcoat_roughness);
+        }
+        if (material.clearcoat_normal_texture.valid)
+        {
+            CreateTextureFromAsset(
+                *vulkan_context_,
+                ray_tracing_.GetCommandPool(),
+                material.clearcoat_normal_texture,
+                cache_entry.material_textures[material_index].clearcoat_normal);
+        }
 
         cache_entry.materials[material_index].base_color_view = cache_entry.material_textures[material_index].base_color.view;
         cache_entry.materials[material_index].metallic_roughness_view = cache_entry.material_textures[material_index].metallic_roughness.view;
         cache_entry.materials[material_index].normal_view = cache_entry.material_textures[material_index].normal.view;
         cache_entry.materials[material_index].occlusion_view = cache_entry.material_textures[material_index].occlusion.view;
         cache_entry.materials[material_index].emissive_view = cache_entry.material_textures[material_index].emissive.view;
+        cache_entry.materials[material_index].transmission_view = cache_entry.material_textures[material_index].transmission.view;
+        cache_entry.materials[material_index].specular_view = cache_entry.material_textures[material_index].specular.view;
+        cache_entry.materials[material_index].specular_color_view = cache_entry.material_textures[material_index].specular_color.view;
+        cache_entry.materials[material_index].sheen_color_view = cache_entry.material_textures[material_index].sheen_color.view;
+        cache_entry.materials[material_index].sheen_roughness_view = cache_entry.material_textures[material_index].sheen_roughness.view;
+        cache_entry.materials[material_index].iridescence_view = cache_entry.material_textures[material_index].iridescence.view;
+        cache_entry.materials[material_index].iridescence_thickness_view = cache_entry.material_textures[material_index].iridescence_thickness.view;
+        cache_entry.materials[material_index].volume_thickness_view = cache_entry.material_textures[material_index].volume_thickness.view;
+        cache_entry.materials[material_index].clearcoat_view = cache_entry.material_textures[material_index].clearcoat.view;
+        cache_entry.materials[material_index].clearcoat_roughness_view = cache_entry.material_textures[material_index].clearcoat_roughness.view;
+        cache_entry.materials[material_index].clearcoat_normal_view = cache_entry.material_textures[material_index].clearcoat_normal.view;
     }
 
     for (const ModelMeshAsset& mesh : resolved_model.asset->meshes)

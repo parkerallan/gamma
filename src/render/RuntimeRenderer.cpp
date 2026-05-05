@@ -811,6 +811,28 @@ RuntimeRenderer::GpuTexture* SelectTextureSlot(RuntimeRenderer::GpuMaterialTextu
         return &material_textures.occlusion;
     case 4:
         return &material_textures.emissive;
+    case 5:
+        return &material_textures.transmission;
+    case 6:
+        return &material_textures.specular;
+    case 7:
+        return &material_textures.specular_color;
+    case 8:
+        return &material_textures.sheen_color;
+    case 9:
+        return &material_textures.sheen_roughness;
+    case 10:
+        return &material_textures.iridescence;
+    case 11:
+        return &material_textures.iridescence_thickness;
+    case 12:
+        return &material_textures.volume_thickness;
+    case 13:
+        return &material_textures.clearcoat;
+    case 14:
+        return &material_textures.clearcoat_roughness;
+    case 15:
+        return &material_textures.clearcoat_normal;
     default:
         return nullptr;
     }
@@ -1065,6 +1087,17 @@ void RuntimeRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
         ReleaseTexture(textures.normal);
         ReleaseTexture(textures.occlusion);
         ReleaseTexture(textures.emissive);
+        ReleaseTexture(textures.transmission);
+        ReleaseTexture(textures.specular);
+        ReleaseTexture(textures.specular_color);
+        ReleaseTexture(textures.sheen_color);
+        ReleaseTexture(textures.sheen_roughness);
+        ReleaseTexture(textures.iridescence);
+        ReleaseTexture(textures.iridescence_thickness);
+        ReleaseTexture(textures.volume_thickness);
+        ReleaseTexture(textures.clearcoat);
+        ReleaseTexture(textures.clearcoat_roughness);
+        ReleaseTexture(textures.clearcoat_normal);
     }
 
     entry = {};
@@ -1253,18 +1286,45 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         const ModelMaterialAsset& material = model_asset_entry.asset.materials[material_index];
         cache_entry.materials[material_index].base_color = material.base_color;
         cache_entry.materials[material_index].emissive_color = material.emissive_color;
+        cache_entry.materials[material_index].attenuation_color = material.attenuation_color;
+        cache_entry.materials[material_index].specular_color = material.specular_color;
+        cache_entry.materials[material_index].sheen_color = material.sheen_color;
         cache_entry.materials[material_index].metallic_factor = material.metallic_factor;
         cache_entry.materials[material_index].roughness_factor = material.roughness_factor;
         cache_entry.materials[material_index].normal_scale = material.normal_scale;
         cache_entry.materials[material_index].occlusion_strength = material.occlusion_strength;
+        cache_entry.materials[material_index].specular_factor = material.specular_factor;
+        cache_entry.materials[material_index].sheen_roughness_factor = material.sheen_roughness_factor;
+        cache_entry.materials[material_index].iridescence_factor = material.iridescence_factor;
+        cache_entry.materials[material_index].iridescence_ior = material.iridescence_ior;
+        cache_entry.materials[material_index].iridescence_thickness_minimum = material.iridescence_thickness_minimum;
+        cache_entry.materials[material_index].iridescence_thickness_maximum = material.iridescence_thickness_maximum;
+        cache_entry.materials[material_index].index_of_refraction = material.index_of_refraction;
+        cache_entry.materials[material_index].transmission_factor = material.transmission_factor;
+        cache_entry.materials[material_index].volume_thickness_factor = material.volume_thickness_factor;
+        cache_entry.materials[material_index].attenuation_distance = material.attenuation_distance;
+        cache_entry.materials[material_index].clearcoat_factor = material.clearcoat_factor;
+        cache_entry.materials[material_index].clearcoat_roughness_factor = material.clearcoat_roughness_factor;
+        cache_entry.materials[material_index].clearcoat_normal_scale = material.clearcoat_normal_scale;
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
 
-        const ModelTextureAsset* texture_assets[5] = {
+        const ModelTextureAsset* texture_assets[16] = {
             &material.base_color_texture,
             &material.metallic_roughness_texture,
             &material.normal_texture,
             &material.occlusion_texture,
             &material.emissive_texture,
+            &material.transmission_texture,
+            &material.specular_texture,
+            &material.specular_color_texture,
+            &material.sheen_color_texture,
+            &material.sheen_roughness_texture,
+            &material.iridescence_texture,
+            &material.iridescence_thickness_texture,
+            &material.volume_thickness_texture,
+            &material.clearcoat_texture,
+            &material.clearcoat_roughness_texture,
+            &material.clearcoat_normal_texture,
         };
 
         for (std::size_t texture_index = 0; texture_index < std::size(texture_assets); ++texture_index)
@@ -1288,6 +1348,17 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         cache_entry.materials[material_index].normal_view = cache_entry.material_textures[material_index].normal.view;
         cache_entry.materials[material_index].occlusion_view = cache_entry.material_textures[material_index].occlusion.view;
         cache_entry.materials[material_index].emissive_view = cache_entry.material_textures[material_index].emissive.view;
+        cache_entry.materials[material_index].transmission_view = cache_entry.material_textures[material_index].transmission.view;
+        cache_entry.materials[material_index].specular_view = cache_entry.material_textures[material_index].specular.view;
+        cache_entry.materials[material_index].specular_color_view = cache_entry.material_textures[material_index].specular_color.view;
+        cache_entry.materials[material_index].sheen_color_view = cache_entry.material_textures[material_index].sheen_color.view;
+        cache_entry.materials[material_index].sheen_roughness_view = cache_entry.material_textures[material_index].sheen_roughness.view;
+        cache_entry.materials[material_index].iridescence_view = cache_entry.material_textures[material_index].iridescence.view;
+        cache_entry.materials[material_index].iridescence_thickness_view = cache_entry.material_textures[material_index].iridescence_thickness.view;
+        cache_entry.materials[material_index].volume_thickness_view = cache_entry.material_textures[material_index].volume_thickness.view;
+        cache_entry.materials[material_index].clearcoat_view = cache_entry.material_textures[material_index].clearcoat.view;
+        cache_entry.materials[material_index].clearcoat_roughness_view = cache_entry.material_textures[material_index].clearcoat_roughness.view;
+        cache_entry.materials[material_index].clearcoat_normal_view = cache_entry.material_textures[material_index].clearcoat_normal.view;
     }
 
     std::size_t mesh_scan_count = 0;

@@ -16,16 +16,43 @@ public:
     {
         std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         std::array<float, 3> emissive_color = {0.0f, 0.0f, 0.0f};
+        std::array<float, 3> attenuation_color = {1.0f, 1.0f, 1.0f};
+        std::array<float, 3> specular_color = {1.0f, 1.0f, 1.0f};
+        std::array<float, 3> sheen_color = {0.0f, 0.0f, 0.0f};
         float metallic_factor = 1.0f;
         float roughness_factor = 1.0f;
         float normal_scale = 1.0f;
         float occlusion_strength = 1.0f;
+        float specular_factor = 1.0f;
+        float sheen_roughness_factor = 0.0f;
+        float iridescence_factor = 0.0f;
+        float iridescence_ior = 1.3f;
+        float iridescence_thickness_minimum = 100.0f;
+        float iridescence_thickness_maximum = 400.0f;
+        float index_of_refraction = 1.5f;
+        float transmission_factor = 0.0f;
+        float volume_thickness_factor = 0.0f;
+        float attenuation_distance = 0.0f;
+        float clearcoat_factor = 0.0f;
+        float clearcoat_roughness_factor = 0.0f;
+        float clearcoat_normal_scale = 1.0f;
         bool uses_alpha_transparency = false;
         VkImageView base_color_view = VK_NULL_HANDLE;
         VkImageView metallic_roughness_view = VK_NULL_HANDLE;
         VkImageView normal_view = VK_NULL_HANDLE;
         VkImageView occlusion_view = VK_NULL_HANDLE;
         VkImageView emissive_view = VK_NULL_HANDLE;
+        VkImageView transmission_view = VK_NULL_HANDLE;
+        VkImageView specular_view = VK_NULL_HANDLE;
+        VkImageView specular_color_view = VK_NULL_HANDLE;
+        VkImageView sheen_color_view = VK_NULL_HANDLE;
+        VkImageView sheen_roughness_view = VK_NULL_HANDLE;
+        VkImageView iridescence_view = VK_NULL_HANDLE;
+        VkImageView iridescence_thickness_view = VK_NULL_HANDLE;
+        VkImageView volume_thickness_view = VK_NULL_HANDLE;
+        VkImageView clearcoat_view = VK_NULL_HANDLE;
+        VkImageView clearcoat_roughness_view = VK_NULL_HANDLE;
+        VkImageView clearcoat_normal_view = VK_NULL_HANDLE;
     };
 
     struct MeshSectionRecord
@@ -145,14 +172,30 @@ private:
         std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         std::array<float, 4> emissive_data = {0.0f, 0.0f, 0.0f, 1.0f};
         std::array<float, 4> surface_data = {1.0f, 1.0f, 1.0f, 0.0f};
+        std::array<float, 4> iridescence_data = {0.0f, 1.3f, 100.0f, 400.0f};
+        std::array<float, 4> transmission_data = {0.0f, 1.5f, 0.0f, 0.0f};
+        std::array<float, 4> attenuation_data = {1.0f, 1.0f, 1.0f, 0.0f};
+        std::array<float, 4> clearcoat_data = {0.0f, 0.0f, 1.0f, 0.0f};
+        std::array<float, 4> specular_data = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::array<float, 4> sheen_data = {0.0f, 0.0f, 0.0f, 0.0f};
         std::uint32_t base_color_texture_index = 0xFFFFFFFFu;
         std::uint32_t metallic_roughness_texture_index = 0xFFFFFFFFu;
         std::uint32_t normal_texture_index = 0xFFFFFFFFu;
         std::uint32_t occlusion_texture_index = 0xFFFFFFFFu;
         std::uint32_t emissive_texture_index = 0xFFFFFFFFu;
+        std::uint32_t transmission_texture_index = 0xFFFFFFFFu;
+        std::uint32_t specular_texture_index = 0xFFFFFFFFu;
+        std::uint32_t specular_color_texture_index = 0xFFFFFFFFu;
+        std::uint32_t sheen_color_texture_index = 0xFFFFFFFFu;
+        std::uint32_t sheen_roughness_texture_index = 0xFFFFFFFFu;
+        std::uint32_t iridescence_texture_index = 0xFFFFFFFFu;
+        std::uint32_t iridescence_thickness_texture_index = 0xFFFFFFFFu;
+        std::uint32_t volume_thickness_texture_index = 0xFFFFFFFFu;
+        std::uint32_t clearcoat_texture_index = 0xFFFFFFFFu;
+        std::uint32_t clearcoat_roughness_texture_index = 0xFFFFFFFFu;
+        std::uint32_t clearcoat_normal_texture_index = 0xFFFFFFFFu;
         std::uint32_t uses_alpha_transparency = 0;
         std::uint32_t pad0 = 0;
-        std::uint32_t pad1 = 0;
     };
 
     struct UniformBlock

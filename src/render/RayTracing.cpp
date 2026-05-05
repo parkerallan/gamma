@@ -1013,6 +1013,28 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             material_record.surface_data[0] = material.metallic_factor;
             material_record.surface_data[1] = material.roughness_factor;
             material_record.surface_data[2] = material.occlusion_strength;
+            material_record.specular_data[0] = material.specular_color[0];
+            material_record.specular_data[1] = material.specular_color[1];
+            material_record.specular_data[2] = material.specular_color[2];
+            material_record.specular_data[3] = material.specular_factor;
+            material_record.sheen_data[0] = material.sheen_color[0];
+            material_record.sheen_data[1] = material.sheen_color[1];
+            material_record.sheen_data[2] = material.sheen_color[2];
+            material_record.sheen_data[3] = material.sheen_roughness_factor;
+            material_record.iridescence_data[0] = material.iridescence_factor;
+            material_record.iridescence_data[1] = material.iridescence_ior;
+            material_record.iridescence_data[2] = material.iridescence_thickness_minimum;
+            material_record.iridescence_data[3] = material.iridescence_thickness_maximum;
+            material_record.transmission_data[0] = material.transmission_factor;
+            material_record.transmission_data[1] = material.index_of_refraction;
+            material_record.transmission_data[2] = material.volume_thickness_factor;
+            material_record.attenuation_data[0] = material.attenuation_color[0];
+            material_record.attenuation_data[1] = material.attenuation_color[1];
+            material_record.attenuation_data[2] = material.attenuation_color[2];
+            material_record.attenuation_data[3] = material.attenuation_distance;
+            material_record.clearcoat_data[0] = material.clearcoat_factor;
+            material_record.clearcoat_data[1] = material.clearcoat_roughness_factor;
+            material_record.clearcoat_data[2] = material.clearcoat_normal_scale;
             material_record.uses_alpha_transparency = material.uses_alpha_transparency ? 1u : 0u;
 
             auto resolve_texture_index = [&](VkImageView image_view) -> std::uint32_t
@@ -1044,6 +1066,17 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             material_record.normal_texture_index = resolve_texture_index(material.normal_view);
             material_record.occlusion_texture_index = resolve_texture_index(material.occlusion_view);
             material_record.emissive_texture_index = resolve_texture_index(material.emissive_view);
+            material_record.transmission_texture_index = resolve_texture_index(material.transmission_view);
+            material_record.specular_texture_index = resolve_texture_index(material.specular_view);
+            material_record.specular_color_texture_index = resolve_texture_index(material.specular_color_view);
+            material_record.sheen_color_texture_index = resolve_texture_index(material.sheen_color_view);
+            material_record.sheen_roughness_texture_index = resolve_texture_index(material.sheen_roughness_view);
+            material_record.iridescence_texture_index = resolve_texture_index(material.iridescence_view);
+            material_record.iridescence_thickness_texture_index = resolve_texture_index(material.iridescence_thickness_view);
+            material_record.volume_thickness_texture_index = resolve_texture_index(material.volume_thickness_view);
+            material_record.clearcoat_texture_index = resolve_texture_index(material.clearcoat_view);
+            material_record.clearcoat_roughness_texture_index = resolve_texture_index(material.clearcoat_roughness_view);
+            material_record.clearcoat_normal_texture_index = resolve_texture_index(material.clearcoat_normal_view);
 
             new_material_records.push_back(material_record);
         }

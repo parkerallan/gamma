@@ -42,6 +42,14 @@ struct ModelTextureAsset
     std::vector<std::uint8_t> pixels;
 };
 
+struct ModelTextureTransform
+{
+    bool valid = false;
+    std::array<float, 2> translation = {0.0f, 0.0f};
+    std::array<float, 2> scale = {1.0f, 1.0f};
+    float rotation = 0.0f;
+};
+
 enum class ModelAlphaMode
 {
     Opaque,
@@ -54,11 +62,27 @@ struct ModelMaterialAsset
     std::string name;
     std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
     std::array<float, 3> emissive_color = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> attenuation_color = {1.0f, 1.0f, 1.0f};
+    std::array<float, 3> specular_color = {1.0f, 1.0f, 1.0f};
+    std::array<float, 3> sheen_color = {0.0f, 0.0f, 0.0f};
     float opacity_factor = 1.0f;
     float metallic_factor = 1.0f;
     float roughness_factor = 1.0f;
     float normal_scale = 1.0f;
     float occlusion_strength = 1.0f;
+    float specular_factor = 1.0f;
+    float sheen_roughness_factor = 0.0f;
+    float iridescence_factor = 0.0f;
+    float iridescence_ior = 1.3f;
+    float iridescence_thickness_minimum = 100.0f;
+    float iridescence_thickness_maximum = 400.0f;
+    float index_of_refraction = 1.5f;
+    float transmission_factor = 0.0f;
+    float volume_thickness_factor = 0.0f;
+    float attenuation_distance = 0.0f;
+    float clearcoat_factor = 0.0f;
+    float clearcoat_roughness_factor = 0.0f;
+    float clearcoat_normal_scale = 1.0f;
     float alpha_cutoff = 0.5f;
     ModelAlphaMode alpha_mode = ModelAlphaMode::Opaque;
     bool double_sided = false;
@@ -77,6 +101,29 @@ struct ModelMaterialAsset
     ModelTextureAsset occlusion_texture;
     std::string emissive_texture_source;
     ModelTextureAsset emissive_texture;
+    std::string transmission_texture_source;
+    ModelTextureAsset transmission_texture;
+    std::string specular_texture_source;
+    ModelTextureAsset specular_texture;
+    std::string specular_color_texture_source;
+    ModelTextureAsset specular_color_texture;
+    std::string sheen_color_texture_source;
+    ModelTextureAsset sheen_color_texture;
+    std::string sheen_roughness_texture_source;
+    ModelTextureAsset sheen_roughness_texture;
+    std::string iridescence_texture_source;
+    ModelTextureAsset iridescence_texture;
+    std::string iridescence_thickness_texture_source;
+    ModelTextureAsset iridescence_thickness_texture;
+    std::string volume_thickness_texture_source;
+    ModelTextureAsset volume_thickness_texture;
+    std::string clearcoat_texture_source;
+    ModelTextureAsset clearcoat_texture;
+    std::string clearcoat_roughness_texture_source;
+    ModelTextureAsset clearcoat_roughness_texture;
+    std::string clearcoat_normal_texture_source;
+    ModelTextureAsset clearcoat_normal_texture;
+    ModelTextureTransform uv_transform;
     bool uses_alpha_transparency = false;
 };
 

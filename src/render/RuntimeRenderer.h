@@ -87,6 +87,17 @@ public:
         GpuTexture normal{};
         GpuTexture occlusion{};
         GpuTexture emissive{};
+        GpuTexture transmission{};
+        GpuTexture specular{};
+        GpuTexture specular_color{};
+        GpuTexture sheen_color{};
+        GpuTexture sheen_roughness{};
+        GpuTexture iridescence{};
+        GpuTexture iridescence_thickness{};
+        GpuTexture volume_thickness{};
+        GpuTexture clearcoat{};
+        GpuTexture clearcoat_roughness{};
+        GpuTexture clearcoat_normal{};
     };
 
     struct GpuMeshCacheEntry
