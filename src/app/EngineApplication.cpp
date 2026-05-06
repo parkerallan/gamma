@@ -23,6 +23,8 @@
 
 namespace
 {
+constexpr float kBottomBarHeight = 28.0f;
+
 constexpr ImWchar kCodiconGlyphRanges[] = {
     static_cast<ImWchar>(ICON_MIN_CI),
     static_cast<ImWchar>(ICON_MAX_16_CI),
@@ -875,9 +877,11 @@ void EngineApplication::RenderRuntimeWindow()
 void EngineApplication::RenderUI()
 {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float bottom_bar_height = kBottomBarHeight * display_scale_;
+    const float host_height = (std::max)(0.0f, viewport->Size.y - bottom_bar_height);
 
     ImGui::SetNextWindowPos(viewport->Pos);
-    ImGui::SetNextWindowSize(viewport->Size);
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, host_height));
     ImGui::SetNextWindowViewport(viewport->ID);
 
     ImGuiWindowFlags host_window_flags = ImGuiWindowFlags_NoDocking |
@@ -901,6 +905,8 @@ void EngineApplication::RenderUI()
     BuildDefaultDockLayout(dockspace_id);
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     ImGui::End();
+
+    RenderBottomBar();
 
     files_panel_.Render(state_);
     version_control_panel_.Render(state_);
@@ -926,6 +932,41 @@ void EngineApplication::RenderUI()
 
     focus_log_panel_next_frame_ = false;
     focus_performance_panel_next_frame_ = false;
+}
+
+void EngineApplication::RenderBottomBar()
+{
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float bottom_bar_height = kBottomBarHeight * display_scale_;
+
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - bottom_bar_height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, bottom_bar_height));
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    const ImGuiWindowFlags bar_window_flags = ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoNavFocus;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(126.0f / 255.0f, 185.0f / 255.0f, 0.0f, 1.0f));
+    ImGui::Begin("EngineBottomBar", nullptr, bar_window_flags);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
+
+    const char* version_label = "Version 0.0.1";
+    const ImVec2 text_size = ImGui::CalcTextSize(version_label);
+    const float text_y = (ImGui::GetWindowSize().y - text_size.y) * 0.5f;
+    ImGui::SetCursorPos(ImVec2(12.0f * display_scale_, text_y));
+    ImGui::TextColored(ImVec4(0.08f, 0.12f, 0.05f, 1.0f), "%s", version_label);
+
+    ImGui::End();
 }
 
 void EngineApplication::RenderMainMenuBar()
@@ -1188,9 +1229,10 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
     }
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float bottom_bar_height = kBottomBarHeight * display_scale_;
     ImGui::DockBuilderRemoveNode(dockspace_id);
     ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->Size);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, ImVec2(viewport->Size.x, (std::max)(0.0f, viewport->Size.y - bottom_bar_height)));
 
     ImGuiID center_id = dockspace_id;
     ImGuiID left_id = 0;

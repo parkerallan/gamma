@@ -88,6 +88,7 @@ private:
     void RenderRuntimeWindow();
     void RenderUI();
     void RenderMainMenuBar();
+    void RenderBottomBar();
     void ApplyStyle();
     void BuildDefaultDockLayout(ImGuiID dockspace_id);
     bool CancelActiveBuildProcess();
