@@ -3,6 +3,7 @@
 #include "app/VulkanContext.h"
 #include "state/EngineState.h"
 #include "panels/FilesPanel.h"
+#include "panels/EffectsPanel.h"
 #include "panels/InfoPanel.h"
 #include "panels/LogPanel.h"
 #include "panels/PerformancePanel.h"
@@ -42,6 +43,7 @@ private:
     FilesPanel files_panel_;
     VersionControlPanel version_control_panel_;
     WorkspacePanel workspace_panel_;
+    EffectsPanel effects_panel_;
     SettingsPanel settings_panel_;
     InfoPanel info_panel_;
     LogPanel log_panel_;

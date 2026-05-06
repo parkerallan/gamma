@@ -222,9 +222,15 @@ void WorkspacePanel::Render(EngineState& state)
     {
         state.active_tab = new_active_tab;
 
-        const char* tab_name = state.active_tab == WorkspaceTab::Scene
-            ? "Scene"
-            : state.active_tab == WorkspaceTab::Graph ? "Graph" : "Editor";
+        const char* tab_name = "Scene";
+        if (state.active_tab == WorkspaceTab::Graph)
+        {
+            tab_name = "Graph";
+        }
+        else if (state.active_tab == WorkspaceTab::Editor)
+        {
+            tab_name = "Editor";
+        }
         state.AddLog(std::string("Switched workspace tab: ") + tab_name);
     }
 

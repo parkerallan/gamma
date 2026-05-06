@@ -67,6 +67,7 @@ struct EngineState
     bool show_files_panel = true;
     bool show_version_control_panel = true;
     bool show_workspace_panel = true;
+    bool show_effects_panel = true;
     bool show_settings_panel = true;
     bool show_info_panel = true;
     bool show_log_panel = true;
