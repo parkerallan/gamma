@@ -1306,6 +1306,8 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         cache_entry.materials[material_index].clearcoat_factor = material.clearcoat_factor;
         cache_entry.materials[material_index].clearcoat_roughness_factor = material.clearcoat_roughness_factor;
         cache_entry.materials[material_index].clearcoat_normal_scale = material.clearcoat_normal_scale;
+        cache_entry.materials[material_index].alpha_cutoff = material.alpha_cutoff;
+        cache_entry.materials[material_index].alpha_mode = static_cast<std::uint32_t>(material.alpha_mode);
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
 
         const ModelTextureAsset* texture_assets[16] = {

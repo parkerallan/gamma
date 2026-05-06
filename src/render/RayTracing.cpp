@@ -344,10 +344,19 @@ VkTransformMatrixKHR ToVkTransformMatrix(const std::array<float, 16>& matrix)
 
 bool IsOpaqueMesh(const RayTracing::MeshInput& mesh)
 {
-    return std::none_of(mesh.sections.begin(), mesh.sections.end(), [](const RayTracing::MeshSectionRecord& section)
+    for (const RayTracing::MeshSectionRecord& section : mesh.sections)
     {
-        return section.uses_alpha_transparency;
-    });
+        if (section.uses_alpha_transparency)
+        {
+            return false;
+        }
+        if (section.material_index < mesh.materials.size() &&
+            mesh.materials[section.material_index].transmission_factor > 0.001f)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool CreateGpuBuffer(
@@ -610,7 +619,7 @@ bool BuildBottomLevelAccelerationStructure(
 
     VkAccelerationStructureGeometryKHR geometry = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geometry.flags = IsOpaqueMesh(mesh) ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+    geometry.flags = IsOpaqueMesh(mesh) ? VK_GEOMETRY_OPAQUE_BIT_KHR : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
     geometry.geometry.triangles = triangles;
 
     const std::uint32_t primitive_count = mesh.index_count / 3;
@@ -695,6 +704,7 @@ void RayTracing::ResetAccumulationState()
     accumulation_reference_uniforms_ = {};
     accumulation_reference_uniforms_valid_ = false;
     accumulation_frame_count_ = 0;
+    raw_frame_count_ = 0;
     accumulation_reset_requested_ = true;
 }
 
@@ -1035,7 +1045,9 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             material_record.clearcoat_data[0] = material.clearcoat_factor;
             material_record.clearcoat_data[1] = material.clearcoat_roughness_factor;
             material_record.clearcoat_data[2] = material.clearcoat_normal_scale;
+            material_record.surface_data[3] = material.alpha_cutoff;
             material_record.uses_alpha_transparency = material.uses_alpha_transparency ? 1u : 0u;
+            material_record.alpha_mode = material.alpha_mode;
 
             auto resolve_texture_index = [&](VkImageView image_view) -> std::uint32_t
             {
@@ -2331,7 +2343,7 @@ bool RayTracing::RenderFrame(
         accumulation_frame_count_,
         accumulation_frame_count_ > 0 ? 1u : 0u,
         accumulation_reset ? 1u : 0u,
-        0u};
+        raw_frame_count_};
 
     if (!UploadGpuBuffer(*vulkan_context_, uniform_buffer_, &uniforms, sizeof(uniforms)))
     {
@@ -2381,6 +2393,7 @@ bool RayTracing::RenderFrame(
     if (submitted)
     {
         accumulation_frame_count_ = (std::min)(accumulation_frame_count_ + 1u, kMaxAccumulationFrames);
+        raw_frame_count_ += 1u;
         accumulation_reset_requested_ = false;
     }
     return submitted;

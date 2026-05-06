@@ -95,7 +95,7 @@ struct MaterialRecord
     uint clearcoat_roughness_texture_index;
     uint clearcoat_normal_texture_index;
     uint uses_alpha_transparency;
-    uint pad0;
+    uint alpha_mode; // 0=OPAQUE, 1=MASK, 2=BLEND
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer MeshRecordBuffer
@@ -146,7 +146,27 @@ void main()
     MeshRecord mesh = meshes[gl_InstanceCustomIndexEXT];
     uint primitive_first_index = gl_PrimitiveID * 3u;
     uint section_index = find_section_index(mesh, primitive_first_index);
+
+    // Fast path: sections without alpha transparency (e.g. transmission-only glass) always accept.
+    // Avoids full material/vertex fetch cost on non-alpha geometry that uses non-opaque BLAS.
+    if (sections[section_index].uses_alpha_transparency == 0u)
+    {
+        return;
+    }
+
     MaterialRecord material = materials[sections[section_index].material_index];
+
+    // OPAQUE mode: alpha channel is ignored for visibility — always accept.
+    if (material.alpha_mode == 0u)
+    {
+        return;
+    }
+
+    // If no base-color alpha texture, alpha = vertex_color.a (almost always 1.0) — fast accept.
+    if (material.base_color_texture_index == 0xFFFFFFFFu)
+    {
+        return;
+    }
 
     uint index0 = mesh.index_buffer.indices[primitive_first_index + 0u];
     uint index1 = mesh.index_buffer.indices[primitive_first_index + 1u];
@@ -161,8 +181,18 @@ void main()
     vec4 vertex_color = vertex0.color * barycentrics.x + vertex1.color * barycentrics.y + vertex2.color * barycentrics.z;
 
     float alpha = sample_alpha(material, uv, vertex_color);
-    if (alpha <= 0.001)
+    if (material.alpha_mode == 1u) // MASK: binary cutoff from surface_data.w
     {
-        ignoreIntersectionEXT;
+        if (alpha < material.surface_data.w)
+        {
+            ignoreIntersectionEXT;
+        }
+    }
+    else // BLEND: ignore only fully invisible fragments
+    {
+        if (alpha <= 0.001)
+        {
+            ignoreIntersectionEXT;
+        }
     }
 }

@@ -96,7 +96,7 @@ struct MaterialRecord
     uint clearcoat_roughness_texture_index;
     uint clearcoat_normal_texture_index;
     uint uses_alpha_transparency;
-    uint pad0;
+    uint alpha_mode; // 0=OPAQUE, 1=MASK, 2=BLEND
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer MeshRecordBuffer
@@ -147,7 +147,48 @@ void main()
     MeshRecord mesh = meshes[gl_InstanceCustomIndexEXT];
     uint primitive_first_index = gl_PrimitiveID * 3u;
     uint section_index = find_section_index(mesh, primitive_first_index);
-    MaterialRecord material = materials[sections[section_index].material_index];
+    SectionRecord section = sections[section_index];
+
+    // Fast path for non-alpha-transparent sections (e.g. transmission-only glass).
+    // Alpha is always 1.0 so effective_opacity = 1 - transmission. Skip all vertex/UV/texture work.
+    if (section.uses_alpha_transparency == 0u)
+    {
+        float transmission = clamp(materials[section.material_index].transmission_data.x, 0.0, 1.0);
+        if (1.0 - transmission <= 0.001)
+        {
+            ignoreIntersectionEXT;
+            return;
+        }
+        shadow_payload = 0.0;
+        terminateRayEXT;
+        return;
+    }
+
+    MaterialRecord material = materials[section.material_index];
+
+    // Pre-check 1: shadow.rahit uses transmission_data.x (base factor, no texture) directly.
+    // If it's >= 1.0 then effective_opacity = alpha * 0 = 0 for any alpha — always transparent.
+    // Saves all vertex/UV/texture work regardless of whether an alpha texture exists.
+    float transmission = clamp(material.transmission_data.x, 0.0, 1.0);
+    if (transmission >= 0.999)
+    {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    // Pre-check 2: no base-color alpha texture means alpha = vertex_color.a (almost always 1.0).
+    // Handles glTF BLEND-mode transmission materials with constant full coverage.
+    // Saves 3 vertex reads + UV interpolation + texture sample.
+    if (material.base_color_texture_index == 0xFFFFFFFFu)
+    {
+        float effective_opacity = 1.0 - transmission;
+        if (effective_opacity <= 0.001) { ignoreIntersectionEXT; return; }
+        if (effective_opacity >= 0.999) { shadow_payload = 0.0; terminateRayEXT; return; }
+        shadow_payload *= (1.0 - effective_opacity);
+        if (shadow_payload <= 0.01) { shadow_payload = 0.0; terminateRayEXT; return; }
+        ignoreIntersectionEXT;
+        return;
+    }
 
     uint index0 = mesh.index_buffer.indices[primitive_first_index + 0u];
     uint index1 = mesh.index_buffer.indices[primitive_first_index + 1u];
@@ -162,15 +203,32 @@ void main()
     vec4 vertex_color = vertex0.color * barycentrics.x + vertex1.color * barycentrics.y + vertex2.color * barycentrics.z;
 
     float alpha = sample_alpha(material, uv, vertex_color);
-    if (alpha <= 0.001)
+
+    // MASK: binary visibility — below cutoff is fully transparent, at or above is fully opaque (minus transmission).
+    float effective_opacity;
+    if (material.alpha_mode == 1u)
+    {
+        if (alpha < material.surface_data.w)
+        {
+            ignoreIntersectionEXT;
+            return;
+        }
+        effective_opacity = 1.0 - transmission;
+    }
+    else
+    {
+        effective_opacity = alpha * (1.0 - transmission);
+    }
+
+    if (effective_opacity <= 0.001)
     {
         ignoreIntersectionEXT;
         return;
     }
 
-    if (alpha < 0.999)
+    if (effective_opacity < 0.999)
     {
-        shadow_payload *= (1.0 - alpha);
+        shadow_payload *= (1.0 - effective_opacity);
         if (shadow_payload <= 0.01)
         {
             shadow_payload = 0.0;

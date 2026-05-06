@@ -105,7 +105,7 @@ struct MaterialRecord
     uint clearcoat_roughness_texture_index;
     uint clearcoat_normal_texture_index;
     uint uses_alpha_transparency;
-    uint pad0;
+    uint alpha_mode; // 0=OPAQUE, 1=MASK, 2=BLEND
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer MeshRecordBuffer
@@ -126,8 +126,8 @@ layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
 layout(set = 0, binding = 6) uniform sampler2D material_textures[256];
 
 const float PI = 3.1415926535897932384626433832795;
-const uint SOFT_SHADOW_SAMPLE_COUNT = 6u;
-const uint ROUGH_TRANSMISSION_SAMPLE_COUNT = 8u;
+const uint SOFT_SHADOW_SAMPLE_COUNT = 3u;
+const uint ROUGH_TRANSMISSION_SAMPLE_COUNT = 1u;
 const mat3 XYZ_TO_REC709 = mat3(
      3.2404542, -0.9692660,  0.0556434,
     -1.5371385,  1.8760108, -0.2040259,
@@ -929,12 +929,14 @@ void main()
         diffuse_visibility *= 1.0 - clamp(max_component(view_fresnel), 0.0, 1.0);
     }
     uint sample_seed = make_sample_seed(world_position);
+    const bool is_primary_depth = primary_payload.depth == 0u;
+    const bool skip_direct_lighting = !is_primary_depth && transmission_factor > 0.001;
     vec3 shadow_offset_normal = dot(world_vertex_normal, world_geometric_normal) > 0.25 ? world_vertex_normal : world_geometric_normal;
 
     vec3 lighting = scene_uniforms.ambient_light.rgb * scene_uniforms.ambient_light.a * albedo.rgb * diffuse_visibility * (1.0 - transmission_factor) * ambient_occlusion * base_layer_weight * sheen_base_scaling;
     vec3 shadow_origin = world_position + shadow_offset_normal * 0.0015;
 
-    if (scene_uniforms.directional_light_color.a > 0.0)
+    if (!skip_direct_lighting && scene_uniforms.directional_light_color.a > 0.0)
     {
         vec3 light_direction = normalize(-scene_uniforms.directional_light_direction.xyz);
         vec3 sample_tangent;
@@ -942,7 +944,7 @@ void main()
         build_basis(light_direction, sample_tangent, sample_bitangent);
         float angular_radius = max(scene_uniforms.directional_light_data.x, 0.0);
         float disk_radius = tan(angular_radius);
-        uint sample_count = angular_radius > 0.00001 ? SOFT_SHADOW_SAMPLE_COUNT : 1u;
+        uint sample_count = angular_radius > 0.00001 ? (is_primary_depth ? SOFT_SHADOW_SAMPLE_COUNT : 1u) : 1u;
         float sample_rotation = hash_to_unit_float(sample_seed ^ 0x68bc21ebu) * (2.0 * PI);
         vec3 light_sum = vec3(0.0);
 
@@ -992,10 +994,10 @@ void main()
         lighting += light_sum / float(sample_count);
     }
 
-    if (scene_uniforms.point_light_color.a > 0.0)
+    if (!skip_direct_lighting && scene_uniforms.point_light_color.a > 0.0)
     {
         float source_radius = max(scene_uniforms.point_light_data.x, 0.0);
-        uint sample_count = source_radius > 0.00001 ? SOFT_SHADOW_SAMPLE_COUNT : 1u;
+        uint sample_count = source_radius > 0.00001 ? (is_primary_depth ? SOFT_SHADOW_SAMPLE_COUNT : 1u) : 1u;
         float sample_rotation = hash_to_unit_float(sample_seed ^ 0x2f6e2b1du) * (2.0 * PI);
         vec3 light_sum = vec3(0.0);
         vec3 center_to_light = scene_uniforms.point_light_position.xyz - world_position;
@@ -1070,14 +1072,14 @@ void main()
         lighting += light_sum / float(sample_count);
     }
 
-    if (scene_uniforms.spot_light_color.a > 0.0)
+    if (!skip_direct_lighting && scene_uniforms.spot_light_color.a > 0.0)
     {
         vec3 light_axis = normalize(-scene_uniforms.spot_light_direction.xyz);
         vec3 sample_tangent;
         vec3 sample_bitangent;
         build_basis(light_axis, sample_tangent, sample_bitangent);
         float source_radius = max(scene_uniforms.spot_light_data.y, 0.0);
-        uint sample_count = source_radius > 0.00001 ? SOFT_SHADOW_SAMPLE_COUNT : 1u;
+        uint sample_count = source_radius > 0.00001 ? (is_primary_depth ? SOFT_SHADOW_SAMPLE_COUNT : 1u) : 1u;
         float sample_rotation = hash_to_unit_float(sample_seed ^ 0x51f15e5du) * (2.0 * PI);
         vec3 light_sum = vec3(0.0);
 
@@ -1147,13 +1149,13 @@ void main()
 
     vec3 shaded_color = lighting + emissive * base_layer_weight;
 
-    if (primary_payload.depth < 3u)
+    if (primary_payload.depth < 2u)
     {
         vec3 fresnel = view_fresnel;
         float reflection_sharpness = clamp(1.0 - roughness, 0.0, 1.0);
         float reflection_weight = reflection_sharpness * reflection_sharpness;
         reflection_weight *= reflection_weight;
-        if (max(max(fresnel.r, fresnel.g), fresnel.b) * reflection_weight > 0.01)
+        if (max(max(fresnel.r, fresnel.g), fresnel.b) * reflection_weight * base_layer_weight > 0.01)
         {
             vec3 reflection_direction = reflect(gl_WorldRayDirectionEXT, world_normal);
             reflection_direction = normalize(mix(reflection_direction, world_normal, roughness * roughness));
@@ -1183,7 +1185,7 @@ void main()
         float clearcoat_reflection_sharpness = clamp(1.0 - clearcoat_roughness, 0.0, 1.0);
         clearcoat_reflection_weight *= clearcoat_reflection_sharpness * clearcoat_reflection_sharpness;
         clearcoat_reflection_weight *= clearcoat_reflection_sharpness * clearcoat_reflection_sharpness;
-        if (clearcoat_reflection_weight > 0.01)
+        if (clearcoat_reflection_weight > 0.01 && is_primary_depth)
         {
             vec3 reflection_direction = reflect(gl_WorldRayDirectionEXT, world_clearcoat_normal);
             reflection_direction = normalize(mix(reflection_direction, world_clearcoat_normal, clearcoat_roughness * clearcoat_roughness));
@@ -1210,7 +1212,7 @@ void main()
         }
     }
 
-    if (transmission_factor > 0.001 && primary_payload.depth < 3u)
+    if (transmission_factor > 0.001 && primary_payload.depth < 2u)
     {
         bool front_face = dot(world_geometric_normal, view_direction) > 0.0;
         vec3 transmission_normal = front_face ? world_normal : -world_normal;
@@ -1219,9 +1221,12 @@ void main()
         float thickness_world = volume_thickness * average_world_scale();
         float transmission_offset = max(0.01, 0.01 * max(thickness_world, 1.0));
         vec3 transmission_origin = world_position - transmission_normal * transmission_offset;
-        vec3 attenuation = evaluate_volume_attenuation(material, thickness_world);
-        uint transmission_sample_count = roughness > 0.08 ? ROUGH_TRANSMISSION_SAMPLE_COUNT : 1u;
-        float transmission_sample_rotation = hash_to_unit_float(sample_seed ^ 0x4f1bbcdcu) * (2.0 * PI);
+        // Attenuation is computed from actual ray travel distance, not the baked thickness factor.
+        // volume_thickness > 0 indicates volumetric material; the ray's hit_distance gives
+        // the true world-space path length through the medium after tracing.
+        bool volumetric = thickness_world > 0.001;
+        uint transmission_sample_count = (is_primary_depth && roughness > 0.25) ? ROUGH_TRANSMISSION_SAMPLE_COUNT : 1u;
+        float transmission_sample_rotation = hash_to_unit_float(sample_seed ^ scene_uniforms.accumulation_data.w ^ 0x4f1bbcdcu) * (2.0 * PI);
         vec3 transmitted_radiance = vec3(0.0);
 
         for (uint transmission_sample_index = 0u; transmission_sample_index < transmission_sample_count; ++transmission_sample_index)
@@ -1234,7 +1239,7 @@ void main()
 
             vec2 disk_sample = transmission_sample_count > 1u
                 ? sample_concentric_disk(hammersley(transmission_sample_index, transmission_sample_count, sample_seed ^ 0x4f1bbcdcu))
-                : vec2(0.0);
+                : sample_concentric_disk(hammersley(scene_uniforms.accumulation_data.w & 0xFFu, 256u, sample_seed ^ 0x4f1bbcdcu));
             disk_sample = rotate_disk_sample(disk_sample, transmission_sample_rotation);
             refraction_direction = sample_rough_transmission_direction(refraction_direction, roughness, disk_sample);
 
@@ -1254,16 +1259,18 @@ void main()
                 10000.0,
                 0);
 
-            transmitted_radiance += primary_payload.color.rgb;
+            float ray_distance = primary_payload.hit_distance < 9e29 ? primary_payload.hit_distance : thickness_world;
+            vec3 attenuation = (volumetric && is_primary_depth) ? evaluate_volume_attenuation(material, ray_distance) : vec3(1.0);
+            transmitted_radiance += primary_payload.color.rgb * attenuation;
         }
 
-        vec3 transmitted_color = (transmitted_radiance / float(transmission_sample_count)) * attenuation * clamp(albedo.rgb, vec3(0.0), vec3(1.0));
+        vec3 transmitted_color = (transmitted_radiance / float(transmission_sample_count)) * clamp(albedo.rgb, vec3(0.0), vec3(1.0));
         float transmission_weight = transmission_factor * (1.0 - clamp(max_component(view_fresnel), 0.0, 1.0));
         shaded_color = mix(shaded_color, transmitted_color, transmission_weight);
         primary_payload.depth = current_depth;
     }
 
-    if (alpha < 0.999 && primary_payload.depth < 3u)
+    if (alpha < 0.999 && material.alpha_mode == 2u && primary_payload.depth < 2u)
     {
         const uint current_depth = primary_payload.depth;
         primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);

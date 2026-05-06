@@ -36,6 +36,8 @@ public:
         float clearcoat_factor = 0.0f;
         float clearcoat_roughness_factor = 0.0f;
         float clearcoat_normal_scale = 1.0f;
+        float alpha_cutoff = 0.5f;
+        std::uint32_t alpha_mode = 0; // 0=OPAQUE, 1=MASK, 2=BLEND
         bool uses_alpha_transparency = false;
         VkImageView base_color_view = VK_NULL_HANDLE;
         VkImageView metallic_roughness_view = VK_NULL_HANDLE;
@@ -171,7 +173,7 @@ private:
     {
         std::array<float, 4> base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         std::array<float, 4> emissive_data = {0.0f, 0.0f, 0.0f, 1.0f};
-        std::array<float, 4> surface_data = {1.0f, 1.0f, 1.0f, 0.0f};
+        std::array<float, 4> surface_data = {1.0f, 1.0f, 1.0f, 0.5f}; // xyz=metallic/roughness/occlusion, w=alpha_cutoff
         std::array<float, 4> iridescence_data = {0.0f, 1.3f, 100.0f, 400.0f};
         std::array<float, 4> transmission_data = {0.0f, 1.5f, 0.0f, 0.0f};
         std::array<float, 4> attenuation_data = {1.0f, 1.0f, 1.0f, 0.0f};
@@ -195,7 +197,7 @@ private:
         std::uint32_t clearcoat_roughness_texture_index = 0xFFFFFFFFu;
         std::uint32_t clearcoat_normal_texture_index = 0xFFFFFFFFu;
         std::uint32_t uses_alpha_transparency = 0;
-        std::uint32_t pad0 = 0;
+        std::uint32_t alpha_mode = 0; // 0=OPAQUE, 1=MASK, 2=BLEND
     };
 
     struct UniformBlock
@@ -276,6 +278,7 @@ private:
     UniformBlock accumulation_reference_uniforms_{};
     bool accumulation_reference_uniforms_valid_ = false;
     std::uint32_t accumulation_frame_count_ = 0;
+    std::uint32_t raw_frame_count_ = 0;
     bool accumulation_reset_requested_ = true;
     std::uint64_t scene_signature_ = 0;
     bool scene_signature_valid_ = false;
