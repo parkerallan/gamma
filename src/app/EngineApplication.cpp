@@ -23,7 +23,7 @@
 
 namespace
 {
-constexpr float kBottomBarHeight = 28.0f;
+constexpr float kBottomBarHeight = 20.0f;
 
 constexpr ImWchar kCodiconGlyphRanges[] = {
     static_cast<ImWchar>(ICON_MIN_CI),
@@ -938,35 +938,17 @@ void EngineApplication::RenderBottomBar()
 {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float bottom_bar_height = kBottomBarHeight * display_scale_;
+    const ImVec2 bar_min(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - bottom_bar_height);
+    const ImVec2 bar_max(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y);
 
-    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - bottom_bar_height));
-    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, bottom_bar_height));
-    ImGui::SetNextWindowViewport(viewport->ID);
-
-    const ImGuiWindowFlags bar_window_flags = ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoNavFocus;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(126.0f / 255.0f, 185.0f / 255.0f, 0.0f, 1.0f));
-    ImGui::Begin("EngineBottomBar", nullptr, bar_window_flags);
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(3);
+    ImDrawList* draw_list = ImGui::GetForegroundDrawList(viewport);
+    draw_list->AddRectFilled(bar_min, bar_max, IM_COL32(126, 185, 0, 255));
 
     const char* version_label = "Version 0.0.1";
     const ImVec2 text_size = ImGui::CalcTextSize(version_label);
-    const float text_y = (ImGui::GetWindowSize().y - text_size.y) * 0.5f;
-    ImGui::SetCursorPos(ImVec2(12.0f * display_scale_, text_y));
-    ImGui::TextColored(ImVec4(0.08f, 0.12f, 0.05f, 1.0f), "%s", version_label);
-
-    ImGui::End();
+    const float text_x = bar_min.x + 12.0f * display_scale_;
+    const float text_y = bar_min.y + (bottom_bar_height - text_size.y) * 0.5f;
+    draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(20, 31, 13, 255), version_label);
 }
 
 void EngineApplication::RenderMainMenuBar()
