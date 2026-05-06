@@ -6,7 +6,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <string>
+#include <vector>
 
 void EffectsPanel::Render(EngineState& state)
 {
@@ -21,7 +25,7 @@ void EffectsPanel::Render(EngineState& state)
         return;
     }
 
-    static char effect_name[128] = "NewParticleEffect";
+    static char effect_name[128] = "NewEffect";
     static bool preview_playing = false;
     static bool preview_paused = false;
     static int selected_effect_index = 0;
@@ -68,21 +72,67 @@ void EffectsPanel::Render(EngineState& state)
     static bool local_space_noise = false;
     static bool use_soft_particles = true;
 
-    static const char* effect_options[] = {
-        "New +",
-        "CampfireSmoke",
-        "TorchFlame",
-        "ExplosionBurst",
-    };
-    constexpr int effect_option_count = static_cast<int>(sizeof(effect_options) / sizeof(effect_options[0]));
+    static std::vector<std::string> effect_names;
+    static std::vector<std::filesystem::path> effect_paths;
+    static std::filesystem::path last_scanned_dir;
+    static std::uint64_t last_dir_signature = 0;
 
-    if (selected_effect_index != 0)
+    // Rebuild effect list only when the directory changes
+    const std::filesystem::path current_effects_dir = state.project_root.empty() 
+        ? std::filesystem::path() 
+        : state.project_root / "Assets" / "Effects";
+    
+    auto compute_dir_signature = [](const std::filesystem::path& dir) -> std::uint64_t {
+        if (dir.empty() || !std::filesystem::is_directory(dir))
+        {
+            return 0;
+        }
+        
+        std::uint64_t signature = 1;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+        {
+            if (entry.is_regular_file() && entry.path().extension() == ".fx")
+            {
+                signature ^= std::hash<std::string>{}(entry.path().filename().string());
+                signature *= 1099511628211ull;
+            }
+        }
+        return signature;
+    };
+    
+    const std::uint64_t current_dir_signature = compute_dir_signature(current_effects_dir);
+    if (current_effects_dir != last_scanned_dir || current_dir_signature != last_dir_signature)
     {
-        std::snprintf(effect_name, sizeof(effect_name), "%s", effect_options[selected_effect_index]);
+        last_scanned_dir = current_effects_dir;
+        last_dir_signature = current_dir_signature;
+        
+        effect_names.clear();
+        effect_paths.clear();
+        effect_names.push_back("New +");
+        effect_paths.push_back({});
+
+        if (!current_effects_dir.empty() && std::filesystem::is_directory(current_effects_dir))
+        {
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(current_effects_dir, ec))
+            {
+                if (entry.is_regular_file() && entry.path().extension() == ".fx")
+                {
+                    effect_names.push_back(entry.path().stem().string());
+                    effect_paths.push_back(entry.path());
+                }
+            }
+        }
     }
-    else if (effect_name[0] == '\0')
+
+    if (selected_effect_index >= static_cast<int>(effect_paths.size()))
     {
-        std::snprintf(effect_name, sizeof(effect_name), "%s", "NewParticle");
+        selected_effect_index = 0;
+    }
+    if (selected_effect_index == 0 && effect_name[0] == '\0')
+    {
+        std::snprintf(effect_name, sizeof(effect_name), "%s", "NewEffect");
     }
 
     timeline_max_seconds = (std::max)(6.0f, duration_seconds);
@@ -112,20 +162,31 @@ void EffectsPanel::Render(EngineState& state)
     const std::string restart_label = std::string(ICON_CI_DEBUG_RESTART);
     const std::string stop_label = std::string(ICON_CI_DEBUG_STOP);
 
+    std::vector<const char*> effect_name_ptrs;
+    effect_name_ptrs.reserve(effect_names.size());
+    for (const auto& name : effect_names)
+    {
+        effect_name_ptrs.push_back(name.c_str());
+    }
+
     ImGui::SetNextItemWidth(180.0f);
     const int previous_effect_index = selected_effect_index;
-    ImGui::Combo("##EffectsSelector", &selected_effect_index, effect_options, effect_option_count);
+    ImGui::Combo("##EffectsSelector", &selected_effect_index, effect_name_ptrs.data(), static_cast<int>(effect_name_ptrs.size()));
     if (selected_effect_index != previous_effect_index)
     {
         if (selected_effect_index == 0)
         {
-            std::snprintf(effect_name, sizeof(effect_name), "%s", "NewParticle");
+            if (effect_name[0] == '\0')
+            {
+                std::snprintf(effect_name, sizeof(effect_name), "%s", "NewEffect");
+            }
         }
         else
         {
-            std::snprintf(effect_name, sizeof(effect_name), "%s", effect_options[selected_effect_index]);
+            effect_name[0] = '\0';
         }
     }
+
     const bool editing_new_effect = selected_effect_index == 0;
     ImGui::SameLine();
     ImGui::SetNextItemWidth(260.0f);
@@ -133,15 +194,70 @@ void EffectsPanel::Render(EngineState& state)
     {
         ImGui::BeginDisabled();
     }
-    ImGui::InputTextWithHint("##EffectsName", "NewParticle", effect_name, sizeof(effect_name));
+    ImGui::InputTextWithHint("##EffectsName", "", effect_name, sizeof(effect_name));
     if (!editing_new_effect)
     {
         ImGui::EndDisabled();
     }
+
     ImGui::SameLine();
     if (ImGui::Button(save_label.c_str()))
     {
-        state.AddLog(std::string("Saved effect (authoring scaffold): ") + effect_name);
+        if (editing_new_effect)
+        {
+            if (state.project_root.empty() || effect_name[0] == '\0')
+            {
+                state.AddLog("Cannot create effect: missing project root or effect name");
+            }
+            else
+            {
+                const std::filesystem::path effects_dir = state.project_root / "Assets" / "Effects";
+                std::error_code ec;
+                std::filesystem::create_directories(effects_dir, ec);
+                const std::string created_effect_name = effect_name;
+                const std::filesystem::path new_effect_path = effects_dir / (created_effect_name + ".fx");
+
+                std::ofstream out(new_effect_path, std::ios::binary);
+                if (!out)
+                {
+                    state.AddLog("Failed to create effect: " + state.GetDisplayPath(new_effect_path));
+                }
+                else
+                {
+                    out << "{\n";
+                    out << "  \"name\": \"" << created_effect_name << "\",\n";
+                    out << "  \"version\": 1\n";
+                    out << "}\n";
+                    out.close();
+
+                    effect_names.push_back(created_effect_name);
+                    effect_paths.push_back(new_effect_path);
+                    selected_effect_index = static_cast<int>(effect_paths.size()) - 1;
+                    effect_name[0] = '\0';
+                    state.request_files_tree_refresh = true;
+                    state.AddLog("Created effect: " + created_effect_name);
+                }
+            }
+        }
+        else
+        {
+            const std::filesystem::path active_effect_path = effect_paths[selected_effect_index];
+            std::ofstream out(active_effect_path, std::ios::binary);
+            if (!out)
+            {
+                state.AddLog("Failed to save effect: " + state.GetDisplayPath(active_effect_path));
+            }
+            else
+            {
+                const std::string active_effect_name = active_effect_path.stem().string();
+                out << "{\n";
+                out << "  \"name\": \"" << active_effect_name << "\",\n";
+                out << "  \"version\": 1\n";
+                out << "}\n";
+                out.close();
+                state.AddLog("Saved effect: " + active_effect_name);
+            }
+        }
     }
 
     const float content_height = ImGui::GetContentRegionAvail().y;

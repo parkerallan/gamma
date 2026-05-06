@@ -416,6 +416,7 @@ add_executable(engine
     src/graph/NodeLibrary.cpp
     src/panels/FilesPanel.cpp
     src/panels/EffectsPanel.cpp
+    src/panels/AnimatorPanel.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
     src/panels/PerformancePanel.cpp

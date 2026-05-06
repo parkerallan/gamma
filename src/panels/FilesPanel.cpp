@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string_view>
 #include <system_error>
 
@@ -108,6 +109,8 @@ FilesPanel::FilesPanel() = default;
 void FilesPanel::Render(EngineState& state)
 {
     refresh_requested_ = false;
+    const double now = ImGui::GetTime();
+    const bool auto_refresh_due = (now - last_auto_refresh_time_) >= 0.5;
 
     if (current_root_ != state.project_root)
     {
@@ -117,6 +120,15 @@ void FilesPanel::Render(EngineState& state)
     {
         RebuildTree(state.project_root);
         state.request_files_tree_refresh = false;
+    }
+    else if (auto_refresh_due && DetectTreeMutation(state.project_root))
+    {
+        RebuildTree(state.project_root);
+    }
+
+    if (auto_refresh_due)
+    {
+        last_auto_refresh_time_ = now;
     }
 
     if (state.request_open_project_dialog)
@@ -230,6 +242,8 @@ void FilesPanel::RebuildTree(const std::filesystem::path& root)
 
     if (root.empty())
     {
+        has_tree_signature_ = false;
+        last_tree_signature_ = 0;
         return;
     }
 
@@ -258,6 +272,95 @@ void FilesPanel::RebuildTree(const std::filesystem::path& root)
 
         return left.label < right.label;
     });
+
+    last_tree_signature_ = ComputeTreeSignature(root);
+    has_tree_signature_ = true;
+}
+
+std::uint64_t FilesPanel::ComputeTreeSignature(const std::filesystem::path& root) const
+{
+    if (root.empty())
+    {
+        return 0;
+    }
+
+    std::error_code error;
+    std::uint64_t signature = 1469598103934665603ull;
+    const auto mix = [&](std::uint64_t value)
+    {
+        signature ^= value;
+        signature *= 1099511628211ull;
+    };
+
+    for (std::filesystem::recursive_directory_iterator it(root, error), end; !error && it != end; it.increment(error))
+    {
+        const std::filesystem::directory_entry& entry = *it;
+        const std::filesystem::path path = entry.path();
+        const std::string name = path.filename().string();
+
+        if (ShouldSkipPath(path))
+        {
+            if (entry.is_directory())
+            {
+                it.disable_recursion_pending();
+            }
+            continue;
+        }
+
+        const std::string relative = std::filesystem::relative(path, root, error).generic_string();
+        if (error)
+        {
+            error.clear();
+            continue;
+        }
+
+        mix(static_cast<std::uint64_t>(std::hash<std::string>{}(relative)));
+        mix(static_cast<std::uint64_t>(entry.is_directory()));
+
+        const auto write_time = entry.last_write_time(error);
+        if (!error)
+        {
+            mix(static_cast<std::uint64_t>(write_time.time_since_epoch().count()));
+        }
+        else
+        {
+            error.clear();
+        }
+
+        if (entry.is_regular_file())
+        {
+            const auto file_size = entry.file_size(error);
+            if (!error)
+            {
+                mix(static_cast<std::uint64_t>(file_size));
+            }
+            else
+            {
+                error.clear();
+            }
+        }
+    }
+
+    return signature;
+}
+
+bool FilesPanel::DetectTreeMutation(const std::filesystem::path& root)
+{
+    const std::uint64_t current_signature = ComputeTreeSignature(root);
+    if (!has_tree_signature_)
+    {
+        last_tree_signature_ = current_signature;
+        has_tree_signature_ = true;
+        return false;
+    }
+
+    if (current_signature != last_tree_signature_)
+    {
+        last_tree_signature_ = current_signature;
+        return true;
+    }
+
+    return false;
 }
 
 FileTreeNode FilesPanel::BuildNode(const std::filesystem::path& path) const

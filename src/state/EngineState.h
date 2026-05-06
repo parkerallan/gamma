@@ -68,6 +68,7 @@ struct EngineState
     bool show_version_control_panel = true;
     bool show_workspace_panel = true;
     bool show_effects_panel = true;
+    bool show_animator_panel = true;
     bool show_settings_panel = true;
     bool show_info_panel = true;
     bool show_log_panel = true;
@@ -558,6 +559,8 @@ struct EngineState
             extension == ".yaml" ||
             extension == ".lua" ||
             extension == ".graph" ||
+            extension == ".anim" ||
+            extension == ".fx" ||
                 extension == ".engineproj" ||
             extension == ".scene" ||
             extension == ".mat" ||
@@ -569,7 +572,7 @@ struct EngineState
         std::string extension = path.extension().string();
         std::transform(extension.begin(), extension.end(), extension.begin(),
             [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-        return extension == ".graph";
+        return extension == ".graph" || extension == ".anim";
     }
 
     void RequestOpenGraphFile(const std::filesystem::path& path)

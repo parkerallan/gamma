@@ -8,6 +8,7 @@
 #include "state/EngineState.h"
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -40,6 +41,9 @@ private:
     std::array<char, 160> search_buffer_{};
     std::array<char, 160> scene_object_name_buffer_{};
     bool refresh_requested_ = false;
+    double last_auto_refresh_time_ = 0.0;
+    bool has_tree_signature_ = false;
+    std::uint64_t last_tree_signature_ = 0;
     std::filesystem::path scene_object_clipboard_scene_path_;
     std::string scene_object_clipboard_name_;
     std::filesystem::path scene_object_action_scene_path_;
@@ -85,4 +89,6 @@ private:
     static bool DecodeSceneObjectPayload(std::string_view payload, std::filesystem::path& scene_path, std::string& object_name);
     bool MovePath(const std::filesystem::path& source_path, const std::filesystem::path& destination_directory, EngineState& state);
     bool NodeMatchesFilter(const FileTreeNode& node, std::string_view filter) const;
+    std::uint64_t ComputeTreeSignature(const std::filesystem::path& root) const;
+    bool DetectTreeMutation(const std::filesystem::path& root);
 };
