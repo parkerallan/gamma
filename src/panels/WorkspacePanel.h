@@ -4,8 +4,7 @@
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "components/EditorComponent.h"
-#include "graph/GraphDocument.h"
-#include "graph/NodeLibrary.h"
+#include "components/NodeGraphComponent.h"
 #include "render/SceneViewportRenderer.h"
 #include "state/EngineState.h"
 
@@ -37,9 +36,7 @@ public:
     bool ReloadOpenGraph(EngineState& state);
 
 private:
-    std::unique_ptr<ImFlow::ImNodeFlow> graph_;
-    GraphDocument current_graph_document_;
-    std::string saved_graph_contents_;
+    NodeGraphComponent node_graph_component_;
     SceneViewportRenderer scene_view_renderer_;
     SceneViewportCameraState scene_view_camera_{};
     EditorComponent editor_component_;
@@ -49,17 +46,9 @@ private:
     bool has_cached_scene_metadata_ = false;
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
 
-    ImFlow::ImNodeFlow& GetGraph();
     const CachedModelAssetEntry& GetModelAssetEntry(const std::filesystem::path& path);
     const SceneMetadata& GetSceneMetadata(const std::filesystem::path& path);
     const ModelAsset& GetModelAsset(const std::filesystem::path& path);
-    bool LoadGraphFile(EngineState& state, const std::filesystem::path& path);
-    void HandleGraphSessionRequests(EngineState& state);
-    void RebuildGraphFromDocument();
-    void SyncGraphDocumentFromUi(EngineState& state);
     void RenderSceneViewport(EngineState& state);
     void RenderGraphViewport(EngineState& state);
-    void RenderNodeLibrary();
-    void RenderNodeLibrarySection(const GraphNodeDefinition& definition);
-    void HandleGraphNodeDrop(EngineState& state);
 };

@@ -405,6 +405,7 @@ add_executable(engine
     src/components/CreationMenu.cpp
     src/components/EditorComponent.cpp
     src/components/FileContextMenu.cpp
+    src/components/NodeGraphComponent.cpp
     src/components/SceneObjectAttributesEditor.cpp
     src/components/BuildSettingsComponent.cpp
     src/dialogs/BuildGameDialog.cpp
