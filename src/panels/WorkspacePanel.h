@@ -9,6 +9,7 @@
 #include "state/EngineState.h"
 
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <unordered_map>
 
@@ -36,6 +37,14 @@ public:
     bool ReloadOpenGraph(EngineState& state);
 
 private:
+    struct AsyncViewportLoadResult
+    {
+        std::filesystem::path scene_path;
+        std::filesystem::file_time_type scene_write_time{};
+        SceneMetadata scene_metadata{};
+        std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_cache;
+    };
+
     NodeGraphComponent node_graph_component_;
     SceneViewportRenderer scene_view_renderer_;
     SceneViewportCameraState scene_view_camera_{};
@@ -45,9 +54,15 @@ private:
     SceneMetadata cached_scene_metadata_{};
     bool has_cached_scene_metadata_ = false;
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
+    std::future<AsyncViewportLoadResult> pending_viewport_load_;
+    std::filesystem::path pending_viewport_scene_path_;
+    std::filesystem::file_time_type pending_viewport_scene_write_time_{};
+    bool viewport_load_in_progress_ = false;
 
     const CachedModelAssetEntry& GetModelAssetEntry(const std::filesystem::path& path);
     const SceneMetadata& GetSceneMetadata(const std::filesystem::path& path);
+    bool BeginAsyncViewportLoad(const EngineState& state, const std::filesystem::path& scene_path, std::filesystem::file_time_type scene_write_time);
+    bool TryConsumeAsyncViewportLoad(EngineState& state, const std::filesystem::path& scene_path, std::filesystem::file_time_type scene_write_time);
     const ModelAsset& GetModelAsset(const std::filesystem::path& path);
     void RenderSceneViewport(EngineState& state);
     void RenderGraphViewport(EngineState& state);
