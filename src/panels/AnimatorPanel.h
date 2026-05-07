@@ -1,6 +1,12 @@
 #pragma once
 
+#include "assets/AnimatorControllerAsset.h"
 #include "state/EngineState.h"
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
 
 class AnimatorPanel
 {
@@ -9,5 +15,23 @@ public:
     void Shutdown();
 
 private:
-    void RenderNodeLibrary();
+    void RefreshControllerList(const std::filesystem::path& animators_dir);
+    void EnsureControllerLoaded(const std::filesystem::path& controller_path, EngineState& state);
+    bool SaveCurrentController(const std::filesystem::path& controller_path, EngineState& state);
+    void MarkControllerListDirty();
+    void RenderControllerEditor(EngineState& state);
+    void RenderNodeLibrary(EngineState& state);
+    bool ImportAnimationsFromModel(const std::filesystem::path& model_path, EngineState& state);
+
+    int selected_controller_index_ = 0;
+    char new_controller_name_[128] = "NewAnimator";
+    std::vector<std::string> controller_names_;
+    std::vector<std::filesystem::path> controller_paths_;
+    std::filesystem::path last_scanned_dir_;
+    std::uint64_t last_dir_signature_ = 0;
+
+    std::filesystem::path loaded_controller_path_;
+    AnimatorControllerAsset controller_{};
+    bool controller_loaded_ = false;
+    bool controller_dirty_ = false;
 };

@@ -823,6 +823,129 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_float(SceneObjectAttributeKind::Skybox,
             [](const SceneObjectAttribute& attribute) { return attribute.skybox.rotation_degrees; },
             [](SceneObjectAttribute& attribute, float value) { attribute.skybox.rotation_degrees = value; });
+    case ScriptAttributeAccessorId::AnimatorControllerPath:
+        return access_string(SceneObjectAttributeKind::Animator,
+            [](const SceneObjectAttribute& attribute) { return attribute.animator.controller_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.animator.controller_path = value; });
+    case ScriptAttributeAccessorId::AnimatorInitialState:
+        return access_string(SceneObjectAttributeKind::Animator,
+            [](const SceneObjectAttribute& attribute) { return attribute.animator.initial_state; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.animator.initial_state = value; });
+    case ScriptAttributeAccessorId::AnimatorPlaybackSpeed:
+        return access_float(SceneObjectAttributeKind::Animator,
+            [](const SceneObjectAttribute& attribute) { return attribute.animator.playback_speed; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.animator.playback_speed = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::AnimatorAutoPlay:
+        return access_bool(SceneObjectAttributeKind::Animator,
+            [](const SceneObjectAttribute& attribute) { return attribute.animator.auto_play; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.animator.auto_play = value; });
+    case ScriptAttributeAccessorId::AnimatorActiveState:
+    {
+        if (is_setter)
+        {
+            return luaL_error(lua_state, "Animator.GetState is read-only");
+        }
+
+        const RuntimeRenderer::RuntimeAnimatorState* const runtime_state = renderer->FindRuntimeAnimatorState(object_name);
+        if (runtime_state == nullptr || runtime_state->active_state.empty())
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushstring(lua_state, runtime_state->active_state.c_str());
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorStateTime:
+    {
+        if (is_setter)
+        {
+            return luaL_error(lua_state, "Animator.StateTime is read-only");
+        }
+
+        const RuntimeRenderer::RuntimeAnimatorState* const runtime_state = renderer->FindRuntimeAnimatorState(object_name);
+        if (runtime_state == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushnumber(lua_state, static_cast<lua_Number>(runtime_state->state_time_seconds));
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorSetBool:
+    {
+        const char* parameter_name = luaL_checkstring(lua_state, 2);
+        const bool set_ok = renderer->SetRuntimeAnimatorBoolParameter(object_name, parameter_name, lua_toboolean(lua_state, 3) != 0);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorGetBool:
+    {
+        const char* parameter_name = luaL_checkstring(lua_state, 2);
+        float value = 0.0f;
+        bool is_bool = false;
+        if (!renderer->TryGetRuntimeAnimatorParameter(object_name, parameter_name, value, is_bool))
+        {
+            lua_pushboolean(lua_state, 0);
+            return 1;
+        }
+
+        lua_pushboolean(lua_state, is_bool && value != 0.0f ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorSetTrigger:
+    {
+        const char* trigger_name = luaL_checkstring(lua_state, 2);
+        const bool set_ok = renderer->SetRuntimeAnimatorTrigger(object_name, trigger_name);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorSetState:
+    {
+        const char* state_name = luaL_checkstring(lua_state, 2);
+        const bool set_ok = renderer->SetRuntimeAnimatorState(object_name, state_name);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorGetState:
+    {
+        if (is_setter)
+        {
+            return luaL_error(lua_state, "Animator.GetState is read-only");
+        }
+
+        const RuntimeRenderer::RuntimeAnimatorState* const runtime_state = renderer->FindRuntimeAnimatorState(object_name);
+        if (runtime_state == nullptr || runtime_state->active_state.empty())
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushstring(lua_state, runtime_state->active_state.c_str());
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorSetDefaultState:
+        return access_string(SceneObjectAttributeKind::Animator,
+            [](const SceneObjectAttribute& attribute) { return attribute.animator.initial_state; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.animator.initial_state = value; });
+    case ScriptAttributeAccessorId::AnimatorGetDefaultState:
+    {
+        if (is_setter)
+        {
+            return luaL_error(lua_state, "Animator.GetDefaultState is read-only");
+        }
+
+        const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Animator);
+        if (attribute == nullptr)
+        {
+            lua_pushnil(lua_state);
+            return 1;
+        }
+
+        lua_pushstring(lua_state, attribute->animator.initial_state.c_str());
+        return 1;
+    }
     default:
         return luaL_error(lua_state, "Unknown attribute accessor");
     }

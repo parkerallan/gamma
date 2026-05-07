@@ -20,6 +20,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Camera,
     SceneObjectAttributeKind::Rigidbody,
     SceneObjectAttributeKind::TriggerVolume,
+    SceneObjectAttributeKind::Animator,
     SceneObjectAttributeKind::Text2D,
     SceneObjectAttributeKind::Image2D,
     SceneObjectAttributeKind::Skybox,
@@ -239,6 +240,7 @@ bool RenderAttributeSection(
     {
         if (attribute.kind != SceneObjectAttributeKind::Rigidbody &&
             attribute.kind != SceneObjectAttributeKind::TriggerVolume &&
+            attribute.kind != SceneObjectAttributeKind::Animator &&
             attribute.kind != SceneObjectAttributeKind::Text2D &&
             attribute.kind != SceneObjectAttributeKind::Image2D &&
             attribute.kind != SceneObjectAttributeKind::Skybox)
@@ -586,6 +588,69 @@ bool RenderAttributeSection(
                 changed = SaveSceneObjectAttributeEdit(state, object, "trigger half extent", [&]()
                 {
                     return SetSceneObjectAttributeTriggerHalfExtent(state.selected_item_path, object.name, attribute_index, clamped);
+                }) || changed;
+            }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Animator:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_controller_label = attribute.animator.controller_path.empty()
+                ? std::string("Drop Animator Controller (.anim)")
+                : std::filesystem::path(attribute.animator.controller_path).filename().string();
+            ImGui::Button(current_controller_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+                {
+                    const char* payload_text = static_cast<const char*>(payload->Data);
+                    const std::size_t payload_size = payload->DataSize > 0
+                        ? static_cast<std::size_t>(payload->DataSize - 1)
+                        : 0;
+                    const std::filesystem::path dropped_path(std::string(payload_text, payload_size));
+                    if (HasAnyExtension(dropped_path, {".anim"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "animator controller", [&]()
+                        {
+                            return SetSceneObjectAttributeAnimatorControllerPath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            std::array<char, 256> initial_state_buffer{};
+            const std::size_t copy_size = (std::min)(attribute.animator.initial_state.size(), initial_state_buffer.size() - 1);
+            std::copy_n(attribute.animator.initial_state.data(), copy_size, initial_state_buffer.data());
+            if (ImGui::InputText("Initial State", initial_state_buffer.data(), initial_state_buffer.size()))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "animator initial state", [&]()
+                {
+                    return SetSceneObjectAttributeAnimatorInitialState(state.selected_item_path, object.name, attribute_index, std::string(initial_state_buffer.data()));
+                }) || changed;
+            }
+
+            float playback_speed = attribute.animator.playback_speed;
+            if (ImGui::DragFloat("Playback Speed", &playback_speed, 0.01f, 0.0f, 5.0f, "%.2f"))
+            {
+                const float clamped = (std::max)(0.0f, playback_speed);
+                changed = SaveSceneObjectAttributeEdit(state, object, "animator playback speed", [&]()
+                {
+                    return SetSceneObjectAttributeAnimatorPlaybackSpeed(state.selected_item_path, object.name, attribute_index, clamped);
+                }) || changed;
+            }
+
+            bool auto_play = attribute.animator.auto_play;
+            if (ImGui::Checkbox("Auto Play", &auto_play))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "animator auto play", [&]()
+                {
+                    return SetSceneObjectAttributeAnimatorAutoPlay(state.selected_item_path, object.name, attribute_index, auto_play);
                 }) || changed;
             }
 

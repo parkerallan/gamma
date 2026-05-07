@@ -28,6 +28,7 @@ enum class SceneObjectAttributeKind
     Camera,
     Rigidbody,
     TriggerVolume,
+    Animator,
     Text2D,
     Image2D,
     Skybox,
@@ -93,6 +94,14 @@ struct SceneObjectTriggerVolumeAttributes
     SceneVector3 half_extent = {0.5f, 0.5f, 0.5f};
 };
 
+struct SceneObjectAnimatorAttributes
+{
+    std::string controller_path;
+    std::string initial_state;
+    float playback_speed = 1.0f;
+    bool auto_play = true;
+};
+
 struct SceneObjectText2DAttributes
 {
     std::string font_path;
@@ -137,6 +146,7 @@ struct SceneObjectAttribute
     SceneObjectCameraAttributes camera{};
     SceneObjectRigidbodyAttributes rigidbody{};
     SceneObjectTriggerVolumeAttributes trigger_box{};
+    SceneObjectAnimatorAttributes animator{};
     SceneObjectText2DAttributes text_2d{};
     SceneObjectImage2DAttributes image_2d{};
     SceneObjectSkyboxAttributes skybox{};
@@ -249,6 +259,10 @@ bool SetSceneObjectAttributePhysicsHalfExtent(const std::filesystem::path& scene
 bool SetSceneObjectAttributePhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float linear_damping);
 bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float angular_damping);
 bool SetSceneObjectAttributeTriggerHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent);
+bool SetSceneObjectAttributeAnimatorControllerPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& controller_path);
+bool SetSceneObjectAttributeAnimatorInitialState(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& initial_state);
+bool SetSceneObjectAttributeAnimatorPlaybackSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float playback_speed);
+bool SetSceneObjectAttributeAnimatorAutoPlay(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool auto_play);
 bool SetSceneObjectAttributeText2DFontPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& font_path);
 bool SetSceneObjectAttributeText2DText(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& text);
 bool SetSceneObjectAttributeText2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y);

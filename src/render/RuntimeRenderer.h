@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/VulkanContext.h"
+#include "assets/AnimatorControllerAsset.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "render/Lighting.h"
@@ -163,6 +164,35 @@ public:
         bool repeating = false;
     };
 
+    struct CachedAnimatorControllerEntry
+    {
+        std::filesystem::file_time_type write_time{};
+        AnimatorControllerAsset asset{};
+        bool loaded = false;
+    };
+
+    struct RuntimeAnimatorState
+    {
+        std::string runtime_key;
+        std::string controller_path;
+        std::string active_state;
+        std::string active_clip_name;
+        std::string active_clip_source_model_path;
+        std::string previous_state;
+        std::string previous_clip_name;
+        std::string previous_clip_source_model_path;
+        float state_time_seconds = 0.0f;
+        float previous_state_time_seconds = 0.0f;
+        float previous_state_playback_speed = 1.0f;
+        float blend_duration_seconds = 0.0f;
+        float blend_time_remaining_seconds = 0.0f;
+        bool previous_pose_snapshot_valid = false;
+        std::filesystem::file_time_type controller_write_time = std::filesystem::file_time_type::min();
+        std::unordered_map<std::string, float> float_parameters;
+        std::unordered_map<std::string, bool> bool_parameters;
+        std::unordered_set<std::string> triggers;
+    };
+
 private:
 
     const CachedModelAssetEntry& GetModelAssetEntry(const std::filesystem::path& path);
@@ -181,6 +211,8 @@ private:
     bool CallScriptTriggerMethod(RuntimeScriptInstance& instance, const char* method_name, const std::string& other_object_name, const std::string& phase, std::string* error_message);
     bool UpdateScriptsForFrame(std::string* error_message);
     bool UpdateScriptTimers(float delta_time, std::string* error_message);
+    void UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata);
+    bool UpdateAnimatedMeshForObject(const QueuedSceneObject& object);
     void ClearScriptTimers();
     void RemoveScriptTimersForInstance(const std::string& instance_key);
     void ClearScriptEventSubscriptions();
@@ -194,6 +226,14 @@ private:
     bool TryGetScriptObjectRotation(const std::string& object_name, SceneVector3& rotation) const;
     void SetScriptObjectScale(const std::string& object_name, const SceneVector3& scale);
     bool TryGetScriptObjectScale(const std::string& object_name, SceneVector3& scale) const;
+    RuntimeAnimatorState* FindRuntimeAnimatorState(const std::string& object_name, std::size_t occurrence_index = 0);
+    const RuntimeAnimatorState* FindRuntimeAnimatorState(const std::string& object_name, std::size_t occurrence_index = 0) const;
+    RuntimeAnimatorState* EnsureRuntimeAnimatorState(const std::string& object_name, std::size_t occurrence_index = 0);
+    bool SetRuntimeAnimatorParameter(const std::string& object_name, const std::string& parameter_name, float value, std::size_t occurrence_index = 0);
+    bool SetRuntimeAnimatorBoolParameter(const std::string& object_name, const std::string& parameter_name, bool value, std::size_t occurrence_index = 0);
+    bool TryGetRuntimeAnimatorParameter(const std::string& object_name, const std::string& parameter_name, float& out_value, bool& out_is_bool, std::size_t occurrence_index = 0) const;
+    bool SetRuntimeAnimatorTrigger(const std::string& object_name, const std::string& trigger_name, std::size_t occurrence_index = 0);
+    bool SetRuntimeAnimatorState(const std::string& object_name, const std::string& state_name, std::size_t occurrence_index = 0);
     SceneObjectAttribute* FindScriptAttribute(const std::string& object_name, SceneObjectAttributeKind kind, std::size_t occurrence_index = 0);
     const SceneObjectAttribute* FindScriptAttribute(const std::string& object_name, SceneObjectAttributeKind kind, std::size_t occurrence_index = 0) const;
     enum class ScriptAttributeAccessorId
@@ -248,6 +288,19 @@ private:
         Image2DPriority,
         SkyboxImagePath,
         SkyboxRotation,
+        AnimatorControllerPath,
+        AnimatorInitialState,
+        AnimatorPlaybackSpeed,
+        AnimatorAutoPlay,
+        AnimatorActiveState,
+        AnimatorStateTime,
+        AnimatorSetBool,
+        AnimatorGetBool,
+        AnimatorSetTrigger,
+        AnimatorSetState,
+        AnimatorGetState,
+        AnimatorSetDefaultState,
+        AnimatorGetDefaultState,
     };
     void RefreshActiveScriptCameraSelection();
     void HandleScriptAttributeMutation(SceneObjectAttributeKind kind, ScriptAttributeAccessorId accessor_id);
@@ -307,6 +360,9 @@ private:
     SceneMetadata cached_scene_metadata_{};
     bool has_cached_scene_metadata_ = false;
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
+    std::unordered_map<std::filesystem::path, std::uint64_t> animated_mesh_revisions_;
+    std::unordered_map<std::filesystem::path, CachedAnimatorControllerEntry> animator_controller_cache_;
+    std::unordered_map<std::string, RuntimeAnimatorState> runtime_animator_states_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
     std::unordered_map<std::filesystem::path, CachedScriptSourceEntry> script_cache_;
     PhysicsWorld physics_world_{};
@@ -328,6 +384,7 @@ private:
     std::string script_active_object_name_;
     std::vector<bool> script_prev_keys_down_;
     std::vector<PhysicsCollisionEvent> script_frame_collision_events_;
+    std::uint64_t animation_last_tick_ms_ = 0;
     std::uint64_t script_last_tick_ms_ = 0;
     std::uint64_t script_session_start_ms_ = 0;
     std::vector<QueuedSceneObject> queued_objects_;

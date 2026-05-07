@@ -520,6 +520,10 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributePhysicsLinearDamping:") ||
     StartsWith(line, "AttributePhysicsAngularDamping:") ||
     StartsWith(line, "AttributeTriggerHalfExtent:") ||
+    StartsWith(line, "AttributeAnimatorControllerPath:") ||
+    StartsWith(line, "AttributeAnimatorInitialState:") ||
+    StartsWith(line, "AttributeAnimatorPlaybackSpeed:") ||
+    StartsWith(line, "AttributeAnimatorAutoPlay:") ||
     StartsWith(line, "AttributeText2DFontPath:") ||
     StartsWith(line, "AttributeText2DText:") ||
     StartsWith(line, "AttributeText2DX:") ||
@@ -897,6 +901,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Rigidbody";
     case SceneObjectAttributeKind::TriggerVolume:
         return "Trigger Volume";
+    case SceneObjectAttributeKind::Animator:
+        return "Animator";
     case SceneObjectAttributeKind::Text2D:
         return "Text 2D";
     case SceneObjectAttributeKind::Image2D:
@@ -927,6 +933,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Rigidbody";
     case SceneObjectAttributeKind::TriggerVolume:
         return "TriggerVolume";
+    case SceneObjectAttributeKind::Animator:
+        return "Animator";
     case SceneObjectAttributeKind::Text2D:
         return "Text2D";
     case SceneObjectAttributeKind::Image2D:
@@ -969,6 +977,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "TriggerVolume")
     {
         return SceneObjectAttributeKind::TriggerVolume;
+    }
+    if (trimmed == "Animator")
+    {
+        return SceneObjectAttributeKind::Animator;
     }
     if (trimmed == "Text2D")
     {
@@ -1507,6 +1519,22 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             current_object->physics_is_dynamic = false;
             current_object->physics_is_trigger = true;
             current_object->physics_half_extent = current_attribute->trigger_box.half_extent;
+        }
+        else if (StartsWith(trimmed, "AttributeAnimatorControllerPath:") && current_attribute != nullptr)
+        {
+            current_attribute->animator.controller_path = ExtractValue(trimmed, "AttributeAnimatorControllerPath:");
+        }
+        else if (StartsWith(trimmed, "AttributeAnimatorInitialState:") && current_attribute != nullptr)
+        {
+            current_attribute->animator.initial_state = ExtractValue(trimmed, "AttributeAnimatorInitialState:");
+        }
+        else if (StartsWith(trimmed, "AttributeAnimatorPlaybackSpeed:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeAnimatorPlaybackSpeed:"), current_attribute->animator.playback_speed);
+        }
+        else if (StartsWith(trimmed, "AttributeAnimatorAutoPlay:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeAnimatorAutoPlay:"), current_attribute->animator.auto_play);
         }
         else if (StartsWith(trimmed, "AttributeText2DFontPath:") && current_attribute != nullptr)
         {
@@ -2118,6 +2146,26 @@ bool SetSceneObjectAttributePhysicsAngularDamping(const std::filesystem::path& s
 bool SetSceneObjectAttributeTriggerHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& half_extent)
 {
     return SetSceneObjectAttributeVector3Value("AttributeTriggerHalfExtent", scene_path, object_name, attribute_index, half_extent);
+}
+
+bool SetSceneObjectAttributeAnimatorControllerPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& controller_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeAnimatorControllerPath", scene_path, object_name, attribute_index, controller_path);
+}
+
+bool SetSceneObjectAttributeAnimatorInitialState(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& initial_state)
+{
+    return SetSceneObjectAttributeStringValue("AttributeAnimatorInitialState", scene_path, object_name, attribute_index, initial_state);
+}
+
+bool SetSceneObjectAttributeAnimatorPlaybackSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float playback_speed)
+{
+    return SetSceneObjectAttributeScalar("AttributeAnimatorPlaybackSpeed", scene_path, object_name, attribute_index, playback_speed);
+}
+
+bool SetSceneObjectAttributeAnimatorAutoPlay(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool auto_play)
+{
+    return SetSceneObjectAttributeBoolean("AttributeAnimatorAutoPlay", scene_path, object_name, attribute_index, auto_play);
 }
 
 namespace

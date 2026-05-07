@@ -694,6 +694,7 @@ bool BuildBottomLevelAccelerationStructure(
     cache_entry.index_device_address = mesh.index_device_address;
     cache_entry.vertex_count = mesh.vertex_count;
     cache_entry.index_count = mesh.index_count;
+    cache_entry.geometry_revision = mesh.geometry_revision;
     cache_entry.opaque = IsOpaqueMesh(mesh);
     return true;
 }
@@ -981,6 +982,8 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     std::vector<SectionRecordGpu> new_section_records;
     std::vector<MaterialRecordGpu> new_material_records;
     std::vector<VkDescriptorImageInfo> new_texture_descriptors;
+    std::uint64_t new_dynamic_geometry_sig = kFnvOffsetBasis;
+    dynamic_geometry_present_ = false;
 
     for (const MeshInput& mesh : meshes)
     {
@@ -991,6 +994,13 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 
         meshes_by_key[mesh.key] = &mesh;
         mesh_index_by_key.emplace(mesh.key, static_cast<std::uint32_t>(new_mesh_records.size()));
+
+        HashBytes(new_dynamic_geometry_sig, mesh.key.data(), mesh.key.size());
+        HashBytes(new_dynamic_geometry_sig, &mesh.geometry_revision, sizeof(mesh.geometry_revision));
+        if (mesh.geometry_revision != 0)
+        {
+            dynamic_geometry_present_ = true;
+        }
 
         MeshRecordGpu mesh_record{};
         mesh_record.vertex_buffer_address = mesh.vertex_device_address;
@@ -1179,6 +1189,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             cache_entry.index_device_address != mesh->index_device_address ||
             cache_entry.vertex_count != mesh->vertex_count ||
             cache_entry.index_count != mesh->index_count ||
+            cache_entry.geometry_revision != mesh->geometry_revision ||
             cache_entry.opaque != IsOpaqueMesh(*mesh);
 
         if (!needs_rebuild)
@@ -1243,6 +1254,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 
     // Full scene signature for accumulation-reset detection (includes transforms).
     std::uint64_t full_sig = new_geometry_sig;
+    HashBytes(full_sig, &new_dynamic_geometry_sig, sizeof(new_dynamic_geometry_sig));
     HashVector(full_sig, new_instances);
     const bool scene_changed = !scene_signature_valid_ || scene_signature_ != full_sig;
     if (scene_changed)
@@ -2333,15 +2345,17 @@ bool RayTracing::RenderFrame(
     accumulation_reference.accumulation_data = {0, 0, 0, 0};
     const bool accumulation_reset =
         accumulation_reset_requested_ ||
+        dynamic_geometry_present_ ||
         !accumulation_reference_uniforms_valid_ ||
         std::memcmp(&accumulation_reference, &accumulation_reference_uniforms_, sizeof(UniformBlock)) != 0;
     if (accumulation_reset)
     {
         accumulation_frame_count_ = 0;
     }
+    const std::uint32_t accumulation_enable_history = (dynamic_geometry_present_ || accumulation_frame_count_ == 0) ? 0u : 1u;
     uniforms.accumulation_data = {
-        accumulation_frame_count_,
-        accumulation_frame_count_ > 0 ? 1u : 0u,
+        dynamic_geometry_present_ ? 0u : accumulation_frame_count_,
+        accumulation_enable_history,
         accumulation_reset ? 1u : 0u,
         raw_frame_count_};
 

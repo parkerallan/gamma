@@ -1,6 +1,12 @@
 #include "render/RuntimeRenderer.h"
 #include "vfs/AssetVFS.h"
 
+#include <assimp/Importer.hpp>
+#include <assimp/IOStream.hpp>
+#include <assimp/IOSystem.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+
 #include <SDL3/SDL.h>
 
 extern "C"
@@ -12,16 +18,25 @@ extern "C"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
 {
 constexpr float kPi = 3.1415926535f;
+
+std::string ToDisplayString(const aiString& value)
+{
+    return value.length > 0 ? std::string(value.C_Str()) : std::string();
+}
 
 float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
 {
@@ -1000,6 +1015,628 @@ std::string BuildScriptInstanceKey(const std::string& object_name, const std::fi
 {
     return object_name + "|" + script_path.generic_string();
 }
+
+struct RuntimeSkinInfluence
+{
+    std::array<int, 4> bone_indices = {-1, -1, -1, -1};
+    std::array<float, 4> bone_weights = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+struct RuntimeSkinnedMeshData
+{
+    const aiMesh* mesh = nullptr;
+    aiMatrix4x4 bind_node_transform;
+    std::vector<RuntimeSkinInfluence> influences;
+};
+
+struct RuntimeAnimationModelCacheEntry
+{
+    bool loaded = false;
+    std::string error_message;
+    std::filesystem::file_time_type write_time{};
+    std::unique_ptr<Assimp::Importer> importer;
+    const aiScene* scene = nullptr;
+    aiMatrix4x4 global_inverse;
+    std::unordered_map<std::string, std::size_t> bone_index_by_name;
+    std::vector<aiMatrix4x4> bone_offsets;
+    std::vector<RuntimeSkinnedMeshData> skinned_meshes;
+};
+
+std::unordered_map<std::string, RuntimeAnimationModelCacheEntry> g_runtime_animation_model_cache;
+std::unordered_map<std::string, std::vector<aiMatrix4x4>> g_runtime_animator_blend_snapshots;
+
+aiMatrix4x4 LerpMatrix(const aiMatrix4x4& from, const aiMatrix4x4& to, float alpha)
+{
+    aiMatrix4x4 result;
+    result.a1 = from.a1 + ((to.a1 - from.a1) * alpha);
+    result.a2 = from.a2 + ((to.a2 - from.a2) * alpha);
+    result.a3 = from.a3 + ((to.a3 - from.a3) * alpha);
+    result.a4 = from.a4 + ((to.a4 - from.a4) * alpha);
+    result.b1 = from.b1 + ((to.b1 - from.b1) * alpha);
+    result.b2 = from.b2 + ((to.b2 - from.b2) * alpha);
+    result.b3 = from.b3 + ((to.b3 - from.b3) * alpha);
+    result.b4 = from.b4 + ((to.b4 - from.b4) * alpha);
+    result.c1 = from.c1 + ((to.c1 - from.c1) * alpha);
+    result.c2 = from.c2 + ((to.c2 - from.c2) * alpha);
+    result.c3 = from.c3 + ((to.c3 - from.c3) * alpha);
+    result.c4 = from.c4 + ((to.c4 - from.c4) * alpha);
+    result.d1 = from.d1 + ((to.d1 - from.d1) * alpha);
+    result.d2 = from.d2 + ((to.d2 - from.d2) * alpha);
+    result.d3 = from.d3 + ((to.d3 - from.d3) * alpha);
+    result.d4 = from.d4 + ((to.d4 - from.d4) * alpha);
+    return result;
+}
+
+std::string NormalizeAnimationAssimpPath(std::string path)
+{
+    std::replace(path.begin(), path.end(), '\\', '/');
+
+    while (path.rfind("./", 0) == 0)
+    {
+        path.erase(0, 2);
+    }
+
+    if (path.size() > 3 && std::isalpha(static_cast<unsigned char>(path[0])) != 0 && path[1] == ':' && path[2] == '/')
+    {
+        path.erase(0, 3);
+    }
+
+    if (!path.empty() && path[0] == '/')
+    {
+        path.erase(0, 1);
+    }
+
+    std::string lowered = path;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c)
+    {
+        return static_cast<char>(std::toupper(c));
+    });
+
+    const std::string marker = "CONTENT/";
+    if (lowered.rfind(marker, 0) == 0)
+    {
+        path = path.substr(marker.size());
+    }
+    else
+    {
+        const std::string slash_marker = "/CONTENT/";
+        const std::size_t marker_pos = lowered.find(slash_marker);
+        if (marker_pos != std::string::npos)
+        {
+            path = path.substr(marker_pos + slash_marker.size());
+        }
+    }
+
+    return path;
+}
+
+class RuntimePakMemoryIOStream : public Assimp::IOStream
+{
+public:
+    explicit RuntimePakMemoryIOStream(std::vector<std::uint8_t> bytes)
+        : bytes_(std::move(bytes))
+    {
+    }
+
+    size_t Read(void* buffer, size_t size, size_t count) override
+    {
+        if (size == 0 || count == 0 || cursor_ >= bytes_.size())
+        {
+            return 0;
+        }
+
+        const size_t requested = size * count;
+        const size_t available = bytes_.size() - cursor_;
+        const size_t to_copy = (std::min)(requested, available);
+        std::memcpy(buffer, bytes_.data() + cursor_, to_copy);
+        cursor_ += to_copy;
+        return to_copy / size;
+    }
+
+    size_t Write(const void*, size_t, size_t) override
+    {
+        return 0;
+    }
+
+    aiReturn Seek(size_t offset, aiOrigin origin) override
+    {
+        size_t new_cursor = cursor_;
+        if (origin == aiOrigin_SET)
+        {
+            new_cursor = offset;
+        }
+        else if (origin == aiOrigin_CUR)
+        {
+            new_cursor = cursor_ + offset;
+        }
+        else if (origin == aiOrigin_END)
+        {
+            if (offset > bytes_.size())
+            {
+                return aiReturn_FAILURE;
+            }
+            new_cursor = bytes_.size() - offset;
+        }
+
+        if (new_cursor > bytes_.size())
+        {
+            return aiReturn_FAILURE;
+        }
+
+        cursor_ = new_cursor;
+        return aiReturn_SUCCESS;
+    }
+
+    size_t Tell() const override
+    {
+        return cursor_;
+    }
+
+    size_t FileSize() const override
+    {
+        return bytes_.size();
+    }
+
+    void Flush() override {}
+
+private:
+    std::vector<std::uint8_t> bytes_;
+    size_t cursor_ = 0;
+};
+
+class RuntimePakAssetIOSystem : public Assimp::IOSystem
+{
+public:
+    bool Exists(const char* file) const override
+    {
+        if (!g_asset_reader || file == nullptr)
+        {
+            return false;
+        }
+
+        return g_asset_reader->FileExists(ResolvePath(file));
+    }
+
+    char getOsSeparator() const override
+    {
+        return '/';
+    }
+
+    Assimp::IOStream* Open(const char* file, const char* mode = "rb") override
+    {
+        if (!g_asset_reader || file == nullptr)
+        {
+            return nullptr;
+        }
+
+        if (mode != nullptr && mode[0] != 'r')
+        {
+            return nullptr;
+        }
+
+        const std::string resolved = ResolvePath(file);
+        std::vector<std::uint8_t> bytes = g_asset_reader->ReadFile(resolved);
+        if (bytes.empty())
+        {
+            return nullptr;
+        }
+
+        return new RuntimePakMemoryIOStream(std::move(bytes));
+    }
+
+    void Close(Assimp::IOStream* file) override
+    {
+        delete file;
+    }
+
+private:
+    static std::string ResolvePath(const std::string& raw_path)
+    {
+        const std::string normalized = NormalizeAnimationAssimpPath(raw_path);
+        if (!cwd_.empty())
+        {
+            const std::string combined = NormalizeAnimationAssimpPath(cwd_ + "/" + normalized);
+            if (g_asset_reader && g_asset_reader->FileExists(combined))
+            {
+                return combined;
+            }
+        }
+
+        std::filesystem::path path_obj(normalized);
+        cwd_ = NormalizeAnimationAssimpPath(path_obj.parent_path().generic_string());
+        return normalized;
+    }
+
+    static std::string cwd_;
+};
+
+std::string RuntimePakAssetIOSystem::cwd_;
+
+aiMatrix4x4 ComposeTransform(const aiVector3D& scale, const aiQuaternion& rotation, const aiVector3D& translation)
+{
+    aiMatrix4x4 scale_matrix;
+    aiMatrix4x4::Scaling(scale, scale_matrix);
+
+    aiMatrix4x4 rotation_matrix(rotation.GetMatrix());
+
+    aiMatrix4x4 translation_matrix;
+    aiMatrix4x4::Translation(translation, translation_matrix);
+
+    return translation_matrix * rotation_matrix * scale_matrix;
+}
+
+std::array<float, 2> ApplyUvTransformLocal(const std::array<float, 2>& uv, const ModelTextureTransform& transform)
+{
+    if (!transform.valid)
+    {
+        return uv;
+    }
+
+    const float sin_rotation = std::sin(transform.rotation);
+    const float cos_rotation = std::cos(transform.rotation);
+    const float scaled_x = uv[0] * transform.scale[0];
+    const float scaled_y = uv[1] * transform.scale[1];
+    return {
+        (scaled_x * cos_rotation) - (scaled_y * sin_rotation) + transform.translation[0],
+        (scaled_x * sin_rotation) + (scaled_y * cos_rotation) + transform.translation[1],
+    };
+}
+
+template <typename TKey>
+std::size_t FindKeyframeIndex(double time, unsigned int key_count, const TKey* keys)
+{
+    if (key_count <= 1)
+    {
+        return 0;
+    }
+
+    for (unsigned int index = 0; index + 1 < key_count; ++index)
+    {
+        if (time < keys[index + 1].mTime)
+        {
+            return index;
+        }
+    }
+
+    return key_count - 2;
+}
+
+aiVector3D InterpolatePosition(double animation_time, const aiNodeAnim* channel)
+{
+    if (channel == nullptr || channel->mNumPositionKeys == 0)
+    {
+        return aiVector3D(0.0f, 0.0f, 0.0f);
+    }
+    if (channel->mNumPositionKeys == 1)
+    {
+        return channel->mPositionKeys[0].mValue;
+    }
+
+    const std::size_t index = FindKeyframeIndex(animation_time, channel->mNumPositionKeys, channel->mPositionKeys);
+    const std::size_t next_index = index + 1;
+    const double delta = channel->mPositionKeys[next_index].mTime - channel->mPositionKeys[index].mTime;
+    const double factor = delta > 0.0 ? (animation_time - channel->mPositionKeys[index].mTime) / delta : 0.0;
+    return channel->mPositionKeys[index].mValue + static_cast<float>(factor) * (channel->mPositionKeys[next_index].mValue - channel->mPositionKeys[index].mValue);
+}
+
+aiVector3D InterpolateScale(double animation_time, const aiNodeAnim* channel)
+{
+    if (channel == nullptr || channel->mNumScalingKeys == 0)
+    {
+        return aiVector3D(1.0f, 1.0f, 1.0f);
+    }
+    if (channel->mNumScalingKeys == 1)
+    {
+        return channel->mScalingKeys[0].mValue;
+    }
+
+    const std::size_t index = FindKeyframeIndex(animation_time, channel->mNumScalingKeys, channel->mScalingKeys);
+    const std::size_t next_index = index + 1;
+    const double delta = channel->mScalingKeys[next_index].mTime - channel->mScalingKeys[index].mTime;
+    const double factor = delta > 0.0 ? (animation_time - channel->mScalingKeys[index].mTime) / delta : 0.0;
+    return channel->mScalingKeys[index].mValue + static_cast<float>(factor) * (channel->mScalingKeys[next_index].mValue - channel->mScalingKeys[index].mValue);
+}
+
+aiQuaternion InterpolateRotation(double animation_time, const aiNodeAnim* channel)
+{
+    if (channel == nullptr || channel->mNumRotationKeys == 0)
+    {
+        return aiQuaternion();
+    }
+    if (channel->mNumRotationKeys == 1)
+    {
+        return channel->mRotationKeys[0].mValue;
+    }
+
+    const std::size_t index = FindKeyframeIndex(animation_time, channel->mNumRotationKeys, channel->mRotationKeys);
+    const std::size_t next_index = index + 1;
+    const double delta = channel->mRotationKeys[next_index].mTime - channel->mRotationKeys[index].mTime;
+    const double factor = delta > 0.0 ? (animation_time - channel->mRotationKeys[index].mTime) / delta : 0.0;
+
+    aiQuaternion out;
+    aiQuaternion::Interpolate(out, channel->mRotationKeys[index].mValue, channel->mRotationKeys[next_index].mValue, static_cast<float>(factor));
+    out.Normalize();
+    return out;
+}
+
+void BuildSkinnedMeshList(
+    const aiScene* scene,
+    const aiNode* node,
+    const aiMatrix4x4& parent_transform,
+    RuntimeAnimationModelCacheEntry& cache_entry)
+{
+    if (scene == nullptr || node == nullptr)
+    {
+        return;
+    }
+
+    const aiMatrix4x4 node_transform = parent_transform * node->mTransformation;
+    for (unsigned int node_mesh_index = 0; node_mesh_index < node->mNumMeshes; ++node_mesh_index)
+    {
+        const unsigned int mesh_index = node->mMeshes[node_mesh_index];
+        if (mesh_index >= scene->mNumMeshes)
+        {
+            continue;
+        }
+
+        const aiMesh* mesh = scene->mMeshes[mesh_index];
+        if (mesh == nullptr)
+        {
+            continue;
+        }
+
+        RuntimeSkinnedMeshData mesh_data;
+        mesh_data.mesh = mesh;
+        mesh_data.bind_node_transform = node_transform;
+        mesh_data.influences.resize(mesh->mNumVertices);
+
+        for (unsigned int bone_index = 0; bone_index < mesh->mNumBones; ++bone_index)
+        {
+            const aiBone* bone = mesh->mBones[bone_index];
+            if (bone == nullptr)
+            {
+                continue;
+            }
+
+            const std::string bone_name = ToDisplayString(bone->mName);
+            if (bone_name.empty())
+            {
+                continue;
+            }
+
+            std::size_t runtime_bone_index = 0;
+            const auto existing = cache_entry.bone_index_by_name.find(bone_name);
+            if (existing == cache_entry.bone_index_by_name.end())
+            {
+                runtime_bone_index = cache_entry.bone_offsets.size();
+                cache_entry.bone_index_by_name.emplace(bone_name, runtime_bone_index);
+                cache_entry.bone_offsets.push_back(bone->mOffsetMatrix);
+            }
+            else
+            {
+                runtime_bone_index = existing->second;
+            }
+
+            for (unsigned int weight_index = 0; weight_index < bone->mNumWeights; ++weight_index)
+            {
+                const aiVertexWeight& weight = bone->mWeights[weight_index];
+                if (weight.mVertexId >= mesh_data.influences.size() || weight.mWeight <= 0.0f)
+                {
+                    continue;
+                }
+
+                RuntimeSkinInfluence& influence = mesh_data.influences[weight.mVertexId];
+                int slot = -1;
+                for (int i = 0; i < 4; ++i)
+                {
+                    if (influence.bone_indices[i] == -1)
+                    {
+                        slot = i;
+                        break;
+                    }
+                }
+
+                if (slot == -1)
+                {
+                    int weakest_slot = 0;
+                    for (int i = 1; i < 4; ++i)
+                    {
+                        if (influence.bone_weights[i] < influence.bone_weights[weakest_slot])
+                        {
+                            weakest_slot = i;
+                        }
+                    }
+                    if (weight.mWeight > influence.bone_weights[weakest_slot])
+                    {
+                        slot = weakest_slot;
+                    }
+                }
+
+                if (slot >= 0)
+                {
+                    influence.bone_indices[slot] = static_cast<int>(runtime_bone_index);
+                    influence.bone_weights[slot] = weight.mWeight;
+                }
+            }
+        }
+
+        for (RuntimeSkinInfluence& influence : mesh_data.influences)
+        {
+            float sum = 0.0f;
+            for (float weight : influence.bone_weights)
+            {
+                sum += weight;
+            }
+
+            if (sum > 0.0001f)
+            {
+                const float inv = 1.0f / sum;
+                for (float& weight : influence.bone_weights)
+                {
+                    weight *= inv;
+                }
+            }
+        }
+
+        cache_entry.skinned_meshes.push_back(std::move(mesh_data));
+    }
+
+    for (unsigned int child_index = 0; child_index < node->mNumChildren; ++child_index)
+    {
+        BuildSkinnedMeshList(scene, node->mChildren[child_index], node_transform, cache_entry);
+    }
+}
+
+void EvaluateAnimationHierarchy(
+    const aiAnimation* animation,
+    double animation_time,
+    const aiNode* node,
+    const aiMatrix4x4& parent_transform,
+    const RuntimeAnimationModelCacheEntry& cache_entry,
+    const std::unordered_map<std::string, const aiNodeAnim*>& channels_by_name,
+    std::vector<aiMatrix4x4>& out_bone_matrices)
+{
+    aiMatrix4x4 node_transform = node->mTransformation;
+    const auto channel_it = channels_by_name.find(ToDisplayString(node->mName));
+    if (channel_it != channels_by_name.end())
+    {
+        const aiNodeAnim* channel = channel_it->second;
+        const aiVector3D scale = InterpolateScale(animation_time, channel);
+        const aiQuaternion rotation = InterpolateRotation(animation_time, channel);
+        const aiVector3D translation = InterpolatePosition(animation_time, channel);
+        node_transform = ComposeTransform(scale, rotation, translation);
+    }
+
+    const aiMatrix4x4 global_transform = parent_transform * node_transform;
+    const auto bone_it = cache_entry.bone_index_by_name.find(ToDisplayString(node->mName));
+    if (bone_it != cache_entry.bone_index_by_name.end() && bone_it->second < out_bone_matrices.size())
+    {
+        out_bone_matrices[bone_it->second] = cache_entry.global_inverse * global_transform * cache_entry.bone_offsets[bone_it->second];
+    }
+
+    for (unsigned int child_index = 0; child_index < node->mNumChildren; ++child_index)
+    {
+        EvaluateAnimationHierarchy(animation, animation_time, node->mChildren[child_index], global_transform, cache_entry, channels_by_name, out_bone_matrices);
+    }
+}
+
+RuntimeAnimationModelCacheEntry* GetRuntimeAnimationModelCacheEntry(const std::filesystem::path& model_path)
+{
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(model_path, error);
+    const bool has_filesystem_time = !error;
+
+    RuntimeAnimationModelCacheEntry& cache_entry = g_runtime_animation_model_cache[model_path.generic_string()];
+    const bool should_reload = !cache_entry.loaded || (has_filesystem_time && cache_entry.write_time != write_time);
+    if (should_reload)
+    {
+        cache_entry = {};
+        cache_entry.importer = std::make_unique<Assimp::Importer>();
+        const unsigned int import_flags =
+            aiProcess_Triangulate |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_ImproveCacheLocality |
+            aiProcess_CalcTangentSpace |
+            aiProcess_GenSmoothNormals |
+            aiProcess_ValidateDataStructure |
+            aiProcess_SortByPType;
+
+        const bool use_pak = g_asset_reader != nullptr && g_asset_reader->FileExists(model_path.generic_string());
+        const std::string model_load_path = use_pak
+            ? NormalizeAnimationAssimpPath(model_path.generic_string())
+            : model_path.string();
+        if (use_pak)
+        {
+            cache_entry.importer->SetIOHandler(new RuntimePakAssetIOSystem());
+        }
+
+        cache_entry.scene = cache_entry.importer->ReadFile(model_load_path, import_flags);
+        if (cache_entry.scene == nullptr || cache_entry.scene->mRootNode == nullptr)
+        {
+            cache_entry.error_message = cache_entry.importer->GetErrorString();
+            if (cache_entry.error_message.empty())
+            {
+                cache_entry.error_message = "Failed to load animation source model";
+            }
+            return nullptr;
+        }
+
+        cache_entry.loaded = true;
+        cache_entry.write_time = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
+        cache_entry.global_inverse = cache_entry.scene->mRootNode->mTransformation;
+        cache_entry.global_inverse.Inverse();
+        BuildSkinnedMeshList(cache_entry.scene, cache_entry.scene->mRootNode, aiMatrix4x4(), cache_entry);
+    }
+
+    return cache_entry.loaded ? &cache_entry : nullptr;
+}
+
+const aiAnimation* FindAnimationByName(const aiScene* scene, const std::string& clip_name)
+{
+    if (scene == nullptr || scene->mNumAnimations == 0)
+    {
+        return nullptr;
+    }
+
+    if (!clip_name.empty())
+    {
+        for (unsigned int index = 0; index < scene->mNumAnimations; ++index)
+        {
+            const aiAnimation* animation = scene->mAnimations[index];
+            if (animation != nullptr && ToDisplayString(animation->mName) == clip_name)
+            {
+                return animation;
+            }
+        }
+    }
+
+    return scene->mAnimations[0];
+}
+
+bool SampleClipBoneMatrices(
+    const RuntimeAnimationModelCacheEntry& anim_cache_entry,
+    const std::string& clip_name,
+    float state_time_seconds,
+    std::vector<aiMatrix4x4>& out_bone_matrices)
+{
+    if (anim_cache_entry.scene == nullptr)
+    {
+        return false;
+    }
+
+    const aiAnimation* const animation = FindAnimationByName(anim_cache_entry.scene, clip_name);
+    if (animation == nullptr)
+    {
+        return false;
+    }
+
+    const double ticks_per_second = animation->mTicksPerSecond > 0.0 ? animation->mTicksPerSecond : 25.0;
+    const double duration = animation->mDuration > 0.0 ? animation->mDuration : 1.0;
+    const double raw_time_ticks = static_cast<double>(state_time_seconds) * ticks_per_second;
+    const double animation_time = std::fmod(raw_time_ticks, duration);
+
+    std::unordered_map<std::string, const aiNodeAnim*> channels_by_name;
+    channels_by_name.reserve(animation->mNumChannels);
+    for (unsigned int channel_index = 0; channel_index < animation->mNumChannels; ++channel_index)
+    {
+        const aiNodeAnim* channel = animation->mChannels[channel_index];
+        if (channel != nullptr)
+        {
+            channels_by_name.emplace(ToDisplayString(channel->mNodeName), channel);
+        }
+    }
+
+    out_bone_matrices.assign(anim_cache_entry.bone_offsets.size(), aiMatrix4x4());
+    EvaluateAnimationHierarchy(
+        animation,
+        animation_time,
+        anim_cache_entry.scene->mRootNode,
+        aiMatrix4x4(),
+        anim_cache_entry,
+        channels_by_name,
+        out_bone_matrices);
+    return true;
+}
 }
 
 bool RuntimeRenderer::Initialize(VulkanContext* context)
@@ -1125,10 +1762,15 @@ void RuntimeRenderer::Shutdown()
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
+    runtime_animator_states_.clear();
+    g_runtime_animator_blend_snapshots.clear();
+    animator_controller_cache_.clear();
+    animated_mesh_revisions_.clear();
     script_active_instance_key_.clear();
     script_active_object_name_.clear();
     script_prev_keys_down_.clear();
     script_frame_collision_events_.clear();
+    animation_last_tick_ms_ = 0;
     model_asset_cache_.clear();
     queued_objects_.clear();
     cached_scene_path_.clear();
@@ -1190,11 +1832,473 @@ bool RuntimeRenderer::StartSession(
     script_next_timer_id_ = 1;
     script_timer_pending_clear_.clear();
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+    animation_last_tick_ms_ = now_ms;
     script_last_tick_ms_ = now_ms;
     script_session_start_ms_ = now_ms;
+    runtime_animator_states_.clear();
+    g_runtime_animator_blend_snapshots.clear();
+    animator_controller_cache_.clear();
+    animated_mesh_revisions_.clear();
     physics_world_built_ = false;
     performance_stats_ = RuntimePerformanceStats{};
     return true;
+}
+
+void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata)
+{
+    const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+    const float delta_time = (animation_last_tick_ms_ != 0 && now_ms >= animation_last_tick_ms_)
+        ? static_cast<float>(now_ms - animation_last_tick_ms_) / 1000.0f
+        : 0.0f;
+    animation_last_tick_ms_ = now_ms;
+
+    auto load_controller = [&](const std::filesystem::path& controller_path) -> const AnimatorControllerAsset*
+    {
+        if (controller_path.empty())
+        {
+            return nullptr;
+        }
+
+        std::error_code error;
+        const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(controller_path, error);
+        const bool has_filesystem_time = !error;
+
+        CachedAnimatorControllerEntry& cache_entry = animator_controller_cache_[controller_path];
+        const bool should_reload =
+            !cache_entry.loaded ||
+            (has_filesystem_time && cache_entry.write_time != write_time);
+
+        if (should_reload)
+        {
+            std::string load_error;
+            AnimatorControllerAsset asset;
+            cache_entry.loaded = LoadAnimatorControllerAsset(controller_path, asset, load_error);
+            if (cache_entry.loaded)
+            {
+                cache_entry.asset = std::move(asset);
+                cache_entry.write_time = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
+            }
+        }
+
+        return cache_entry.loaded ? &cache_entry.asset : nullptr;
+    };
+
+    auto find_state = [](const AnimatorControllerAsset& controller, const std::string& state_name) -> const AnimatorStateDefinition*
+    {
+        const auto it = std::find_if(controller.states.begin(), controller.states.end(), [&](const AnimatorStateDefinition& state)
+        {
+            return state.name == state_name;
+        });
+        return it != controller.states.end() ? &(*it) : nullptr;
+    };
+
+    auto trim = [](std::string value) -> std::string
+    {
+        const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char ch)
+        {
+            return std::isspace(ch) != 0;
+        });
+        if (first == value.end())
+        {
+            return {};
+        }
+
+        const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch)
+        {
+            return std::isspace(ch) != 0;
+        }).base();
+        return std::string(first, last);
+    };
+
+    auto evaluate_condition = [&](RuntimeAnimatorState& runtime_state, const std::string& condition, std::string* consumed_trigger) -> bool
+    {
+        if (consumed_trigger != nullptr)
+        {
+            consumed_trigger->clear();
+        }
+
+        const std::string expr = trim(condition);
+        if (expr.empty())
+        {
+            return true;
+        }
+
+        const auto parse_bool_literal = [](const std::string& token, bool& value) -> bool
+        {
+            if (token == "true" || token == "True" || token == "TRUE")
+            {
+                value = true;
+                return true;
+            }
+            if (token == "false" || token == "False" || token == "FALSE")
+            {
+                value = false;
+                return true;
+            }
+            return false;
+        };
+
+        const char* operators[] = {"==", "!=", ">=", "<=", ">", "<"};
+        for (const char* op : operators)
+        {
+            const std::size_t op_pos = expr.find(op);
+            if (op_pos == std::string::npos)
+            {
+                continue;
+            }
+
+            const std::string parameter_name = trim(expr.substr(0, op_pos));
+            const std::string right = trim(expr.substr(op_pos + std::strlen(op)));
+            if (parameter_name.empty() || right.empty())
+            {
+                return false;
+            }
+
+            const auto bool_it = runtime_state.bool_parameters.find(parameter_name);
+            if (bool_it != runtime_state.bool_parameters.end())
+            {
+                bool rhs_bool = false;
+                if (!parse_bool_literal(right, rhs_bool))
+                {
+                    return false;
+                }
+
+                if (std::strcmp(op, "==") == 0)
+                {
+                    return bool_it->second == rhs_bool;
+                }
+                if (std::strcmp(op, "!=") == 0)
+                {
+                    return bool_it->second != rhs_bool;
+                }
+                return false;
+            }
+
+            const auto float_it = runtime_state.float_parameters.find(parameter_name);
+            if (float_it == runtime_state.float_parameters.end())
+            {
+                return false;
+            }
+
+            char* parse_end = nullptr;
+            const float rhs_value = std::strtof(right.c_str(), &parse_end);
+            if (parse_end == right.c_str() || *parse_end != '\0')
+            {
+                return false;
+            }
+
+            const float lhs_value = float_it->second;
+            if (std::strcmp(op, "==") == 0)
+            {
+                return std::abs(lhs_value - rhs_value) <= 0.0001f;
+            }
+            if (std::strcmp(op, "!=") == 0)
+            {
+                return std::abs(lhs_value - rhs_value) > 0.0001f;
+            }
+            if (std::strcmp(op, ">=") == 0)
+            {
+                return lhs_value >= rhs_value;
+            }
+            if (std::strcmp(op, "<=") == 0)
+            {
+                return lhs_value <= rhs_value;
+            }
+            if (std::strcmp(op, ">") == 0)
+            {
+                return lhs_value > rhs_value;
+            }
+            return lhs_value < rhs_value;
+        }
+
+        if (expr.front() == '!')
+        {
+            const std::string name = trim(expr.substr(1));
+            if (name.empty())
+            {
+                return false;
+            }
+
+            const auto bool_it = runtime_state.bool_parameters.find(name);
+            if (bool_it != runtime_state.bool_parameters.end())
+            {
+                return !bool_it->second;
+            }
+
+            return runtime_state.triggers.find(name) == runtime_state.triggers.end();
+        }
+
+        const auto bool_it = runtime_state.bool_parameters.find(expr);
+        if (bool_it != runtime_state.bool_parameters.end())
+        {
+            return bool_it->second;
+        }
+
+        if (runtime_state.triggers.find(expr) != runtime_state.triggers.end())
+        {
+            if (consumed_trigger != nullptr)
+            {
+                *consumed_trigger = expr;
+            }
+            return true;
+        }
+
+        return false;
+    };
+
+    auto capture_blended_pose_snapshot = [&](const RuntimeAnimatorState& runtime_state, std::vector<aiMatrix4x4>& out_snapshot) -> bool
+    {
+        if (runtime_state.previous_clip_name.empty() ||
+            runtime_state.active_clip_name.empty() ||
+            runtime_state.previous_clip_source_model_path.empty() ||
+            runtime_state.active_clip_source_model_path.empty() ||
+            runtime_state.blend_duration_seconds <= 0.0f ||
+            runtime_state.blend_time_remaining_seconds <= 0.0f)
+        {
+            return false;
+        }
+
+        const auto resolve_clip_path = [&](const std::string& clip_source_model_path) -> std::filesystem::path
+        {
+            return std::filesystem::path(clip_source_model_path).is_absolute()
+                ? std::filesystem::path(clip_source_model_path)
+                : (project_root_ / clip_source_model_path);
+        };
+
+        RuntimeAnimationModelCacheEntry* const previous_cache = GetRuntimeAnimationModelCacheEntry(resolve_clip_path(runtime_state.previous_clip_source_model_path));
+        RuntimeAnimationModelCacheEntry* const active_cache = GetRuntimeAnimationModelCacheEntry(resolve_clip_path(runtime_state.active_clip_source_model_path));
+        if (previous_cache == nullptr || previous_cache->scene == nullptr || active_cache == nullptr || active_cache->scene == nullptr)
+        {
+            return false;
+        }
+
+        std::vector<aiMatrix4x4> previous_matrices;
+        std::vector<aiMatrix4x4> active_matrices;
+        if (!SampleClipBoneMatrices(*previous_cache, runtime_state.previous_clip_name, runtime_state.previous_state_time_seconds, previous_matrices) ||
+            !SampleClipBoneMatrices(*active_cache, runtime_state.active_clip_name, runtime_state.state_time_seconds, active_matrices) ||
+            previous_matrices.size() != active_matrices.size())
+        {
+            return false;
+        }
+
+        const float blend_alpha = 1.0f - std::clamp(
+            runtime_state.blend_time_remaining_seconds / (std::max)(0.0001f, runtime_state.blend_duration_seconds),
+            0.0f,
+            1.0f);
+        out_snapshot.resize(previous_matrices.size());
+        for (std::size_t matrix_index = 0; matrix_index < previous_matrices.size(); ++matrix_index)
+        {
+            out_snapshot[matrix_index] = LerpMatrix(previous_matrices[matrix_index], active_matrices[matrix_index], blend_alpha);
+        }
+
+        return true;
+    };
+
+    std::unordered_set<std::string> live_keys;
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Animator || attribute.animator.controller_path.empty())
+            {
+                continue;
+            }
+
+            const std::filesystem::path controller_path = std::filesystem::path(attribute.animator.controller_path).is_absolute()
+                ? std::filesystem::path(attribute.animator.controller_path)
+                : (project_root_ / attribute.animator.controller_path);
+            const AnimatorControllerAsset* controller = load_controller(controller_path);
+            if (controller == nullptr || controller->states.empty())
+            {
+                continue;
+            }
+
+            const std::string runtime_key = object.name + "#" + std::to_string(attribute_index);
+            live_keys.insert(runtime_key);
+
+            RuntimeAnimatorState& runtime_state = runtime_animator_states_[runtime_key];
+            runtime_state.runtime_key = runtime_key;
+            const bool controller_changed = runtime_state.controller_path != attribute.animator.controller_path;
+            
+            // Check if the controller file has been modified on disk
+            std::error_code error;
+            const std::filesystem::file_time_type current_write_time = std::filesystem::last_write_time(controller_path, error);
+            const bool controller_reloaded = !error && runtime_state.controller_write_time != current_write_time;
+            
+            if (controller_changed || controller_reloaded)
+            {
+                runtime_state.controller_path = attribute.animator.controller_path;
+                runtime_state.controller_write_time = !error ? current_write_time : std::filesystem::file_time_type::min();
+                runtime_state.active_state.clear();
+                runtime_state.active_clip_name.clear();
+                runtime_state.active_clip_source_model_path.clear();
+                runtime_state.previous_state.clear();
+                runtime_state.previous_clip_name.clear();
+                runtime_state.previous_clip_source_model_path.clear();
+                runtime_state.state_time_seconds = 0.0f;
+                runtime_state.previous_state_time_seconds = 0.0f;
+                runtime_state.previous_state_playback_speed = 1.0f;
+                runtime_state.blend_duration_seconds = 0.0f;
+                runtime_state.blend_time_remaining_seconds = 0.0f;
+                runtime_state.previous_pose_snapshot_valid = false;
+                g_runtime_animator_blend_snapshots.erase(runtime_key);
+                runtime_state.float_parameters.clear();
+                runtime_state.bool_parameters.clear();
+                runtime_state.triggers.clear();
+            }
+
+            const bool active_state_valid = !runtime_state.active_state.empty() && find_state(*controller, runtime_state.active_state) != nullptr;
+            if (!active_state_valid)
+            {
+                std::string next_state = attribute.animator.initial_state;
+                if (next_state.empty() || find_state(*controller, next_state) == nullptr)
+                {
+                    next_state = controller->default_state;
+                }
+                if (next_state.empty() || find_state(*controller, next_state) == nullptr)
+                {
+                    next_state = controller->states.front().name;
+                }
+
+                runtime_state.active_state = next_state;
+                runtime_state.state_time_seconds = 0.0f;
+            }
+
+            const AnimatorStateDefinition* active_state = find_state(*controller, runtime_state.active_state);
+            if (active_state == nullptr)
+            {
+                continue;
+            }
+
+            if (runtime_state.blend_time_remaining_seconds > 0.0f)
+            {
+                runtime_state.blend_time_remaining_seconds = (std::max)(0.0f, runtime_state.blend_time_remaining_seconds - delta_time);
+                if (runtime_state.blend_time_remaining_seconds <= 0.0f)
+                {
+                    runtime_state.blend_duration_seconds = 0.0f;
+                    runtime_state.previous_state.clear();
+                    runtime_state.previous_clip_name.clear();
+                    runtime_state.previous_clip_source_model_path.clear();
+                    runtime_state.previous_state_time_seconds = 0.0f;
+                    runtime_state.previous_state_playback_speed = 1.0f;
+                    runtime_state.previous_pose_snapshot_valid = false;
+                    g_runtime_animator_blend_snapshots.erase(runtime_key);
+                }
+            }
+
+            runtime_state.active_clip_name.clear();
+            runtime_state.active_clip_source_model_path.clear();
+            if (!active_state->clip_id.empty())
+            {
+                const auto clip_it = std::find_if(controller->clips.begin(), controller->clips.end(), [&](const AnimatorClipReference& clip)
+                {
+                    return clip.id == active_state->clip_id;
+                });
+                if (clip_it != controller->clips.end())
+                {
+                    runtime_state.active_clip_name = clip_it->clip_name;
+                    runtime_state.active_clip_source_model_path = clip_it->source_model_path;
+                }
+            }
+
+            const float object_speed = (std::max)(0.0f, attribute.animator.playback_speed);
+            const float active_state_speed = (std::max)(0.0f, active_state->playback_speed);
+            if (attribute.animator.auto_play)
+            {
+                runtime_state.state_time_seconds += delta_time * object_speed * active_state_speed;
+                if (runtime_state.blend_time_remaining_seconds > 0.0f && !runtime_state.previous_clip_name.empty())
+                {
+                    runtime_state.previous_state_time_seconds += delta_time * object_speed * runtime_state.previous_state_playback_speed;
+                }
+            }
+
+            for (const AnimatorTransitionDefinition& transition : controller->transitions)
+            {
+                if (transition.from_state != runtime_state.active_state)
+                {
+                    continue;
+                }
+                if (transition.has_exit_time && runtime_state.state_time_seconds < transition.exit_time)
+                {
+                    continue;
+                }
+
+                std::string consumed_trigger;
+                if (!evaluate_condition(runtime_state, transition.condition, &consumed_trigger))
+                {
+                    continue;
+                }
+
+                if (find_state(*controller, transition.to_state) != nullptr)
+                {
+                    if (!consumed_trigger.empty())
+                    {
+                        runtime_state.triggers.erase(consumed_trigger);
+                    }
+
+                    const float blend_duration = (std::max)(0.0f, transition.blend_duration);
+                    if (blend_duration > 0.0f && !runtime_state.active_clip_name.empty())
+                    {
+                        std::vector<aiMatrix4x4> blended_pose_snapshot;
+                        if (runtime_state.blend_time_remaining_seconds > 0.0f &&
+                            capture_blended_pose_snapshot(runtime_state, blended_pose_snapshot))
+                        {
+                            g_runtime_animator_blend_snapshots[runtime_key] = std::move(blended_pose_snapshot);
+                            runtime_state.previous_pose_snapshot_valid = true;
+                            runtime_state.previous_state = runtime_state.active_state;
+                            runtime_state.previous_clip_name.clear();
+                            runtime_state.previous_clip_source_model_path.clear();
+                            runtime_state.previous_state_time_seconds = 0.0f;
+                            runtime_state.previous_state_playback_speed = active_state_speed;
+                        }
+                        else
+                        {
+                            runtime_state.previous_pose_snapshot_valid = false;
+                            g_runtime_animator_blend_snapshots.erase(runtime_key);
+                            runtime_state.previous_state = runtime_state.active_state;
+                            runtime_state.previous_clip_name = runtime_state.active_clip_name;
+                            runtime_state.previous_clip_source_model_path = runtime_state.active_clip_source_model_path;
+                            runtime_state.previous_state_time_seconds = runtime_state.state_time_seconds;
+                            runtime_state.previous_state_playback_speed = active_state_speed;
+                        }
+                        runtime_state.blend_duration_seconds = blend_duration;
+                        runtime_state.blend_time_remaining_seconds = blend_duration;
+                    }
+                    else
+                    {
+                        runtime_state.previous_state.clear();
+                        runtime_state.previous_clip_name.clear();
+                        runtime_state.previous_clip_source_model_path.clear();
+                        runtime_state.previous_state_time_seconds = 0.0f;
+                        runtime_state.previous_state_playback_speed = 1.0f;
+                        runtime_state.blend_duration_seconds = 0.0f;
+                        runtime_state.blend_time_remaining_seconds = 0.0f;
+                        runtime_state.previous_pose_snapshot_valid = false;
+                        g_runtime_animator_blend_snapshots.erase(runtime_key);
+                    }
+
+                    runtime_state.active_state = transition.to_state;
+                    runtime_state.state_time_seconds = 0.0f;
+                    break;
+                }
+            }
+        }
+    }
+
+    for (auto it = runtime_animator_states_.begin(); it != runtime_animator_states_.end();)
+    {
+        if (live_keys.find(it->first) == live_keys.end())
+        {
+            g_runtime_animator_blend_snapshots.erase(it->first);
+            it = runtime_animator_states_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }
 
 const RuntimeRenderer::CachedModelAssetEntry& RuntimeRenderer::GetModelAssetEntry(const std::filesystem::path& path)
@@ -1592,6 +2696,18 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
         {"Image2DAttr", "Priority", ScriptAttributeAccessorId::Image2DPriority},
         {"SkyboxAttr", "ImagePath", ScriptAttributeAccessorId::SkyboxImagePath},
         {"SkyboxAttr", "Rotation", ScriptAttributeAccessorId::SkyboxRotation},
+        {"Animator", "ControllerPath", ScriptAttributeAccessorId::AnimatorControllerPath},
+        {"Animator", "InitialState", ScriptAttributeAccessorId::AnimatorInitialState},
+        {"Animator", "PlaybackSpeed", ScriptAttributeAccessorId::AnimatorPlaybackSpeed},
+        {"Animator", "AutoPlay", ScriptAttributeAccessorId::AnimatorAutoPlay},
+        {"Animator", "GetState", ScriptAttributeAccessorId::AnimatorGetState},
+        {"Animator", "StateTime", ScriptAttributeAccessorId::AnimatorStateTime},
+        {"Animator", "SetBool", ScriptAttributeAccessorId::AnimatorSetBool},
+        {"Animator", "GetBool", ScriptAttributeAccessorId::AnimatorGetBool},
+        {"Animator", "SetTrigger", ScriptAttributeAccessorId::AnimatorSetTrigger},
+        {"Animator", "SetState", ScriptAttributeAccessorId::AnimatorSetState},
+        {"Animator", "SetDefaultState", ScriptAttributeAccessorId::AnimatorSetDefaultState},
+        {"Animator", "GetDefaultState", ScriptAttributeAccessorId::AnimatorGetDefaultState},
     };
 
     const auto bind_attribute_accessor = [&](const char* table_name, const char* method_name, ScriptAttributeAccessorId accessor_id)
@@ -2627,6 +3743,229 @@ bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, Sc
     return false;
 }
 
+RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimatorState(
+    const std::string& object_name,
+    std::size_t occurrence_index)
+{
+    if (object_name.empty())
+    {
+        return nullptr;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        std::size_t current_occurrence = 0;
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Animator)
+            {
+                continue;
+            }
+
+            if (current_occurrence == occurrence_index)
+            {
+                const std::string runtime_key = object.name + "#" + std::to_string(attribute_index);
+                const auto state_it = runtime_animator_states_.find(runtime_key);
+                return state_it != runtime_animator_states_.end() ? &state_it->second : nullptr;
+            }
+
+            ++current_occurrence;
+        }
+
+        return nullptr;
+    }
+
+    return nullptr;
+}
+
+RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::EnsureRuntimeAnimatorState(
+    const std::string& object_name,
+    std::size_t occurrence_index)
+{
+    if (object_name.empty())
+    {
+        return nullptr;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        std::size_t current_occurrence = 0;
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Animator)
+            {
+                continue;
+            }
+
+            if (current_occurrence == occurrence_index)
+            {
+                const std::string runtime_key = object.name + "#" + std::to_string(attribute_index);
+                RuntimeAnimatorState& state = runtime_animator_states_[runtime_key];
+                if (state.controller_path != attribute.animator.controller_path)
+                {
+                    state.controller_path = attribute.animator.controller_path;
+                    state.active_state.clear();
+                    state.active_clip_name.clear();
+                    state.active_clip_source_model_path.clear();
+                    state.previous_state.clear();
+                    state.previous_clip_name.clear();
+                    state.previous_clip_source_model_path.clear();
+                    state.state_time_seconds = 0.0f;
+                    state.previous_state_time_seconds = 0.0f;
+                    state.previous_state_playback_speed = 1.0f;
+                    state.blend_duration_seconds = 0.0f;
+                    state.blend_time_remaining_seconds = 0.0f;
+                    state.float_parameters.clear();
+                    state.bool_parameters.clear();
+                    state.triggers.clear();
+                }
+                return &state;
+            }
+
+            ++current_occurrence;
+        }
+
+        return nullptr;
+    }
+
+    return nullptr;
+}
+
+bool RuntimeRenderer::SetRuntimeAnimatorParameter(
+    const std::string& object_name,
+    const std::string& parameter_name,
+    float value,
+    std::size_t occurrence_index)
+{
+    if (parameter_name.empty())
+    {
+        return false;
+    }
+
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    state->float_parameters[parameter_name] = value;
+    state->bool_parameters.erase(parameter_name);
+    return true;
+}
+
+bool RuntimeRenderer::SetRuntimeAnimatorBoolParameter(
+    const std::string& object_name,
+    const std::string& parameter_name,
+    bool value,
+    std::size_t occurrence_index)
+{
+    if (parameter_name.empty())
+    {
+        return false;
+    }
+
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    state->bool_parameters[parameter_name] = value;
+    state->float_parameters.erase(parameter_name);
+    return true;
+}
+
+bool RuntimeRenderer::TryGetRuntimeAnimatorParameter(
+    const std::string& object_name,
+    const std::string& parameter_name,
+    float& out_value,
+    bool& out_is_bool,
+    std::size_t occurrence_index) const
+{
+    out_value = 0.0f;
+    out_is_bool = false;
+    if (parameter_name.empty())
+    {
+        return false;
+    }
+
+    const RuntimeAnimatorState* const state = FindRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    const auto bool_it = state->bool_parameters.find(parameter_name);
+    if (bool_it != state->bool_parameters.end())
+    {
+        out_value = bool_it->second ? 1.0f : 0.0f;
+        out_is_bool = true;
+        return true;
+    }
+
+    const auto float_it = state->float_parameters.find(parameter_name);
+    if (float_it != state->float_parameters.end())
+    {
+        out_value = float_it->second;
+        return true;
+    }
+
+    return false;
+}
+
+bool RuntimeRenderer::SetRuntimeAnimatorTrigger(
+    const std::string& object_name,
+    const std::string& trigger_name,
+    std::size_t occurrence_index)
+{
+    if (trigger_name.empty())
+    {
+        return false;
+    }
+
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    state->triggers.insert(trigger_name);
+    return true;
+}
+
+bool RuntimeRenderer::SetRuntimeAnimatorState(
+    const std::string& object_name,
+    const std::string& state_name,
+    std::size_t occurrence_index)
+{
+    if (state_name.empty())
+    {
+        return false;
+    }
+
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    state->active_state = state_name;
+    state->state_time_seconds = 0.0f;
+    return true;
+}
+
 SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
     const std::string& object_name,
     SceneObjectAttributeKind kind,
@@ -2705,6 +4044,47 @@ const SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
     return nullptr;
 }
 
+const RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimatorState(
+    const std::string& object_name,
+    std::size_t occurrence_index) const
+{
+    if (object_name.empty())
+    {
+        return nullptr;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        std::size_t current_occurrence = 0;
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Animator)
+            {
+                continue;
+            }
+
+            if (current_occurrence == occurrence_index)
+            {
+                const std::string runtime_key = object.name + "#" + std::to_string(attribute_index);
+                const auto state_it = runtime_animator_states_.find(runtime_key);
+                return state_it != runtime_animator_states_.end() ? &state_it->second : nullptr;
+            }
+
+            ++current_occurrence;
+        }
+
+        return nullptr;
+    }
+
+    return nullptr;
+}
+
 void RuntimeRenderer::RefreshActiveScriptCameraSelection()
 {
     const ActiveSceneCameraSelection new_camera = FindActiveSceneCamera(cached_scene_metadata_);
@@ -2732,6 +4112,11 @@ void RuntimeRenderer::HandleScriptAttributeMutation(SceneObjectAttributeKind kin
         {
             RefreshActiveScriptCameraSelection();
         }
+        break;
+
+    case SceneObjectAttributeKind::Animator:
+        runtime_animator_states_.clear();
+        g_runtime_animator_blend_snapshots.clear();
         break;
 
     default:
@@ -2961,6 +4346,15 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
 
     for (const QueuedSceneObject& object : queued_objects_)
     {
+        if (!UpdateAnimatedMeshForObject(object))
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Failed to update animated mesh vertices";
+            }
+            return false;
+        }
+
         const auto mesh_entry_it = mesh_cache_.find(object.model_path);
         if (mesh_entry_it == mesh_cache_.end())
         {
@@ -2983,6 +4377,8 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
             mesh_input.vertex_count = mesh_entry.vertex_count;
             mesh_input.vertex_stride = static_cast<std::uint32_t>(sizeof(SceneGpuVertex));
             mesh_input.index_count = mesh_entry.index_count;
+            const auto revision_it = animated_mesh_revisions_.find(object.model_path);
+            mesh_input.geometry_revision = revision_it != animated_mesh_revisions_.end() ? revision_it->second : 0;
             mesh_input.materials = mesh_entry.materials;
             mesh_input.sections.reserve(mesh_entry.sections.size());
             for (const GpuMeshSection& section : mesh_entry.sections)
@@ -3082,11 +4478,6 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         return false;
     }
 
-    if (!SyncRayTracingScene(error_message))
-    {
-        return false;
-    }
-
     // Build physics world once per session (after the first BuildQueuedScene).
     if (!physics_world_built_ && physics_world_.IsInitialized())
     {
@@ -3135,6 +4526,17 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         scripts_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
 
+    const std::uint64_t animation_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+    UpdateAnimatorControllersForFrame(scene_metadata);
+    performance_stats_.animation_time_ms = TicksToMilliseconds(
+        animation_start_ticks,
+        static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+
+    if (!SyncRayTracingScene(error_message))
+    {
+        return false;
+    }
+
     ray_tracing_.SetSkyboxTexture(skybox_renderer_.ResolveSkyboxView(scene_metadata, project_root_));
     ray_tracing_.SetSkyboxRotation(skybox_renderer_.ResolveSkyboxRotationDegrees(scene_metadata));
 
@@ -3180,4 +4582,231 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     performance_stats_.valid = true;
 
     return true;
+}
+
+bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& object)
+{
+    RuntimeAnimatorState* const runtime_state = FindRuntimeAnimatorState(object.name);
+    if (runtime_state == nullptr || runtime_state->active_clip_name.empty())
+    {
+        return true;
+    }
+
+    const auto mesh_cache_it = mesh_cache_.find(object.model_path);
+    if (mesh_cache_it == mesh_cache_.end())
+    {
+        return true;
+    }
+
+    const CachedModelAssetEntry& model_asset_entry = GetModelAssetEntry(object.model_path);
+    if (!model_asset_entry.asset.loaded || model_asset_entry.asset.meshes.empty())
+    {
+        return true;
+    }
+
+    std::filesystem::path clip_source_path = object.model_path;
+    if (!runtime_state->active_clip_source_model_path.empty())
+    {
+        clip_source_path = std::filesystem::path(runtime_state->active_clip_source_model_path).is_absolute()
+            ? std::filesystem::path(runtime_state->active_clip_source_model_path)
+            : (project_root_ / runtime_state->active_clip_source_model_path);
+    }
+
+    RuntimeAnimationModelCacheEntry* const anim_cache_entry = GetRuntimeAnimationModelCacheEntry(clip_source_path);
+    if (anim_cache_entry == nullptr || anim_cache_entry->scene == nullptr)
+    {
+        return false;
+    }
+
+    std::vector<aiMatrix4x4> bone_matrices;
+    if (!SampleClipBoneMatrices(*anim_cache_entry, runtime_state->active_clip_name, runtime_state->state_time_seconds, bone_matrices))
+    {
+        return true;
+    }
+
+    bool has_blend = false;
+    float blend_alpha = 1.0f;
+    std::vector<aiMatrix4x4> previous_bone_matrices;
+    if (runtime_state->blend_duration_seconds > 0.0f &&
+        runtime_state->blend_time_remaining_seconds > 0.0f)
+    {
+        blend_alpha = 1.0f - std::clamp(
+            runtime_state->blend_time_remaining_seconds / (std::max)(0.0001f, runtime_state->blend_duration_seconds),
+            0.0f,
+            1.0f);
+
+        const auto snapshot_it = g_runtime_animator_blend_snapshots.find(runtime_state->runtime_key);
+        if (runtime_state->previous_pose_snapshot_valid &&
+            snapshot_it != g_runtime_animator_blend_snapshots.end() &&
+            snapshot_it->second.size() == bone_matrices.size())
+        {
+            has_blend = true;
+            previous_bone_matrices = snapshot_it->second;
+        }
+        else if (!runtime_state->previous_clip_name.empty())
+        {
+            std::filesystem::path previous_clip_source_path = object.model_path;
+            if (!runtime_state->previous_clip_source_model_path.empty())
+            {
+                previous_clip_source_path = std::filesystem::path(runtime_state->previous_clip_source_model_path).is_absolute()
+                    ? std::filesystem::path(runtime_state->previous_clip_source_model_path)
+                    : (project_root_ / runtime_state->previous_clip_source_model_path);
+            }
+
+            RuntimeAnimationModelCacheEntry* previous_anim_cache = nullptr;
+            if (previous_clip_source_path == clip_source_path)
+            {
+                previous_anim_cache = anim_cache_entry;
+            }
+            else
+            {
+                previous_anim_cache = GetRuntimeAnimationModelCacheEntry(previous_clip_source_path);
+            }
+
+            if (previous_anim_cache != nullptr && previous_anim_cache->scene != nullptr)
+            {
+                std::vector<aiMatrix4x4> sampled_previous_matrices;
+                if (SampleClipBoneMatrices(
+                        *previous_anim_cache,
+                        runtime_state->previous_clip_name,
+                        runtime_state->previous_state_time_seconds,
+                        sampled_previous_matrices) &&
+                    sampled_previous_matrices.size() == bone_matrices.size())
+                {
+                    has_blend = true;
+                    previous_bone_matrices = std::move(sampled_previous_matrices);
+                }
+            }
+        }
+    }
+
+    std::vector<SceneGpuVertex> skinned_vertices;
+    skinned_vertices.reserve(mesh_cache_it->second.vertex_count);
+
+    const std::size_t mesh_count = (std::min)(model_asset_entry.asset.meshes.size(), anim_cache_entry->skinned_meshes.size());
+    for (std::size_t mesh_index = 0; mesh_index < mesh_count; ++mesh_index)
+    {
+        const ModelMeshAsset& model_mesh = model_asset_entry.asset.meshes[mesh_index];
+        const RuntimeSkinnedMeshData& skinned_mesh = anim_cache_entry->skinned_meshes[mesh_index];
+        if (skinned_mesh.mesh == nullptr)
+        {
+            continue;
+        }
+
+        const ModelMaterialAsset* material = nullptr;
+        if (model_mesh.material_index < model_asset_entry.asset.materials.size())
+        {
+            material = &model_asset_entry.asset.materials[model_mesh.material_index];
+        }
+
+        aiMatrix3x3 bind_normal_transform(skinned_mesh.bind_node_transform);
+        bind_normal_transform.Inverse().Transpose();
+        aiMatrix3x3 bind_tangent_transform(skinned_mesh.bind_node_transform);
+
+        for (unsigned int vertex_index = 0; vertex_index < skinned_mesh.mesh->mNumVertices; ++vertex_index)
+        {
+            const aiVector3D bind_position = skinned_mesh.mesh->mVertices[vertex_index];
+            const aiVector3D bind_normal = skinned_mesh.mesh->HasNormals()
+                ? skinned_mesh.mesh->mNormals[vertex_index]
+                : aiVector3D(0.0f, 1.0f, 0.0f);
+            const aiVector3D bind_tangent = skinned_mesh.mesh->HasTangentsAndBitangents()
+                ? skinned_mesh.mesh->mTangents[vertex_index]
+                : aiVector3D(1.0f, 0.0f, 0.0f);
+
+            aiVector3D out_position(0.0f, 0.0f, 0.0f);
+            aiVector3D out_normal(0.0f, 0.0f, 0.0f);
+            aiVector3D out_tangent(0.0f, 0.0f, 0.0f);
+            bool has_weights = false;
+
+            if (vertex_index < skinned_mesh.influences.size())
+            {
+                const RuntimeSkinInfluence& influence = skinned_mesh.influences[vertex_index];
+                for (int weight_slot = 0; weight_slot < 4; ++weight_slot)
+                {
+                    const int bone_index = influence.bone_indices[weight_slot];
+                    const float weight = influence.bone_weights[weight_slot];
+                    if (bone_index < 0 || weight <= 0.0f || static_cast<std::size_t>(bone_index) >= bone_matrices.size())
+                    {
+                        continue;
+                    }
+
+                    const std::size_t bone_idx = static_cast<std::size_t>(bone_index);
+                    aiVector3D skinned_position = bone_matrices[bone_idx] * bind_position;
+                    aiMatrix3x3 skinned_normal_matrix(bone_matrices[bone_idx]);
+                    aiVector3D skinned_normal = skinned_normal_matrix * bind_normal;
+                    aiVector3D skinned_tangent = skinned_normal_matrix * bind_tangent;
+
+                    if (has_blend && bone_idx < previous_bone_matrices.size())
+                    {
+                        const aiMatrix4x4& previous_matrix = previous_bone_matrices[bone_idx];
+                        aiVector3D previous_position = previous_matrix * bind_position;
+                        aiMatrix3x3 previous_normal_matrix(previous_matrix);
+                        aiVector3D previous_normal = previous_normal_matrix * bind_normal;
+                        aiVector3D previous_tangent = previous_normal_matrix * bind_tangent;
+
+                        skinned_position = (previous_position * (1.0f - blend_alpha)) + (skinned_position * blend_alpha);
+                        skinned_normal = (previous_normal * (1.0f - blend_alpha)) + (skinned_normal * blend_alpha);
+                        skinned_tangent = (previous_tangent * (1.0f - blend_alpha)) + (skinned_tangent * blend_alpha);
+                    }
+
+                    out_position += skinned_position * weight;
+                    out_normal += skinned_normal * weight;
+                    out_tangent += skinned_tangent * weight;
+                    has_weights = true;
+                }
+            }
+
+            if (!has_weights)
+            {
+                out_position = bind_position;
+                out_position *= skinned_mesh.bind_node_transform;
+
+                out_normal = bind_normal;
+                out_normal *= bind_normal_transform;
+
+                out_tangent = bind_tangent;
+                out_tangent *= bind_tangent_transform;
+            }
+
+            out_normal.NormalizeSafe();
+            out_tangent.NormalizeSafe();
+
+            ModelVertex skinned_vertex;
+            skinned_vertex.position = {out_position.x, out_position.y, out_position.z};
+            skinned_vertex.normal = {out_normal.x, out_normal.y, out_normal.z};
+            skinned_vertex.tangent = {out_tangent.x, out_tangent.y, out_tangent.z, 1.0f};
+
+            if (skinned_mesh.mesh->HasTextureCoords(0))
+            {
+                std::array<float, 2> uv = {
+                    skinned_mesh.mesh->mTextureCoords[0][vertex_index].x,
+                    skinned_mesh.mesh->mTextureCoords[0][vertex_index].y,
+                };
+                if (material != nullptr)
+                {
+                    uv = ApplyUvTransformLocal(uv, material->uv_transform);
+                }
+                skinned_vertex.uv0 = uv;
+            }
+
+            skinned_vertices.push_back(BuildSceneGpuVertex(skinned_vertex, material));
+        }
+    }
+
+    if (skinned_vertices.size() != mesh_cache_it->second.vertex_count)
+    {
+        return true;
+    }
+
+    const bool uploaded = UploadBufferData(
+        vulkan_context_->GetDevice(),
+        mesh_cache_it->second.vertex_buffer,
+        skinned_vertices.data(),
+        skinned_vertices.size() * sizeof(SceneGpuVertex));
+    if (uploaded)
+    {
+        ++animated_mesh_revisions_[object.model_path];
+    }
+
+    return uploaded;
 }

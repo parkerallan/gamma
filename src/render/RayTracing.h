@@ -73,6 +73,7 @@ public:
         std::uint32_t vertex_count = 0;
         std::uint32_t vertex_stride = 0;
         std::uint32_t index_count = 0;
+        std::uint64_t geometry_revision = 0;
         std::vector<MeshSectionRecord> sections;
         std::vector<MaterialRecord> materials;
     };
@@ -106,6 +107,7 @@ public:
         VkDeviceAddress index_device_address = 0;
         std::uint32_t vertex_count = 0;
         std::uint32_t index_count = 0;
+        std::uint64_t geometry_revision = 0;
         bool opaque = true;
     };
 
@@ -280,6 +282,7 @@ private:
     std::uint32_t accumulation_frame_count_ = 0;
     std::uint32_t raw_frame_count_ = 0;
     bool accumulation_reset_requested_ = true;
+    bool dynamic_geometry_present_ = false;
     std::uint64_t scene_signature_ = 0;
     bool scene_signature_valid_ = false;
 

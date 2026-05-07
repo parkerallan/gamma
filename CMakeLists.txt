@@ -370,6 +370,7 @@ add_executable(engine
     src/app/main.cpp
     src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
+    src/assets/AnimatorControllerAsset.cpp
     src/assets/ModelAsset.cpp
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp
