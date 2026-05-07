@@ -835,6 +835,31 @@ void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
                         ImGui::TextUnformatted("Emissive");
                         ImGui::SameLine();
                         ImGui::ColorButton("##EmissiveColor", ToImVec4(material.emissive_color), ImGuiColorEditFlags_NoTooltip, ImVec2(18.0f, 18.0f));
+                        if (material.has_emissive_strength)
+                        {
+                            ImGui::SameLine();
+                            ImGui::Text("(x%.2f)", material.emissive_strength);
+                        }
+                    }
+                    if (material.specular_color.valid)
+                    {
+                        ImGui::TextUnformatted("Specular Color");
+                        ImGui::SameLine();
+                        ImGui::ColorButton("##SpecularColor", ToImVec4(material.specular_color), ImGuiColorEditFlags_NoTooltip, ImVec2(18.0f, 18.0f));
+                    }
+                    if (material.has_specular_factor)
+                    {
+                        ImGui::Text("Specular Factor: %.2f", material.specular_factor);
+                    }
+                    if (material.sheen_color.valid)
+                    {
+                        ImGui::TextUnformatted("Sheen Color");
+                        ImGui::SameLine();
+                        ImGui::ColorButton("##SheenColor", ToImVec4(material.sheen_color), ImGuiColorEditFlags_NoTooltip, ImVec2(18.0f, 18.0f));
+                    }
+                    if (material.has_sheen_roughness)
+                    {
+                        ImGui::Text("Sheen Roughness: %.2f", material.sheen_roughness_factor);
                     }
                     if (material.has_opacity)
                     {
@@ -853,14 +878,6 @@ void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
                     {
                         ImGui::TextUnformatted("Unlit");
                     }
-                    if (material.has_normal_scale)
-                    {
-                        ImGui::Text("Normal Scale: %.2f", material.normal_scale);
-                    }
-                    if (material.has_occlusion_strength)
-                    {
-                        ImGui::Text("Occlusion Strength: %.2f", material.occlusion_strength);
-                    }
                     if (material.has_roughness)
                     {
                         ImGui::Text("Roughness: %.2f", material.roughness);
@@ -869,22 +886,73 @@ void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
                     {
                         ImGui::Text("Metalness: %.2f", material.metalness);
                     }
-
-                    if ((material.base_color.valid || material.emissive_color.valid || material.has_opacity || material.has_roughness || material.has_metalness) && !material.textures.empty())
+                    if (material.has_normal_scale)
                     {
-                        ImGui::Separator();
+                        ImGui::Text("Normal Scale: %.2f", material.normal_scale);
                     }
-
-                    if (material.textures.empty())
+                    if (material.has_occlusion_strength)
                     {
-                        ImGui::TextUnformatted("No texture references.");
+                        ImGui::Text("Occlusion Strength: %.2f", material.occlusion_strength);
                     }
-                    else
+                    if (material.has_ior)
                     {
-                        for (const ModelTextureReference& texture : material.textures)
+                        ImGui::Text("IOR: %.3f", material.index_of_refraction);
+                    }
+                    if (material.has_transmission)
+                    {
+                        ImGui::Text("Transmission: %.2f", material.transmission_factor);
+                    }
+                    if (material.has_iridescence)
+                    {
+                        ImGui::Text("Iridescence: %.2f", material.iridescence_factor);
+                        ImGui::Text("Iridescence IOR: %.3f", material.iridescence_ior);
+                        ImGui::Text("Iridescence Thickness: %.0f - %.0f nm", material.iridescence_thickness_min, material.iridescence_thickness_max);
+                    }
+                    if (material.has_volume)
+                    {
+                        ImGui::Text("Volume Thickness: %.2f", material.volume_thickness_factor);
+                        if (material.attenuation_distance > 0.0f)
                         {
-                            ImGui::TextWrapped("%s: %s", texture.slot_label.c_str(), texture.path.c_str());
+                            ImGui::Text("Attenuation Distance: %.4f", material.attenuation_distance);
                         }
+                        if (material.attenuation_color.valid)
+                        {
+                            ImGui::TextUnformatted("Attenuation Color");
+                            ImGui::SameLine();
+                            ImGui::ColorButton("##AttenuationColor", ToImVec4(material.attenuation_color), ImGuiColorEditFlags_NoTooltip, ImVec2(18.0f, 18.0f));
+                        }
+                    }
+                    if (material.has_clearcoat)
+                    {
+                        ImGui::Text("Clearcoat: %.2f", material.clearcoat_factor);
+                        ImGui::Text("Clearcoat Roughness: %.2f", material.clearcoat_roughness_factor);
+                        ImGui::Text("Clearcoat Normal Scale: %.2f", material.clearcoat_normal_scale);
+                    }
+
+                    const char* texture_label = material.textures.empty()
+                        ? "Textures (0)"
+                        : nullptr;
+                    char texture_label_buf[32]{};
+                    if (texture_label == nullptr)
+                    {
+                        std::snprintf(texture_label_buf, sizeof(texture_label_buf), "Textures (%zu)", material.textures.size());
+                        texture_label = texture_label_buf;
+                    }
+                    ImGui::Spacing();
+                    if (ImGui::TreeNode(texture_label))
+                    {
+                        if (material.textures.empty())
+                        {
+                            ImGui::TextUnformatted("No texture references.");
+                        }
+                        else
+                        {
+                            for (const ModelTextureReference& texture : material.textures)
+                            {
+                                ImGui::TextWrapped("%s: %s", texture.slot_label.c_str(), texture.path.c_str());
+                            }
+                        }
+                        ImGui::TreePop();
                     }
                     ImGui::TreePop();
                 }
@@ -904,8 +972,10 @@ void InfoPanel::RenderModelMetadata(const ModelMetadata& metadata) const
             for (const ModelAnimationMetadata& animation : metadata.animations)
             {
                 ImGui::TextUnformatted(animation.name.c_str());
-                ImGui::Text("Duration: %.2f", animation.duration);
-                ImGui::Text("Ticks/sec: %.2f", animation.ticks_per_second);
+                const double duration_seconds = (animation.ticks_per_second > 0.0)
+                    ? animation.duration / animation.ticks_per_second
+                    : animation.duration;
+                ImGui::Text("Duration: %.2f s", duration_seconds);
                 ImGui::Text("Channels: %u", animation.channel_count);
                 ImGui::Spacing();
             }
@@ -966,22 +1036,8 @@ void InfoPanel::Render(EngineState& state, VulkanContext* vulkan_context)
         return;
     }
 
-    ImGui::TextUnformatted(selected_path.filename().string().c_str());
-    ImGui::Separator();
-    ImGui::Text("Type: %s", is_directory ? "Folder" : "File");
-    ImGui::TextWrapped("Path: %s", state.GetSelectedItemDisplayPath().c_str());
-
     if (!is_directory)
     {
-        const std::string extension = selected_path.has_extension() ? selected_path.extension().string() : std::string("None");
-        std::error_code size_error;
-        const std::uintmax_t file_size = std::filesystem::file_size(selected_path, size_error);
-        ImGui::Text("Extension: %s", extension.c_str());
-        if (!size_error)
-        {
-            ImGui::Text("Size: %s", FormatFileSize(file_size).c_str());
-        }
-
         if (ModelMetadata::IsSupportedModelPath(selected_path))
         {
             RenderModelMetadata(GetModelMetadata(selected_path));

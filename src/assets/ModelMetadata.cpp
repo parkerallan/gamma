@@ -6,9 +6,15 @@
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <fstream>
+#include <sstream>
+
+using json = nlohmann::json;
 
 namespace
 {
@@ -90,6 +96,24 @@ ModelColorMetadata ReadColor(const aiMaterial* material, const char* pKey, unsig
     return color_metadata;
 }
 
+ModelColorMetadata ReadColor3(const aiMaterial* material, const char* pKey, unsigned int type, unsigned int index)
+{
+    ModelColorMetadata color_metadata;
+    if (material == nullptr)
+    {
+        return color_metadata;
+    }
+
+    aiColor3D color_value;
+    if (material->Get(pKey, type, index, color_value) == AI_SUCCESS)
+    {
+        color_metadata.valid = true;
+        color_metadata.rgba = {color_value.r, color_value.g, color_value.b, 1.0f};
+    }
+
+    return color_metadata;
+}
+
 bool ReadFloat(const aiMaterial* material, const char* pKey, unsigned int type, unsigned int index, float& value)
 {
     if (material == nullptr)
@@ -145,6 +169,160 @@ const std::array<std::pair<aiTextureType, const char*>, 9> kTextureSlots = {{
     {aiTextureType_AMBIENT_OCCLUSION, "Occlusion"},
     {aiTextureType_OPACITY, "Opacity"},
 }};
+
+struct GltfExtensionMetadata
+{
+    bool has_iridescence = false;
+    float iridescence_factor = 0.0f;
+    float iridescence_ior = 1.3f;
+    float iridescence_thickness_min = 100.0f;
+    float iridescence_thickness_max = 400.0f;
+    bool has_ior = false;
+    float index_of_refraction = 1.5f;
+    bool has_transmission = false;
+    float transmission_factor = 0.0f;
+    bool has_volume = false;
+    float volume_thickness_factor = 0.0f;
+    float attenuation_distance = 0.0f;
+    std::array<float, 3> attenuation_color = {1.0f, 1.0f, 1.0f};
+    bool has_clearcoat = false;
+    float clearcoat_factor = 0.0f;
+    float clearcoat_roughness_factor = 0.0f;
+    float clearcoat_normal_scale = 1.0f;
+    bool has_emissive_strength = false;
+    float emissive_strength = 1.0f;
+};
+
+float ReadJsonFloat(const json& object, const char* key, float fallback)
+{
+    if (!object.is_object())
+    {
+        return fallback;
+    }
+    const auto it = object.find(key);
+    return (it != object.end() && it->is_number()) ? it->get<float>() : fallback;
+}
+
+std::array<float, 3> ReadJsonFloat3(const json& object, const char* key, const std::array<float, 3>& fallback)
+{
+    if (!object.is_object())
+    {
+        return fallback;
+    }
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_array() || it->size() < 3)
+    {
+        return fallback;
+    }
+    std::array<float, 3> value = fallback;
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        if ((*it)[i].is_number())
+        {
+            value[i] = (*it)[i].get<float>();
+        }
+    }
+    return value;
+}
+
+// Parses KHR extension scalars from a .gltf JSON file. Returns one entry per material index.
+std::vector<GltfExtensionMetadata> LoadGltfExtensionMetadata(const std::filesystem::path& path)
+{
+    if (ToLowerExtension(path) != ".gltf")
+    {
+        return {};
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+    {
+        return {};
+    }
+
+    std::ostringstream stream;
+    stream << input.rdbuf();
+    const std::string contents = stream.str();
+    if (contents.empty())
+    {
+        return {};
+    }
+
+    json root = json::parse(contents, nullptr, false);
+    if (root.is_discarded() || !root.is_object())
+    {
+        return {};
+    }
+
+    const auto materials_it = root.find("materials");
+    if (materials_it == root.end() || !materials_it->is_array())
+    {
+        return {};
+    }
+
+    std::vector<GltfExtensionMetadata> result(materials_it->size());
+    for (std::size_t mat_index = 0; mat_index < materials_it->size(); ++mat_index)
+    {
+        const json& mat = (*materials_it)[mat_index];
+        if (!mat.is_object())
+        {
+            continue;
+        }
+
+        const auto ext_it = mat.find("extensions");
+        if (ext_it == mat.end() || !ext_it->is_object())
+        {
+            continue;
+        }
+
+        GltfExtensionMetadata& ext = result[mat_index];
+
+        if (const auto it = ext_it->find("KHR_materials_iridescence"); it != ext_it->end() && it->is_object())
+        {
+            ext.has_iridescence = true;
+            ext.iridescence_factor = ReadJsonFloat(*it, "iridescenceFactor", 0.0f);
+            ext.iridescence_ior = ReadJsonFloat(*it, "iridescenceIor", 1.3f);
+            ext.iridescence_thickness_min = ReadJsonFloat(*it, "iridescenceThicknessMinimum", 100.0f);
+            ext.iridescence_thickness_max = ReadJsonFloat(*it, "iridescenceThicknessMaximum", 400.0f);
+        }
+
+        if (const auto it = ext_it->find("KHR_materials_ior"); it != ext_it->end() && it->is_object())
+        {
+            ext.has_ior = true;
+            ext.index_of_refraction = ReadJsonFloat(*it, "ior", 1.5f);
+        }
+
+        if (const auto it = ext_it->find("KHR_materials_transmission"); it != ext_it->end() && it->is_object())
+        {
+            ext.has_transmission = true;
+            ext.transmission_factor = ReadJsonFloat(*it, "transmissionFactor", 0.0f);
+        }
+
+        if (const auto it = ext_it->find("KHR_materials_volume"); it != ext_it->end() && it->is_object())
+        {
+            ext.has_volume = true;
+            ext.volume_thickness_factor = ReadJsonFloat(*it, "thicknessFactor", 0.0f);
+            ext.attenuation_distance = ReadJsonFloat(*it, "attenuationDistance", 0.0f);
+            ext.attenuation_color = ReadJsonFloat3(*it, "attenuationColor", {1.0f, 1.0f, 1.0f});
+        }
+
+        if (const auto it = ext_it->find("KHR_materials_clearcoat"); it != ext_it->end() && it->is_object())
+        {
+            ext.has_clearcoat = true;
+            ext.clearcoat_factor = ReadJsonFloat(*it, "clearcoatFactor", 0.0f);
+            ext.clearcoat_roughness_factor = ReadJsonFloat(*it, "clearcoatRoughnessFactor", 0.0f);
+            const json normal_tex = it->value("clearcoatNormalTexture", json::object());
+            ext.clearcoat_normal_scale = ReadJsonFloat(normal_tex, "scale", 1.0f);
+        }
+
+        if (const auto it = ext_it->find("KHR_materials_emissive_strength"); it != ext_it->end() && it->is_object())
+        {
+            ext.has_emissive_strength = true;
+            ext.emissive_strength = ReadJsonFloat(*it, "emissiveStrength", 1.0f);
+        }
+    }
+
+    return result;
+}
 }
 
 bool ModelMetadata::IsSupportedModelPath(const std::filesystem::path& path)
@@ -188,9 +366,27 @@ ModelMetadata LoadModelMetadata(const std::filesystem::path& path)
     metadata.animation_count = scene->mNumAnimations;
     metadata.embedded_texture_count = scene->mNumTextures;
 
+    const std::vector<GltfExtensionMetadata> extensions = LoadGltfExtensionMetadata(path);
+
+    // Collect material indices actually referenced by meshes to skip unused defaults
+    std::vector<bool> material_used(scene->mNumMaterials, false);
+    for (unsigned int mesh_index = 0; mesh_index < scene->mNumMeshes; ++mesh_index)
+    {
+        const aiMesh* mesh = scene->mMeshes[mesh_index];
+        if (mesh != nullptr && mesh->mMaterialIndex < scene->mNumMaterials)
+        {
+            material_used[mesh->mMaterialIndex] = true;
+        }
+    }
+
     metadata.materials.reserve(scene->mNumMaterials);
     for (unsigned int material_index = 0; material_index < scene->mNumMaterials; ++material_index)
     {
+        if (!material_used[material_index])
+        {
+            continue;
+        }
+
         const aiMaterial* material = scene->mMaterials[material_index];
         ModelMaterialMetadata material_metadata;
         material_metadata.name = NormalizeMaterialName(material, material_index);
@@ -200,6 +396,8 @@ ModelMetadata LoadModelMetadata(const std::filesystem::path& path)
             material_metadata.base_color = ReadColor(material, AI_MATKEY_COLOR_DIFFUSE);
         }
         material_metadata.emissive_color = ReadColor(material, AI_MATKEY_COLOR_EMISSIVE);
+        material_metadata.specular_color = ReadColor3(material, AI_MATKEY_COLOR_SPECULAR);
+        material_metadata.sheen_color = ReadColor3(material, AI_MATKEY_SHEEN_COLOR_FACTOR);
         ReadString(material, AI_MATKEY_GLTF_ALPHAMODE, material_metadata.alpha_mode);
         material_metadata.alpha_mode = ToUpper(material_metadata.alpha_mode);
         material_metadata.has_alpha_cutoff = ReadFloat(material, AI_MATKEY_GLTF_ALPHACUTOFF, material_metadata.alpha_cutoff);
@@ -209,11 +407,63 @@ ModelMetadata LoadModelMetadata(const std::filesystem::path& path)
         material_metadata.has_occlusion_strength = material != nullptr && material->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_AMBIENT_OCCLUSION, 0), material_metadata.occlusion_strength) == AI_SUCCESS;
         material_metadata.has_roughness = ReadFloat(material, AI_MATKEY_ROUGHNESS_FACTOR, material_metadata.roughness);
         material_metadata.has_metalness = ReadFloat(material, AI_MATKEY_METALLIC_FACTOR, material_metadata.metalness);
+        material_metadata.has_specular_factor = ReadFloat(material, AI_MATKEY_SPECULAR_FACTOR, material_metadata.specular_factor);
+        material_metadata.has_sheen_roughness = ReadFloat(material, AI_MATKEY_SHEEN_ROUGHNESS_FACTOR, material_metadata.sheen_roughness_factor);
 
         int shading_model = 0;
         material_metadata.unlit = material != nullptr &&
             material->Get(AI_MATKEY_SHADING_MODEL, shading_model) == AI_SUCCESS &&
             (shading_model == aiShadingMode_NoShading || shading_model == aiShadingMode_Unlit);
+
+        // Apply KHR extension data from glTF JSON (only available for .gltf, not .glb)
+        if (material_index < extensions.size())
+        {
+            const GltfExtensionMetadata& ext = extensions[material_index];
+
+            if (ext.has_ior)
+            {
+                material_metadata.has_ior = true;
+                material_metadata.index_of_refraction = ext.index_of_refraction;
+            }
+            if (ext.has_transmission)
+            {
+                material_metadata.has_transmission = true;
+                material_metadata.transmission_factor = ext.transmission_factor;
+            }
+            if (ext.has_iridescence)
+            {
+                material_metadata.has_iridescence = true;
+                material_metadata.iridescence_factor = ext.iridescence_factor;
+                material_metadata.iridescence_ior = ext.iridescence_ior;
+                material_metadata.iridescence_thickness_min = ext.iridescence_thickness_min;
+                material_metadata.iridescence_thickness_max = ext.iridescence_thickness_max;
+            }
+            if (ext.has_volume)
+            {
+                material_metadata.has_volume = true;
+                material_metadata.volume_thickness_factor = ext.volume_thickness_factor;
+                material_metadata.attenuation_distance = ext.attenuation_distance;
+                material_metadata.attenuation_color.valid = true;
+                material_metadata.attenuation_color.rgba = {
+                    ext.attenuation_color[0],
+                    ext.attenuation_color[1],
+                    ext.attenuation_color[2],
+                    1.0f,
+                };
+            }
+            if (ext.has_clearcoat)
+            {
+                material_metadata.has_clearcoat = true;
+                material_metadata.clearcoat_factor = ext.clearcoat_factor;
+                material_metadata.clearcoat_roughness_factor = ext.clearcoat_roughness_factor;
+                material_metadata.clearcoat_normal_scale = ext.clearcoat_normal_scale;
+            }
+            if (ext.has_emissive_strength)
+            {
+                material_metadata.has_emissive_strength = true;
+                material_metadata.emissive_strength = ext.emissive_strength;
+            }
+        }
 
         for (const auto& slot : kTextureSlots)
         {
