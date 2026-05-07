@@ -94,17 +94,6 @@ if(NOT imgui_POPULATED)
 endif()
 
 FetchContent_Declare(
-    imnodeflow
-    GIT_REPOSITORY https://github.com/Fattorino/ImNodeFlow.git
-    GIT_TAG 5c93f4822869223cc1abe5ce5fe51e6bee1f5925
-    GIT_SHALLOW TRUE
-)
-FetchContent_GetProperties(imnodeflow)
-if(NOT imnodeflow_POPULATED)
-    FetchContent_Populate(imnodeflow)
-endif()
-
-FetchContent_Declare(
     imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
     GIT_TAG a15acd87a3f3241a29ea1363ceafc680dca3a96b
@@ -279,7 +268,6 @@ else()
 endif()
 
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
-set(IMNODEFLOW_DIR ${imnodeflow_SOURCE_DIR})
 set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
 set(IMGUICOLORTEXTEDIT_DIR ${imguicolortextedit_SOURCE_DIR})
 
@@ -355,23 +343,9 @@ target_include_directories(imgui
 
 target_link_libraries(imgui PUBLIC SDL3::SDL3 Vulkan::Vulkan)
 
-add_library(imnodeflow STATIC
-    ${IMNODEFLOW_DIR}/src/ImNodeFlow.cpp
-)
-
 add_library(imguizmo STATIC
     ${IMGUIZMO_DIR}/ImGuizmo.cpp
 )
-
-target_include_directories(imnodeflow
-    PUBLIC
-        ${IMNODEFLOW_DIR}/include
-    PRIVATE
-        ${IMNODEFLOW_DIR}/src
-)
-
-target_compile_definitions(imnodeflow PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
-target_link_libraries(imnodeflow PUBLIC imgui)
 
 target_include_directories(imguizmo
     PUBLIC
@@ -388,7 +362,6 @@ target_include_directories(imguicolortextedit PUBLIC ${IMGUICOLORTEXTEDIT_DIR})
 target_link_libraries(imguicolortextedit PUBLIC imgui)
 
 if(MSVC)
-    target_compile_options(imnodeflow PRIVATE /wd4100 /wd4244)
     target_compile_options(imguizmo PRIVATE /wd4100 /wd4244 /wd4456)
     target_compile_options(imguicolortextedit PRIVATE /W0)
 endif()
@@ -412,8 +385,6 @@ add_executable(engine
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
     src/vfs/PakArchive.cpp
-    src/graph/GraphDocument.cpp
-    src/graph/NodeLibrary.cpp
     src/panels/FilesPanel.cpp
     src/panels/EffectsPanel.cpp
     src/panels/AnimatorPanel.cpp
@@ -448,7 +419,6 @@ target_link_libraries(engine PRIVATE
     SDL3::SDL3
     imgui
     imguizmo
-    imnodeflow
     imguicolortextedit
     tinyexr
     lua_runtime
@@ -490,8 +460,6 @@ if(MSVC)
         /W4
         /permissive-
         /external:W0
-        "/external:I${IMNODEFLOW_DIR}/include"
-        "/external:I${IMNODEFLOW_DIR}/src"
         "/external:I${IMGUI_DIR}"
         "/external:I${IMGUI_DIR}/backends"
         "/external:I${assimp_SOURCE_DIR}/include"
