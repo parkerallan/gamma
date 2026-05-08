@@ -102,6 +102,9 @@ Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width
 #### `Engine.SkyboxAttr`
 Methods: `ImagePath(name[, path])`, `Rotation(name[, value])`
 
+#### `Engine.Animator`
+Methods (attribute accessors): `ControllerPath(name[, path])`, `InitialState(name[, stateName])`, `PlaybackSpeed(name[, value])`, `AutoPlay(name[, enabled])`, `SetDefaultState(name, stateName)`, `GetDefaultState(name)`
+
 Example:
 
 ```lua
@@ -120,6 +123,56 @@ Engine.Image2DAttr.Priority("UIBackground", 1)  -- Lower priority = rendered on 
 - Lower priority values render on top (drawn last); higher values render behind (drawn first).
 - Default priority is `1` for all overlays.
 - Example: Priority 1 will render on top of Priority 10. If priorities are equal, overlays are rendered in creation order.
+
+### Animation Runtime Functions
+
+Quick summary: The functions below control runtime animation state and parameters. They are not attribute accessors.
+
+#### `Engine.Animator.GetState(name)`
+Quick summary: Returns current runtime animator state name, or `nil` if unavailable.
+
+```lua
+local state = Engine.Animator.GetState("Fox")
+```
+
+#### `Engine.Animator.StateTime(name)`
+Quick summary: Returns current runtime state local time in seconds, or `nil` if unavailable.
+
+```lua
+local t = Engine.Animator.StateTime("Fox")
+```
+
+#### `Engine.Animator.SetBool(name, parameterName, value)`
+Quick summary: Sets a runtime bool parameter. Returns `true` on success.
+
+```lua
+local ok = Engine.Animator.SetBool("Fox", "isMoving", true)
+```
+
+#### `Engine.Animator.GetBool(name, parameterName)`
+Quick summary: Gets a runtime bool parameter. Returns `false` if unavailable.
+
+```lua
+local isMoving = Engine.Animator.GetBool("Fox", "isMoving")
+```
+
+#### `Engine.Animator.SetTrigger(name, triggerName)`
+Quick summary: Sets a runtime trigger parameter for transition evaluation. Returns `true` on success.
+
+```lua
+local ok = Engine.Animator.SetTrigger("Fox", "attack")
+```
+
+#### `Engine.Animator.SetState(name, stateName)`
+Quick summary: Immediately requests a runtime state change. Returns `true` on success.
+
+```lua
+local ok = Engine.Animator.SetState("Fox", "Run")
+```
+
+Notes:
+- Runtime controls: `SetBool`, `GetBool`, `SetTrigger`, `SetState`, `GetState`, `StateTime`.
+- If an object has no Animator attribute, animator calls return `nil`, `false`, or no-op depending on function.
 
 ### `Time`
 

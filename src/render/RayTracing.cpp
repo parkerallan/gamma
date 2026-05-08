@@ -1448,6 +1448,21 @@ void RayTracing::DestroyPipelineResources()
             vkDestroyDescriptorSetLayout(device, descriptor_set_layout_, allocator);
             descriptor_set_layout_ = VK_NULL_HANDLE;
         }
+        if (fxaa_pipeline_ != VK_NULL_HANDLE)
+        {
+            vkDestroyPipeline(device, fxaa_pipeline_, allocator);
+            fxaa_pipeline_ = VK_NULL_HANDLE;
+        }
+        if (fxaa_pipeline_layout_ != VK_NULL_HANDLE)
+        {
+            vkDestroyPipelineLayout(device, fxaa_pipeline_layout_, allocator);
+            fxaa_pipeline_layout_ = VK_NULL_HANDLE;
+        }
+        if (fxaa_descriptor_set_layout_ != VK_NULL_HANDLE)
+        {
+            vkDestroyDescriptorSetLayout(device, fxaa_descriptor_set_layout_, allocator);
+            fxaa_descriptor_set_layout_ = VK_NULL_HANDLE;
+        }
         if (texture_sampler_ != VK_NULL_HANDLE)
         {
             vkDestroySampler(device, texture_sampler_, allocator);
@@ -1478,6 +1493,9 @@ void RayTracing::DestroyPipelineResources()
         pipeline_ = VK_NULL_HANDLE;
         pipeline_layout_ = VK_NULL_HANDLE;
         descriptor_set_layout_ = VK_NULL_HANDLE;
+        fxaa_pipeline_ = VK_NULL_HANDLE;
+        fxaa_pipeline_layout_ = VK_NULL_HANDLE;
+        fxaa_descriptor_set_layout_ = VK_NULL_HANDLE;
         texture_sampler_ = VK_NULL_HANDLE;
         skybox_texture_view_ = VK_NULL_HANDLE;
         fallback_texture_view_ = VK_NULL_HANDLE;
@@ -1486,6 +1504,8 @@ void RayTracing::DestroyPipelineResources()
     }
 
     descriptor_set_ = VK_NULL_HANDLE;
+    fxaa_descriptor_set_ = VK_NULL_HANDLE;
+    fxaa_descriptors_dirty_ = false;
 }
 
 bool RayTracing::EnsurePipelineResources()
@@ -1798,6 +1818,90 @@ bool RayTracing::EnsurePipelineResources()
         }
     }
 
+    // ---------- Post FXAA / sRGB resolve compute pipeline ----------
+    // Two storage-image bindings: writeonly output (rgba8) + readonly history (rgba16f).
+    // Owned independently of the RT pipeline so changes here cannot regress
+    // any-hit / closest-hit / shadow code paths.
+    if (fxaa_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        std::array<VkDescriptorSetLayoutBinding, 2> fxaa_bindings = {};
+        fxaa_bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        fxaa_bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+
+        VkDescriptorSetLayoutCreateInfo fxaa_layout_info = {};
+        fxaa_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        fxaa_layout_info.bindingCount = static_cast<std::uint32_t>(fxaa_bindings.size());
+        fxaa_layout_info.pBindings = fxaa_bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &fxaa_layout_info, allocator, &fxaa_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to create viewport RT FXAA descriptor set layout";
+            return false;
+        }
+    }
+
+    if (fxaa_descriptor_set_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetAllocateInfo allocate_info = {};
+        allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocate_info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        allocate_info.descriptorSetCount = 1;
+        allocate_info.pSetLayouts = &fxaa_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &allocate_info, &fxaa_descriptor_set_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to allocate viewport RT FXAA descriptor set";
+            fxaa_descriptor_set_ = VK_NULL_HANDLE;
+            return false;
+        }
+        fxaa_descriptors_dirty_ = true;
+    }
+
+    if (fxaa_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPipelineLayoutCreateInfo layout_info = {};
+        layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layout_info.setLayoutCount = 1;
+        layout_info.pSetLayouts = &fxaa_descriptor_set_layout_;
+        VkResult result = vkCreatePipelineLayout(device, &layout_info, allocator, &fxaa_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to create viewport RT FXAA pipeline layout";
+            return false;
+        }
+    }
+
+    if (fxaa_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule fxaa_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_fxaa.comp.spv"));
+        if (fxaa_shader == VK_NULL_HANDLE)
+        {
+            status_message_ = "Failed to load viewport RT FXAA shader";
+            return false;
+        }
+
+        VkComputePipelineCreateInfo compute_info = {};
+        compute_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        compute_info.layout = fxaa_pipeline_layout_;
+        compute_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        compute_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        compute_info.stage.module = fxaa_shader;
+        compute_info.stage.pName = "main";
+
+        VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compute_info, allocator, &fxaa_pipeline_);
+        VulkanContext::CheckVkResult(result);
+        vkDestroyShaderModule(device, fxaa_shader, allocator);
+        if (result != VK_SUCCESS)
+        {
+            fxaa_pipeline_ = VK_NULL_HANDLE;
+            status_message_ = "Failed to create viewport RT FXAA pipeline";
+            return false;
+        }
+    }
+
     if (descriptors_dirty_)
     {
         const bool ok = UpdateDescriptors();
@@ -1934,6 +2038,37 @@ bool RayTracing::UpdateDescriptors()
     writes[8].pImageInfo = &skybox_image_info;
 
     vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    // Mirror output_image_ + history_image_ into the FXAA compute descriptor.
+    if (fxaa_descriptor_set_ != VK_NULL_HANDLE)
+    {
+        VkDescriptorImageInfo fxaa_output_info = {};
+        fxaa_output_info.imageView = output_view_;
+        fxaa_output_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo fxaa_history_info = {};
+        fxaa_history_info.imageView = history_view_;
+        fxaa_history_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        std::array<VkWriteDescriptorSet, 2> fxaa_writes = {};
+        fxaa_writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        fxaa_writes[0].dstSet = fxaa_descriptor_set_;
+        fxaa_writes[0].dstBinding = 0;
+        fxaa_writes[0].descriptorCount = 1;
+        fxaa_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        fxaa_writes[0].pImageInfo = &fxaa_output_info;
+
+        fxaa_writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        fxaa_writes[1].dstSet = fxaa_descriptor_set_;
+        fxaa_writes[1].dstBinding = 1;
+        fxaa_writes[1].descriptorCount = 1;
+        fxaa_writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        fxaa_writes[1].pImageInfo = &fxaa_history_info;
+
+        vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(fxaa_writes.size()), fxaa_writes.data(), 0, nullptr);
+        fxaa_descriptors_dirty_ = false;
+    }
+
     return true;
 }
 
@@ -2238,7 +2373,7 @@ bool RayTracing::RenderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT);
@@ -2353,10 +2488,20 @@ bool RayTracing::RenderFrame(
         accumulation_frame_count_ = 0;
     }
     const std::uint32_t accumulation_enable_history = (dynamic_geometry_present_ || accumulation_frame_count_ == 0) ? 0u : 1u;
+    // accumulation_data.z is repurposed as a per-frame minimum shadow sample
+    // count override. When temporal accumulation is unavailable (dynamic
+    // geometry in runtime play, or first few frames after a viewport reset),
+    // soft shadows have no history to average against, so a single sparse
+    // 6-sample shadow ray per pixel produces visible noise. Bumping to 16
+    // per primary-depth shadow ray keeps per-frame quality in line with the
+    // long-term accumulated viewport result. When temporal averaging is
+    // active we leave it at 0 so the shader falls back to the smaller
+    // baseline count and lets accumulation do the smoothing for free.
+    const std::uint32_t shadow_sample_override = accumulation_enable_history == 0u ? 16u : 0u;
     uniforms.accumulation_data = {
         dynamic_geometry_present_ ? 0u : accumulation_frame_count_,
         accumulation_enable_history,
-        accumulation_reset ? 1u : 0u,
+        shadow_sample_override,
         raw_frame_count_};
 
     if (!UploadGpuBuffer(*vulkan_context_, uniform_buffer_, &uniforms, sizeof(uniforms)))
@@ -2398,6 +2543,55 @@ bool RayTracing::RenderFrame(
         output_width_,
         output_height_,
         1);
+
+    // ---- Post AA / sRGB resolve ----
+    // history_image_: was written by RT raygen, now read by compute.
+    // output_image_:  was written by RT raygen (no longer; raygen skips it),
+    //                 will now be written by compute. We still issue a RAW
+    //                 barrier on it because previous frames' compute writes
+    //                 must complete before this frame's compute writes begin.
+    if (fxaa_pipeline_ != VK_NULL_HANDLE && fxaa_descriptor_set_ != VK_NULL_HANDLE)
+    {
+        std::array<VkImageMemoryBarrier, 2> aa_barriers = {};
+        aa_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        aa_barriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        aa_barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        aa_barriers[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        aa_barriers[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        aa_barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        aa_barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        aa_barriers[0].image = history_image_;
+        aa_barriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        aa_barriers[1] = aa_barriers[0];
+        aa_barriers[1].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        aa_barriers[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        aa_barriers[1].image = output_image_;
+
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0, nullptr,
+            0, nullptr,
+            static_cast<std::uint32_t>(aa_barriers.size()), aa_barriers.data());
+
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, fxaa_pipeline_);
+        vkCmdBindDescriptorSets(
+            command_buffer_,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            fxaa_pipeline_layout_,
+            0,
+            1,
+            &fxaa_descriptor_set_,
+            0,
+            nullptr);
+
+        const std::uint32_t group_x = (output_width_ + 7u) / 8u;
+        const std::uint32_t group_y = (output_height_ + 7u) / 8u;
+        vkCmdDispatch(command_buffer_, group_x, group_y, 1);
+    }
 
     accumulation_reference_uniforms_ = accumulation_reference;
     accumulation_reference_uniforms_valid_ = true;

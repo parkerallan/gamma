@@ -317,6 +317,7 @@ add_engine_shader(standard_rt.rchit rchit)
 add_engine_shader(standard_rt_shadow.rchit rchit)
 add_engine_shader(standard_rt_primary.rahit rahit)
 add_engine_shader(standard_rt_shadow.rahit rahit)
+add_engine_shader(standard_rt_fxaa.comp comp)
 add_engine_shader(overlay2d.vert vert)
 add_engine_shader(overlay2d.frag frag)
 

@@ -1,0 +1,242 @@
+#version 460
+//
+// Fixed-cost edge-aware AA + sRGB tone-map resolve pass for the RT viewport.
+//
+// Reads the linear HDR accumulation history (rgba16f) produced by the raygen
+// shader, performs a proper FXAA 3.11 Quality-style edge-span resolve in
+// display-encoded (sRGB) luma space, and writes the final sRGB image (rgba8)
+// consumed by ImGui. Operates only on color, never touches material /
+// transmission / shadow data.
+//
+// Based on Timothy Lottes' FXAA 3.11 (PS3 / public domain) algorithm:
+//   1. Sample 3x3 neighbourhood and convert to sRGB.
+//   2. Luma min/max contrast threshold; flat regions emit centre tap as-is so
+//      texture detail stays sharp.
+//   3. Determine whether the edge runs more horizontally or vertically using
+//      a Sobel-like comparison over the 3x3 neighbourhood.
+//   4. Walk along the edge in both directions sampling pair-averaged luma
+//      until the luma deviates from the local edge mean by more than 1/4 of
+//      the local contrast, or we hit the maximum search distance.
+//   5. The shorter of the two walks tells us which side of the edge we are on
+//      and where the edge endpoint is. From that, compute the perpendicular
+//      sub-pixel offset to the geometric edge midpoint, blend with a half-
+//      pixel bilinear tap, and combine with a sub-pixel local contrast term.
+//
+// Tunables follow Lottes' "quality" preset values; the only deviation is the
+// luma source (perceptual sRGB so HDR specular doesn't dominate AA decisions).
+//
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D output_image;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D history_image;
+
+// FXAA Quality preset constants.
+const float FXAA_LUMA_EDGE_MIN      = 0.0312;  // Absolute luma noise floor.
+const float FXAA_LUMA_EDGE_RELATIVE = 0.063;   // Fraction of brightest local luma.
+const float FXAA_SUBPIX_BLEND_MAX   = 1.0;     // Cap for sub-pixel blend.
+const float FXAA_SUBPIX_QUALITY     = 0.75;    // Sub-pixel local-contrast weight.
+const int   FXAA_SEARCH_STEPS       = 12;      // Edge span search iterations.
+const float FXAA_SEARCH_THRESHOLD   = 0.25;    // Luma deviation that ends search.
+
+// FXAA quality step sizes (Lottes preset 39, 12 taps).
+const float FXAA_QUALITY_STEPS[12] = float[12](
+    1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0);
+
+float linear_to_srgb_channel(float value)
+{
+    value = max(value, 0.0);
+    if (value <= 0.0031308) return value * 12.92;
+    return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+vec3 linear_to_srgb(vec3 value)
+{
+    return clamp(
+        vec3(
+            linear_to_srgb_channel(value.r),
+            linear_to_srgb_channel(value.g),
+            linear_to_srgb_channel(value.b)),
+        vec3(0.0),
+        vec3(1.0));
+}
+
+// Rec. 709 luma in display-encoded space (matches what the eye sees).
+float luma_of(vec3 srgb)
+{
+    return dot(srgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 fetch_srgb(ivec2 coord, ivec2 image_size)
+{
+    coord = clamp(coord, ivec2(0), image_size - ivec2(1));
+    return linear_to_srgb(imageLoad(history_image, coord).rgb);
+}
+
+float fetch_luma(ivec2 coord, ivec2 image_size)
+{
+    return luma_of(fetch_srgb(coord, image_size));
+}
+
+// Manual bilinear sample of the 4 nearest taps (sRGB space, no hardware sampler
+// available on a storage image binding).
+vec3 bilinear_srgb(vec2 uv, ivec2 image_size)
+{
+    vec2 base = floor(uv - vec2(0.5));
+    vec2 frac_uv = uv - vec2(0.5) - base;
+    ivec2 b = ivec2(base);
+
+    vec3 c00 = fetch_srgb(b + ivec2(0, 0), image_size);
+    vec3 c10 = fetch_srgb(b + ivec2(1, 0), image_size);
+    vec3 c01 = fetch_srgb(b + ivec2(0, 1), image_size);
+    vec3 c11 = fetch_srgb(b + ivec2(1, 1), image_size);
+
+    return mix(mix(c00, c10, frac_uv.x), mix(c01, c11, frac_uv.x), frac_uv.y);
+}
+
+float bilinear_luma(vec2 uv, ivec2 image_size)
+{
+    return luma_of(bilinear_srgb(uv, image_size));
+}
+
+void main()
+{
+    ivec2 image_size = imageSize(history_image);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= image_size.x || pixel.y >= image_size.y)
+    {
+        return;
+    }
+
+    // ---- Step 1: 3x3 neighbourhood + luma extraction ----
+    vec3 rgb_c  = fetch_srgb(pixel + ivec2( 0,  0), image_size);
+    float l_c   = luma_of(rgb_c);
+    float l_n   = fetch_luma(pixel + ivec2( 0, -1), image_size);
+    float l_s   = fetch_luma(pixel + ivec2( 0,  1), image_size);
+    float l_e   = fetch_luma(pixel + ivec2( 1,  0), image_size);
+    float l_w   = fetch_luma(pixel + ivec2(-1,  0), image_size);
+
+    float luma_min = min(l_c, min(min(l_n, l_s), min(l_e, l_w)));
+    float luma_max = max(l_c, max(max(l_n, l_s), max(l_e, l_w)));
+    float luma_range = luma_max - luma_min;
+
+    // ---- Step 2: contrast threshold ----
+    if (luma_range < max(FXAA_LUMA_EDGE_MIN, luma_max * FXAA_LUMA_EDGE_RELATIVE))
+    {
+        imageStore(output_image, pixel, vec4(rgb_c, 1.0));
+        return;
+    }
+
+    // Diagonal taps for orientation + sub-pixel weight.
+    float l_nw = fetch_luma(pixel + ivec2(-1, -1), image_size);
+    float l_ne = fetch_luma(pixel + ivec2( 1, -1), image_size);
+    float l_sw = fetch_luma(pixel + ivec2(-1,  1), image_size);
+    float l_se = fetch_luma(pixel + ivec2( 1,  1), image_size);
+
+    // ---- Step 3: edge orientation (Sobel-like) ----
+    // edge_horizontal magnitude = vertical luma gradient; if it dominates, the
+    // *edge line* is horizontal (we'll step in y to cross it).
+    float edge_horizontal =
+        abs(-2.0 * l_w + l_nw + l_sw)
+      + abs(-2.0 * l_c + l_n  + l_s ) * 2.0
+      + abs(-2.0 * l_e + l_ne + l_se);
+    float edge_vertical =
+        abs(-2.0 * l_n + l_nw + l_ne)
+      + abs(-2.0 * l_c + l_w  + l_e ) * 2.0
+      + abs(-2.0 * l_s + l_sw + l_se);
+    bool is_horizontal_edge = edge_horizontal >= edge_vertical;
+
+    // Lumas on either side of the edge (perpendicular to edge direction).
+    float luma1 = is_horizontal_edge ? l_n : l_w;
+    float luma2 = is_horizontal_edge ? l_s : l_e;
+    float gradient1 = abs(luma1 - l_c);
+    float gradient2 = abs(luma2 - l_c);
+    bool is_first_steeper = gradient1 >= gradient2;
+    float gradient_scaled = 0.25 * max(gradient1, gradient2);
+
+    // Step direction perpendicular to the edge (toward the steeper gradient side).
+    float step_length = is_horizontal_edge ? 1.0 : 1.0; // one pixel
+    vec2 step_perp = is_horizontal_edge ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
+    if (is_first_steeper)
+    {
+        step_length = -step_length;
+    }
+    vec2 step_perp_signed = step_perp * step_length;
+
+    // Local edge midpoint luma — the average of the centre tap and the steeper
+    // neighbour. We use this as the search reference when walking along the edge.
+    float local_average_luma = 0.5 * (l_c + (is_first_steeper ? luma1 : luma2));
+
+    // ---- Step 4: edge span search ----
+    // Walk along the edge tangent in both directions, sampling pair-averages
+    // (centre + perpendicular neighbour) until the luma diverges from the
+    // local average by more than gradient_scaled — that's the edge endpoint.
+    vec2 edge_tangent = is_horizontal_edge ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+    vec2 base_uv = vec2(pixel) + vec2(0.5) + 0.5 * step_perp_signed;
+
+    vec2 uv_pos = base_uv + edge_tangent * FXAA_QUALITY_STEPS[0];
+    vec2 uv_neg = base_uv - edge_tangent * FXAA_QUALITY_STEPS[0];
+
+    float luma_pos = bilinear_luma(uv_pos, image_size) - local_average_luma;
+    float luma_neg = bilinear_luma(uv_neg, image_size) - local_average_luma;
+
+    bool reached_pos = abs(luma_pos) >= gradient_scaled;
+    bool reached_neg = abs(luma_neg) >= gradient_scaled;
+
+    if (!reached_pos) uv_pos += edge_tangent * FXAA_QUALITY_STEPS[1];
+    if (!reached_neg) uv_neg -= edge_tangent * FXAA_QUALITY_STEPS[1];
+
+    if (!(reached_pos && reached_neg))
+    {
+        for (int i = 2; i < FXAA_SEARCH_STEPS; ++i)
+        {
+            if (!reached_pos) luma_pos = bilinear_luma(uv_pos, image_size) - local_average_luma;
+            if (!reached_neg) luma_neg = bilinear_luma(uv_neg, image_size) - local_average_luma;
+            reached_pos = reached_pos || abs(luma_pos) >= gradient_scaled;
+            reached_neg = reached_neg || abs(luma_neg) >= gradient_scaled;
+            if (reached_pos && reached_neg) break;
+            float step_size = FXAA_QUALITY_STEPS[i];
+            if (!reached_pos) uv_pos += edge_tangent * step_size;
+            if (!reached_neg) uv_neg -= edge_tangent * step_size;
+        }
+    }
+
+    // ---- Step 5: pixel position along edge / offset ----
+    float dist_pos = is_horizontal_edge
+        ? (uv_pos.x - (float(pixel.x) + 0.5))
+        : (uv_pos.y - (float(pixel.y) + 0.5));
+    float dist_neg = is_horizontal_edge
+        ? ((float(pixel.x) + 0.5) - uv_neg.x)
+        : ((float(pixel.y) + 0.5) - uv_neg.y);
+
+    bool closer_to_pos = dist_pos < dist_neg;
+    float dist_min = min(dist_pos, dist_neg);
+    float edge_length = dist_pos + dist_neg;
+
+    // Determine which side of the edge centre is on. If the side that the
+    // search terminated on has *opposite* luma sign relative to local average,
+    // we are on the dark side of the edge -> apply the offset.
+    float luma_end = closer_to_pos ? luma_pos : luma_neg;
+    bool correct_variation = (luma_end < 0.0) != (l_c - local_average_luma < 0.0);
+
+    float pixel_offset = max(0.5 - dist_min / edge_length, 0.0);
+    float final_offset = correct_variation ? pixel_offset : 0.0;
+
+    // ---- Sub-pixel anti-aliasing term (Lottes) ----
+    // Weighted average of the 3x3 luma minus centre — when the centre differs
+    // strongly from its neighbourhood, contribute extra blend to soften
+    // single-pixel features that the span search misses.
+    float subpix_avg = (1.0 / 12.0) *
+        (2.0 * (l_n + l_s + l_e + l_w) + l_nw + l_ne + l_sw + l_se);
+    float subpix_range = clamp(abs(subpix_avg - l_c) / max(luma_range, 1e-5), 0.0, 1.0);
+    float subpix_weight = (-2.0 * subpix_range + 3.0) * subpix_range * subpix_range;
+    float subpix_offset = subpix_weight * subpix_weight * FXAA_SUBPIX_QUALITY;
+
+    final_offset = max(final_offset, subpix_offset);
+    final_offset = min(final_offset, FXAA_SUBPIX_BLEND_MAX);
+
+    vec2 final_uv = vec2(pixel) + vec2(0.5) + step_perp_signed * final_offset;
+    vec3 result = bilinear_srgb(final_uv, image_size);
+
+    imageStore(output_image, pixel, vec4(result, 1.0));
+}

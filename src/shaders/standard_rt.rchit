@@ -126,8 +126,22 @@ layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
 layout(set = 0, binding = 6) uniform sampler2D material_textures[256];
 
 const float PI = 3.1415926535897932384626433832795;
-const uint SOFT_SHADOW_SAMPLE_COUNT = 3u;
+const uint SOFT_SHADOW_SAMPLE_COUNT = 6u;
 const uint ROUGH_TRANSMISSION_SAMPLE_COUNT = 1u;
+
+// Resolve the per-frame shadow sample count for a primary-depth shadow ray.
+// When the host sets accumulation_data.z it acts as a minimum override -- this
+// is enabled in play / dynamic-geometry mode where temporal accumulation is
+// unavailable, so each frame must produce a smoother soft-shadow result on
+// its own. Secondary depths always stay at 1 sample to keep cost bounded.
+uint effective_shadow_samples(bool is_primary_depth)
+{
+    if (!is_primary_depth)
+    {
+        return 1u;
+    }
+    return max(SOFT_SHADOW_SAMPLE_COUNT, scene_uniforms.accumulation_data.z);
+}
 const mat3 XYZ_TO_REC709 = mat3(
      3.2404542, -0.9692660,  0.0556434,
     -1.5371385,  1.8760108, -0.2040259,
@@ -944,7 +958,7 @@ void main()
         build_basis(light_direction, sample_tangent, sample_bitangent);
         float angular_radius = max(scene_uniforms.directional_light_data.x, 0.0);
         float disk_radius = tan(angular_radius);
-        uint sample_count = angular_radius > 0.00001 ? (is_primary_depth ? SOFT_SHADOW_SAMPLE_COUNT : 1u) : 1u;
+        uint sample_count = angular_radius > 0.00001 ? effective_shadow_samples(is_primary_depth) : 1u;
         float sample_rotation = hash_to_unit_float(sample_seed ^ 0x68bc21ebu) * (2.0 * PI);
         vec3 light_sum = vec3(0.0);
 
@@ -997,7 +1011,7 @@ void main()
     if (!skip_direct_lighting && scene_uniforms.point_light_color.a > 0.0)
     {
         float source_radius = max(scene_uniforms.point_light_data.x, 0.0);
-        uint sample_count = source_radius > 0.00001 ? (is_primary_depth ? SOFT_SHADOW_SAMPLE_COUNT : 1u) : 1u;
+        uint sample_count = source_radius > 0.00001 ? effective_shadow_samples(is_primary_depth) : 1u;
         float sample_rotation = hash_to_unit_float(sample_seed ^ 0x2f6e2b1du) * (2.0 * PI);
         vec3 light_sum = vec3(0.0);
         vec3 center_to_light = scene_uniforms.point_light_position.xyz - world_position;
@@ -1079,7 +1093,7 @@ void main()
         vec3 sample_bitangent;
         build_basis(light_axis, sample_tangent, sample_bitangent);
         float source_radius = max(scene_uniforms.spot_light_data.y, 0.0);
-        uint sample_count = source_radius > 0.00001 ? (is_primary_depth ? SOFT_SHADOW_SAMPLE_COUNT : 1u) : 1u;
+        uint sample_count = source_radius > 0.00001 ? effective_shadow_samples(is_primary_depth) : 1u;
         float sample_rotation = hash_to_unit_float(sample_seed ^ 0x51f15e5du) * (2.0 * PI);
         vec3 light_sum = vec3(0.0);
 

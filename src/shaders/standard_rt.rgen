@@ -48,19 +48,32 @@ float hash_to_unit_float(uint value)
     return float(pcg_hash(value)) * (1.0 / 4294967296.0);
 }
 
-vec2 jittered_sample_offset(uvec2 pixel, uint sample_index, uint frame_index)
+// Halton(base) low-discrepancy sequence in [0, 1). The (2, 3) pair gives a
+// well-distributed sub-pixel jitter pattern that resolves cleanly under temporal
+// accumulation. We wrap the sequence index every 64 samples to avoid the long
+// "tail" of Halton becoming visible as periodic clusters.
+float halton(uint index, uint base)
 {
-    const vec2 base_offsets[4] = vec2[4](
-        vec2(0.125, 0.375),
-        vec2(0.625, 0.125),
-        vec2(0.375, 0.875),
-        vec2(0.875, 0.625));
+    float result = 0.0;
+    float fraction = 1.0;
+    while (index > 0u)
+    {
+        fraction /= float(base);
+        result += fraction * float(index % base);
+        index /= base;
+    }
+    return result;
+}
 
-    uint seed = pixel.x * 73856093u ^ pixel.y * 19349663u ^ sample_index * 83492791u ^ frame_index * 2654435761u;
-    vec2 jitter = vec2(
-        hash_to_unit_float(seed),
-        hash_to_unit_float(seed ^ 0x9e3779b9u));
-    return base_offsets[sample_index] + jitter * 0.0625;
+// Sub-pixel jitter centered on (0, 0) and bounded to ±0.5 px. Indexed by the
+// raw frame counter (accumulation_data.w) so the sequence advances every frame
+// even after temporal accumulation has saturated. The pixel coordinate is NOT
+// mixed in: every pixel must share the same sub-pixel offset for the camera
+// ray jitter to act as supersampling rather than per-pixel noise.
+vec2 jittered_sample_offset(uint frame_index)
+{
+    uint cycle_index = (frame_index % 64u) + 1u; // Halton is undefined at 0
+    return vec2(halton(cycle_index, 2u), halton(cycle_index, 3u)) - vec2(0.5);
 }
 
 float linear_to_srgb_channel(float value)
@@ -201,17 +214,11 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
 void main()
 {
     vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
-    vec2 pixel_base = vec2(gl_LaunchIDEXT.xy);
-    uint frame_index = scene_uniforms.accumulation_data.x;
+    vec2 pixel_base = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    uint frame_index = scene_uniforms.accumulation_data.w;
     uint history_sample_count = scene_uniforms.accumulation_data.y != 0u ? scene_uniforms.accumulation_data.x : 0u;
 
-    vec3 current_color = vec3(0.0);
-    for (uint sample_index = 0u; sample_index < 1u; ++sample_index)
-    {
-        current_color += trace_primary_sample(pixel_base + jittered_sample_offset(gl_LaunchIDEXT.xy, sample_index, frame_index), launch_size);
-    }
-
-    current_color *= 1.0;
+    vec3 current_color = trace_primary_sample(pixel_base + jittered_sample_offset(frame_index), launch_size);
 
     vec3 accumulated_linear = current_color;
     if (history_sample_count > 0u)
@@ -222,5 +229,6 @@ void main()
     }
 
     imageStore(history_image, ivec2(gl_LaunchIDEXT.xy), vec4(accumulated_linear, 1.0));
-    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(linear_to_srgb(accumulated_linear), 1.0));
+    // The post FXAA compute pass owns the sRGB write into output_image; raygen
+    // only produces the linear HDR history. See standard_rt_fxaa.comp.
 }

@@ -268,6 +268,14 @@ private:
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
+    // Post AA / sRGB resolve compute pipeline. Reads linear HDR from
+    // history_image_, writes sRGB to output_image_. Owned independently of the
+    // RT pipeline so material / hit shaders never need to be touched to tune AA.
+    VkDescriptorSetLayout fxaa_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout fxaa_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline fxaa_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet fxaa_descriptor_set_ = VK_NULL_HANDLE;
+    bool fxaa_descriptors_dirty_ = false;
     ShaderBindingTable raygen_sbt_{};
     ShaderBindingTable miss_sbt_{};
     ShaderBindingTable hit_sbt_{};
