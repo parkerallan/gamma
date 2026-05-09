@@ -607,6 +607,9 @@ bool BuildBottomLevelAccelerationStructure(
     RayTracing::BottomLevelCacheEntry& cache_entry)
 {
     DestroyAccelerationStructure(&context, cache_entry.acceleration_structure);
+    DestroyGpuBuffer(&context, cache_entry.update_scratch_buffer);
+    cache_entry.update_scratch_size = 0;
+    cache_entry.allow_update = false;
 
     VkAccelerationStructureGeometryTrianglesDataKHR triangles = {
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
@@ -626,7 +629,13 @@ bool BuildBottomLevelAccelerationStructure(
     VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    // PREFER_FAST_BUILD + ALLOW_UPDATE keeps per-frame BLAS refits cheap for
+    // animated/skinned meshes. The trace cost difference vs PREFER_FAST_TRACE
+    // is small for typical character meshes and is dwarfed by the per-frame
+    // build cost we save.
+    build_geometry_info.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
+        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     build_geometry_info.geometryCount = 1;
     build_geometry_info.pGeometries = &geometry;
 
@@ -643,21 +652,31 @@ bool BuildBottomLevelAccelerationStructure(
         return false;
     }
 
-    RayTracing::GpuBuffer scratch_buffer{};
-    if (!CreateGpuBuffer(
-            context,
-            build_sizes.buildScratchSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            scratch_buffer))
+    // Persistent scratch sized to satisfy both the initial build and any future
+    // MODE_UPDATE refits. Kept alive on the cache entry so subsequent refits do
+    // not have to (re)allocate device memory on the hot path.
+    const VkDeviceSize required_scratch_size =
+        std::max<VkDeviceSize>(build_sizes.buildScratchSize, build_sizes.updateScratchSize);
+    if (cache_entry.update_scratch_buffer.buffer == VK_NULL_HANDLE ||
+        cache_entry.update_scratch_size < required_scratch_size)
     {
-        DestroyAccelerationStructure(&context, cache_entry.acceleration_structure);
-        return false;
+        DestroyGpuBuffer(&context, cache_entry.update_scratch_buffer);
+        if (!CreateGpuBuffer(
+                context,
+                required_scratch_size,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                cache_entry.update_scratch_buffer))
+        {
+            DestroyAccelerationStructure(&context, cache_entry.acceleration_structure);
+            return false;
+        }
+        cache_entry.update_scratch_size = required_scratch_size;
     }
 
     build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     build_geometry_info.dstAccelerationStructure = cache_entry.acceleration_structure.handle;
-    build_geometry_info.scratchData.deviceAddress = scratch_buffer.device_address;
+    build_geometry_info.scratchData.deviceAddress = cache_entry.update_scratch_buffer.device_address;
 
     VkAccelerationStructureBuildRangeInfoKHR build_range = {};
     build_range.primitiveCount = primitive_count;
@@ -683,9 +702,10 @@ bool BuildBottomLevelAccelerationStructure(
             nullptr);
     });
 
-    DestroyGpuBuffer(&context, scratch_buffer);
     if (!build_succeeded)
     {
+        DestroyGpuBuffer(&context, cache_entry.update_scratch_buffer);
+        cache_entry.update_scratch_size = 0;
         DestroyAccelerationStructure(&context, cache_entry.acceleration_structure);
         return false;
     }
@@ -696,6 +716,7 @@ bool BuildBottomLevelAccelerationStructure(
     cache_entry.index_count = mesh.index_count;
     cache_entry.geometry_revision = mesh.geometry_revision;
     cache_entry.opaque = IsOpaqueMesh(mesh);
+    cache_entry.allow_update = true;
     return true;
 }
 }
@@ -1179,21 +1200,49 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         return true;
     }
 
-    // Build / reuse bottom-level acceleration structures (only when mesh geometry changes).
+    // Build / reuse bottom-level acceleration structures.
+    // - First-time builds happen synchronously here (one-shot per BLAS).
+    // - Per-frame refits (animated/skinned meshes) are *deferred* into a pending
+    //   list and recorded onto the same immediate command buffer as the TLAS
+    //   work in RenderFrame, after the render fence has drained the previous
+    //   frame's GPU work. This eliminates the per-animated-frame
+    //   vkQueueWaitIdle that otherwise stalled the CPU on the prior frame's
+    //   ray-tracing dispatch.
+    pending_blas_refits_.clear();
     for (const auto& [mesh_key, mesh] : meshes_by_key)
     {
         BottomLevelCacheEntry& cache_entry = bottom_level_cache_[mesh_key];
-        const bool needs_rebuild =
+
+        const bool topology_changed =
             cache_entry.acceleration_structure.handle == VK_NULL_HANDLE ||
             cache_entry.vertex_device_address != mesh->vertex_device_address ||
             cache_entry.index_device_address != mesh->index_device_address ||
             cache_entry.vertex_count != mesh->vertex_count ||
             cache_entry.index_count != mesh->index_count ||
-            cache_entry.geometry_revision != mesh->geometry_revision ||
             cache_entry.opaque != IsOpaqueMesh(*mesh);
+        const bool geometry_revision_changed = cache_entry.geometry_revision != mesh->geometry_revision;
 
-        if (!needs_rebuild)
+        if (!topology_changed && !geometry_revision_changed)
         {
+            continue;
+        }
+
+        if (!topology_changed && geometry_revision_changed && cache_entry.allow_update)
+        {
+            // Defer the refit. We mark the cache entry as already up-to-date
+            // for the new revision so we do not enqueue duplicate refits next
+            // frame; the actual GPU UPDATE is recorded in RenderFrame.
+            PendingBlasRefit refit{};
+            refit.mesh_key                = mesh_key;
+            refit.vertex_device_address   = mesh->vertex_device_address;
+            refit.index_device_address    = mesh->index_device_address;
+            refit.vertex_count            = mesh->vertex_count;
+            refit.vertex_stride           = mesh->vertex_stride;
+            refit.index_count             = mesh->index_count;
+            refit.geometry_revision       = mesh->geometry_revision;
+            refit.opaque                  = IsOpaqueMesh(*mesh);
+            pending_blas_refits_.push_back(std::move(refit));
+            cache_entry.geometry_revision = mesh->geometry_revision;
             continue;
         }
 
@@ -1402,6 +1451,9 @@ void RayTracing::DestroySceneResources()
     for (auto& entry : bottom_level_cache_)
     {
         DestroyAccelerationStructure(vulkan_context_, entry.second.acceleration_structure);
+        DestroyGpuBuffer(vulkan_context_, entry.second.update_scratch_buffer);
+        entry.second.update_scratch_size = 0;
+        entry.second.allow_update = false;
     }
     bottom_level_cache_.clear();
     mesh_records_cpu_.clear();
@@ -1409,6 +1461,8 @@ void RayTracing::DestroySceneResources()
     material_records_cpu_.clear();
     texture_descriptors_cpu_.clear();
     pending_acceleration_instances_.clear();
+    pending_blas_refits_.clear();
+    pending_skinning_dispatches_.clear();
     tlas_rebuild_pending_         = false;
     tlas_refit_pending_           = false;
     tlas_capacity_                = 0;
@@ -2095,6 +2149,22 @@ void RayTracing::SetSkyboxRotation(float rotation_degrees)
     ResetAccumulationState();
 }
 
+void RayTracing::EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch)
+{
+    if (!available_ ||
+        dispatch.pipeline == VK_NULL_HANDLE ||
+        dispatch.pipeline_layout == VK_NULL_HANDLE ||
+        dispatch.descriptor_set == VK_NULL_HANDLE ||
+        dispatch.group_count_x == 0 ||
+        dispatch.vertex_count == 0 ||
+        dispatch.bone_count == 0)
+    {
+        return;
+    }
+
+    pending_skinning_dispatches_.push_back(dispatch);
+}
+
 bool RayTracing::RenderFrame(
     const ResolvedSceneLighting& lighting,
     const std::array<float, 16>& view_inverse,
@@ -2276,6 +2346,204 @@ bool RayTracing::RenderFrame(
             }
         }
     }
+
+        // --- Drain pending compute-skinning dispatches and BLAS refits ---
+        // Both passes are recorded onto a single immediate command buffer.
+        // Skinning runs first (writes the BLAS input vertex buffer); a
+        // STORAGE_WRITE -> AS_BUILD_INPUT_READ barrier follows; then the BLAS
+        // updates ingest the freshly skinned vertices. Doing both passes on
+        // one CB (after the render fence has drained the previous frame)
+        // avoids the per-frame vkQueueWaitIdle that previously stalled on the
+        // prior frame's ray-tracing dispatch — the dominant source of
+        // animated-mesh stutter.
+        if (!pending_skinning_dispatches_.empty() || !pending_blas_refits_.empty())
+        {
+            // Capture all per-refit data into stable storage so the lambda can
+            // safely reference pointers held by VkAccelerationStructureGeometryKHR.
+            const std::size_t refit_count = pending_blas_refits_.size();
+            std::vector<VkAccelerationStructureGeometryKHR> geometries(refit_count);
+            std::vector<VkAccelerationStructureBuildGeometryInfoKHR> build_infos(refit_count);
+            std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(refit_count);
+            std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> range_ptrs(refit_count);
+            std::vector<VkBufferMemoryBarrier> skinning_to_blas_barriers;
+            skinning_to_blas_barriers.reserve(pending_skinning_dispatches_.size());
+            std::size_t valid_count = 0;
+            for (std::size_t i = 0; i < refit_count; ++i)
+            {
+                const PendingBlasRefit& refit = pending_blas_refits_[i];
+                const auto cache_it = bottom_level_cache_.find(refit.mesh_key);
+                if (cache_it == bottom_level_cache_.end() ||
+                    cache_it->second.acceleration_structure.handle == VK_NULL_HANDLE ||
+                    cache_it->second.update_scratch_buffer.device_address == 0 ||
+                    !cache_it->second.allow_update)
+                {
+                    continue;
+                }
+
+                VkAccelerationStructureGeometryTrianglesDataKHR triangles = {
+                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
+                triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+                triangles.vertexData.deviceAddress = refit.vertex_device_address;
+                triangles.vertexStride = refit.vertex_stride;
+                triangles.maxVertex = refit.vertex_count > 0 ? refit.vertex_count - 1 : 0;
+                triangles.indexType = VK_INDEX_TYPE_UINT32;
+                triangles.indexData.deviceAddress = refit.index_device_address;
+
+                VkAccelerationStructureGeometryKHR& geometry = geometries[valid_count];
+                geometry = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+                geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+                geometry.flags = refit.opaque
+                    ? VK_GEOMETRY_OPAQUE_BIT_KHR
+                    : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
+                geometry.geometry.triangles = triangles;
+
+                VkAccelerationStructureBuildGeometryInfoKHR& info = build_infos[valid_count];
+                info = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+                info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                info.flags =
+                    VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
+                    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+                info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+                info.srcAccelerationStructure = cache_it->second.acceleration_structure.handle;
+                info.dstAccelerationStructure = cache_it->second.acceleration_structure.handle;
+                info.geometryCount = 1;
+                info.pGeometries = &geometry;
+                info.scratchData.deviceAddress = cache_it->second.update_scratch_buffer.device_address;
+
+                VkAccelerationStructureBuildRangeInfoKHR& range = ranges[valid_count];
+                range = {};
+                range.primitiveCount = refit.index_count / 3;
+                range_ptrs[valid_count] = &range;
+
+                ++valid_count;
+            }
+
+            // Build per-buffer barriers so the BLAS build is guaranteed to see
+            // the compute-skinning writes (per-buffer scope is more precise than
+            // a global memory barrier and is preferred by drivers).
+            for (const PendingSkinningDispatch& dispatch : pending_skinning_dispatches_)
+            {
+                if (dispatch.output_vertex_buffer == VK_NULL_HANDLE)
+                {
+                    continue;
+                }
+                VkBufferMemoryBarrier b = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                b.dstAccessMask =
+                    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                    VK_ACCESS_SHADER_READ_BIT;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.buffer = dispatch.output_vertex_buffer;
+                b.offset = 0;
+                b.size = VK_WHOLE_SIZE;
+                skinning_to_blas_barriers.push_back(b);
+            }
+
+            const bool has_skinning = !pending_skinning_dispatches_.empty();
+            const bool has_refits   = valid_count > 0;
+            if (has_skinning || has_refits)
+            {
+                const bool combined_succeeded = ExecuteImmediateCommands(*vulkan_context_, command_pool_, [&](VkCommandBuffer command_buffer)
+                {
+                    if (has_skinning)
+                    {
+                        VkPipeline last_pipeline = VK_NULL_HANDLE;
+                        VkPipelineLayout last_layout = VK_NULL_HANDLE;
+                        for (const PendingSkinningDispatch& dispatch : pending_skinning_dispatches_)
+                        {
+                            if (dispatch.pipeline != last_pipeline)
+                            {
+                                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, dispatch.pipeline);
+                                last_pipeline = dispatch.pipeline;
+                                last_layout = VK_NULL_HANDLE; // force re-bind below if needed
+                            }
+                            if (dispatch.pipeline_layout != last_layout)
+                            {
+                                last_layout = dispatch.pipeline_layout;
+                            }
+                            vkCmdBindDescriptorSets(
+                                command_buffer,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
+                                dispatch.pipeline_layout,
+                                0,
+                                1,
+                                &dispatch.descriptor_set,
+                                0,
+                                nullptr);
+
+                            const std::uint32_t push[2] = {dispatch.vertex_count, dispatch.bone_count};
+                            vkCmdPushConstants(
+                                command_buffer,
+                                dispatch.pipeline_layout,
+                                VK_SHADER_STAGE_COMPUTE_BIT,
+                                0,
+                                sizeof(push),
+                                push);
+
+                            vkCmdDispatch(command_buffer, dispatch.group_count_x, 1, 1);
+                        }
+
+                        // Compute writes -> BLAS reads (and any other shader reads).
+                        if (!skinning_to_blas_barriers.empty())
+                        {
+                            vkCmdPipelineBarrier(
+                                command_buffer,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                                0,
+                                0,
+                                nullptr,
+                                static_cast<std::uint32_t>(skinning_to_blas_barriers.size()),
+                                skinning_to_blas_barriers.data(),
+                                0,
+                                nullptr);
+                        }
+                    }
+
+                    if (has_refits)
+                    {
+                        vulkan_context_->GetRayTracingDispatch().cmd_build_acceleration_structures(
+                            command_buffer,
+                            static_cast<std::uint32_t>(valid_count),
+                            build_infos.data(),
+                            range_ptrs.data());
+
+                        // Make BLAS writes visible to the upcoming TLAS build.
+                        VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                        barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+                        barrier.dstAccessMask =
+                            VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                            VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+                        vkCmdPipelineBarrier(
+                            command_buffer,
+                            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                            0,
+                            1,
+                            &barrier,
+                            0,
+                            nullptr,
+                            0,
+                            nullptr);
+                    }
+                });
+
+                if (!combined_succeeded)
+                {
+                    status_message_ = "Failed to record viewport RT skinning / BLAS update";
+                    pending_blas_refits_.clear();
+                    pending_skinning_dispatches_.clear();
+                    tlas_rebuild_pending_ = false;
+                    tlas_refit_pending_   = false;
+                    return false;
+                }
+            }
+            pending_blas_refits_.clear();
+            pending_skinning_dispatches_.clear();
+        }
+
         if ((tlas_rebuild_pending_ || tlas_refit_pending_) &&
             top_level_as_.handle != VK_NULL_HANDLE &&
             instance_buffer_.device_address != 0 &&

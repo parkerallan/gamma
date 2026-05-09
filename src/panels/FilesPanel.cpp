@@ -110,7 +110,11 @@ void FilesPanel::Render(EngineState& state)
 {
     refresh_requested_ = false;
     const double now = ImGui::GetTime();
-    const bool auto_refresh_due = (now - last_auto_refresh_time_) >= 0.5;
+    // Suspend auto-refresh while playing: a recursive walk of the entire
+    // project tree (with last_write_time + file_size on every file) is the
+    // dominant editor-only periodic hitch in play mode, since each call is
+    // intercepted by AV. Explicit refresh requests still go through.
+    const bool auto_refresh_due = !state.is_playing && (now - last_auto_refresh_time_) >= 0.5;
 
     if (current_root_ != state.project_root)
     {

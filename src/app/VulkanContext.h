@@ -47,7 +47,14 @@ public:
     void Shutdown();
     void WaitIdle();
     void RenderFrame(SDL_Window* window, ImDrawData* draw_data, const ImVec4& clear_color);
-    bool CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context);
+    // When prefer_low_latency is true, requests MAILBOX (or IMMEDIATE) before
+    // falling back to FIFO. Use this for the runtime/game window when the
+    // editor is also presenting the main window on the same queue: two FIFO
+    // swapchains on one queue serialize on vsync and produce visible frame-
+    // pacing stutter (the standalone game has only one swapchain and is
+    // smooth). MAILBOX on the runtime window keeps the queue from blocking
+    // on the runtime's own vblank while the editor's main present is queued.
+    bool CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context, bool prefer_low_latency = false);
     void DestroyWindowContext(VulkanWindowContext& window_context);
     bool PresentImageToWindow(
         SDL_Window* window,
@@ -90,7 +97,7 @@ private:
     bool CreateSurface(SDL_Window* window);
     bool CreateSurface(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data);
     void SetupWindowData(SDL_Window* window);
-    void SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data);
+    void SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data, bool prefer_low_latency = false);
     void EnsureSwapchain(SDL_Window* window);
     void EnsureSwapchain(SDL_Window* window, VulkanWindowContext& window_context);
     void CleanupWindowData();

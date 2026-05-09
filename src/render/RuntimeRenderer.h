@@ -113,6 +113,22 @@ public:
         std::vector<GpuMaterialTextures> material_textures;
     };
 
+    // GPU compute-skinning resources for a single animated mesh.
+    // Owned per model_path; rebuilt when the source clip-model or vertex layout
+    // changes. Output is the mesh's existing vertex_buffer (also the BLAS input).
+    struct GpuSkinningResources
+    {
+        std::filesystem::path source_clip_model_path; // anim cache entry source
+        std::filesystem::file_time_type source_clip_write_time{};
+        std::uint32_t vertex_count = 0;
+        std::uint32_t bone_count = 0;
+        GpuBuffer bind_pose_buffer{};   // SceneGpuVertex layout, uploaded once
+        GpuBuffer influence_buffer{};   // (uvec4 + vec4) per vertex, uploaded once
+        GpuBuffer palette_buffer{};     // mat4 * bone_count, host-coherent, written every frame
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        bool ready = false;
+    };
+
     struct QueuedSceneObject
     {
         std::filesystem::path model_path;
@@ -169,6 +185,10 @@ public:
         std::filesystem::file_time_type write_time{};
         AnimatorControllerAsset asset{};
         bool loaded = false;
+        // Perf-counter ticks at which the next on-disk timestamp check is allowed.
+        // Throttles std::filesystem::last_write_time to avoid per-frame syscalls
+        // (Windows AV / file indexer can stall these, producing visible stutter).
+        std::uint64_t next_disk_check_perf_ticks = 0;
     };
 
     struct RuntimeAnimatorState
@@ -201,6 +221,10 @@ private:
     void ReleaseTexture(GpuTexture& texture);
     void ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry);
     bool EnsureMeshCacheEntry(const std::filesystem::path& model_path, const CachedModelAssetEntry& model_asset_entry);
+    // GPU compute-skinning pipeline lifecycle.
+    bool EnsureSkinningPipeline();
+    void DestroySkinningPipeline();
+    void ReleaseSkinningResources(GpuSkinningResources& resources);
     bool EnsureScriptCacheEntry(const std::filesystem::path& script_path, std::string* error_message);
     bool InitializeScriptRuntime(std::string* error_message);
     void ShutdownScriptRuntime();
@@ -362,6 +386,14 @@ private:
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
     std::unordered_map<std::filesystem::path, std::uint64_t> animated_mesh_revisions_;
     std::unordered_map<std::filesystem::path, CachedAnimatorControllerEntry> animator_controller_cache_;
+    // Phase C — GPU compute skinning.
+    // One pipeline + descriptor-set layout for all animated meshes; per-object
+    // resources (bind-pose VB, influence SSBO, palette SSBO, descriptor set)
+    // live on `gpu_skinning_resources_` keyed by model path.
+    VkDescriptorSetLayout skinning_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout skinning_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline skinning_pipeline_ = VK_NULL_HANDLE;
+    std::unordered_map<std::filesystem::path, GpuSkinningResources> gpu_skinning_resources_;
     std::unordered_map<std::string, RuntimeAnimatorState> runtime_animator_states_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
     std::unordered_map<std::filesystem::path, CachedScriptSourceEntry> script_cache_;
@@ -385,6 +417,7 @@ private:
     std::vector<bool> script_prev_keys_down_;
     std::vector<PhysicsCollisionEvent> script_frame_collision_events_;
     std::uint64_t animation_last_tick_ms_ = 0;
+    std::uint64_t animation_last_perf_ticks_ = 0;
     std::uint64_t script_last_tick_ms_ = 0;
     std::uint64_t script_session_start_ms_ = 0;
     std::vector<QueuedSceneObject> queued_objects_;

@@ -394,7 +394,7 @@ void VulkanContext::SetupWindowData(SDL_Window* window)
     SetupWindowData(window, main_window_data_);
 }
 
-void VulkanContext::SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data)
+void VulkanContext::SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data, bool prefer_low_latency)
 {
     VkBool32 present_supported = VK_FALSE;
     VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(physical_device_, queue_family_, window_data.Surface, &present_supported);
@@ -418,12 +418,24 @@ void VulkanContext::SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window
         request_formats.data(),
         static_cast<int>(request_formats.size()),
         VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
-    constexpr VkPresentModeKHR request_modes[] = {VK_PRESENT_MODE_FIFO_KHR};
+    // Default: FIFO (vsync, low CPU). For the runtime window in the editor,
+    // prefer MAILBOX (or IMMEDIATE) to avoid double-vsync stutter when two
+    // swapchains share one queue.
+    constexpr VkPresentModeKHR fifo_modes[] = {VK_PRESENT_MODE_FIFO_KHR};
+    constexpr VkPresentModeKHR low_latency_modes[] = {
+        VK_PRESENT_MODE_MAILBOX_KHR,
+        VK_PRESENT_MODE_IMMEDIATE_KHR,
+        VK_PRESENT_MODE_FIFO_KHR,
+    };
+    const VkPresentModeKHR* request_modes = prefer_low_latency ? low_latency_modes : fifo_modes;
+    const int request_modes_count = prefer_low_latency
+        ? static_cast<int>(std::size(low_latency_modes))
+        : static_cast<int>(std::size(fifo_modes));
     window_data.PresentMode = ImGui_ImplVulkanH_SelectPresentMode(
         physical_device_,
         window_data.Surface,
         request_modes,
-        static_cast<int>(std::size(request_modes)));
+        request_modes_count);
     window_data.ClearValue.color.float32[0] = 0.08f;
     window_data.ClearValue.color.float32[1] = 0.09f;
     window_data.ClearValue.color.float32[2] = 0.11f;
@@ -524,7 +536,7 @@ bool VulkanContext::PresentImageToMainWindow(
     return result;
 }
 
-bool VulkanContext::CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context)
+bool VulkanContext::CreateWindowContext(SDL_Window* window, VulkanWindowContext& window_context, bool prefer_low_latency)
 {
     window_context = {};
     if (window == nullptr || instance_ == VK_NULL_HANDLE || device_ == VK_NULL_HANDLE)
@@ -537,7 +549,7 @@ bool VulkanContext::CreateWindowContext(SDL_Window* window, VulkanWindowContext&
         return false;
     }
 
-    SetupWindowData(window, window_context.window_data);
+    SetupWindowData(window, window_context.window_data, prefer_low_latency);
     if (window_context.window_data.Surface == VK_NULL_HANDLE || window_context.window_data.RenderPass == VK_NULL_HANDLE)
     {
         DestroyWindowContext(window_context);

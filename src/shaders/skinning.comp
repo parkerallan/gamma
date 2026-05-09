@@ -1,0 +1,139 @@
+#version 460
+//
+// GPU vertex skinning compute pass for animated meshes.
+//
+// Reads a per-vertex bind-pose buffer (laid out exactly like the host-side
+// SceneGpuVertex), per-vertex bone influences (4 bone indices + 4 weights),
+// and a per-frame bone matrix palette. Writes the skinned vertices into the
+// mesh's vertex buffer (the same buffer the BLAS reads from).
+//
+// All buffers are declared as raw `uint[]` to avoid std140/std430 layout
+// surprises; we recreate the C++ memory layout byte-for-byte. The host-side
+// SceneGpuVertex is exactly 16 floats / 64 bytes:
+//
+//   offset  0..11  : float position[3]
+//   offset 12..23  : float normal[3]
+//   offset 24..31  : float uv[2]
+//   offset 32..47  : float color[4]
+//   offset 48..63  : float tangent[4]
+//
+// The bind-pose buffer matches that layout. The output buffer is the same
+// layout (the BLAS ingests it via VK_FORMAT_R32G32B32_SFLOAT at offset 0).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BindPoseBuffer  { uint  data[]; } bind_pose;
+layout(set = 0, binding = 1, std430) writeonly buffer OutputBuffer    { uint  data[]; } output_vertices;
+
+// 4 bone indices (uvec4) + 4 weights (vec4) per vertex = 8 uints.
+struct VertexInfluence
+{
+    uvec4 bone_indices;
+    vec4  bone_weights;
+};
+layout(set = 0, binding = 2, std430) readonly buffer InfluenceBuffer { VertexInfluence data[]; } influences;
+layout(set = 0, binding = 3, std430) readonly buffer PaletteBuffer   { mat4 bones[]; }            palette;
+
+layout(push_constant) uniform PushConstants
+{
+    uint vertex_count;
+    uint bone_count;
+} pc;
+
+const uint kVertexUintCount = 16u; // 64 bytes / sizeof(uint)
+
+vec3 read_vec3(uint base_index)
+{
+    return vec3(
+        uintBitsToFloat(bind_pose.data[base_index + 0u]),
+        uintBitsToFloat(bind_pose.data[base_index + 1u]),
+        uintBitsToFloat(bind_pose.data[base_index + 2u]));
+}
+
+void write_uint(uint base_index, uint slot, uint value)
+{
+    output_vertices.data[base_index + slot] = value;
+}
+
+void write_vec3(uint base_index, uint slot, vec3 value)
+{
+    write_uint(base_index, slot + 0u, floatBitsToUint(value.x));
+    write_uint(base_index, slot + 1u, floatBitsToUint(value.y));
+    write_uint(base_index, slot + 2u, floatBitsToUint(value.z));
+}
+
+void main()
+{
+    const uint vertex_index = gl_GlobalInvocationID.x;
+    if (vertex_index >= pc.vertex_count)
+    {
+        return;
+    }
+
+    const uint base = vertex_index * kVertexUintCount;
+
+    // --- Read bind-pose vertex ---
+    const vec3 bind_position = read_vec3(base + 0u);
+    const vec3 bind_normal   = read_vec3(base + 3u);
+    // uv (2 floats) + color (4 floats) + tangent (4 floats) are passed through
+    // unchanged. We copy them as raw uints to preserve exact bit patterns.
+    const vec3 bind_tangent_xyz = read_vec3(base + 12u);
+    const uint passthrough_uv0     = bind_pose.data[base + 6u];
+    const uint passthrough_uv1     = bind_pose.data[base + 7u];
+    const uint passthrough_color0  = bind_pose.data[base + 8u];
+    const uint passthrough_color1  = bind_pose.data[base + 9u];
+    const uint passthrough_color2  = bind_pose.data[base + 10u];
+    const uint passthrough_color3  = bind_pose.data[base + 11u];
+    const uint passthrough_tan_w   = bind_pose.data[base + 15u];
+
+    // --- Skin via 4-bone linear blend ---
+    const VertexInfluence influence = influences.data[vertex_index];
+    vec3 skinned_position = vec3(0.0);
+    vec3 skinned_normal   = vec3(0.0);
+    vec3 skinned_tangent  = vec3(0.0);
+    float weight_sum = 0.0;
+
+    for (uint slot = 0u; slot < 4u; ++slot)
+    {
+        const float weight = influence.bone_weights[slot];
+        const uint  bone   = influence.bone_indices[slot];
+        if (weight <= 0.0 || bone >= pc.bone_count)
+        {
+            continue;
+        }
+
+        const mat4 bone_matrix = palette.bones[bone];
+        // mat3 cast of mat4 takes the upper-left 3x3 (rotation/scale only),
+        // appropriate for normals and tangents.
+        const mat3 bone_rot_scale = mat3(bone_matrix);
+
+        skinned_position += weight * (bone_matrix * vec4(bind_position, 1.0)).xyz;
+        skinned_normal   += weight * (bone_rot_scale * bind_normal);
+        skinned_tangent  += weight * (bone_rot_scale * bind_tangent_xyz);
+        weight_sum       += weight;
+    }
+
+    if (weight_sum <= 0.0001)
+    {
+        // Unweighted vertex – pass bind pose through unchanged so the mesh
+        // stays welded to its rigged neighbours.
+        skinned_position = bind_position;
+        skinned_normal   = bind_normal;
+        skinned_tangent  = bind_tangent_xyz;
+    }
+
+    skinned_normal  = normalize(skinned_normal);
+    skinned_tangent = normalize(skinned_tangent);
+
+    // --- Write skinned vertex back in SceneGpuVertex layout ---
+    write_vec3(base, 0u, skinned_position);
+    write_vec3(base, 3u, skinned_normal);
+    write_uint(base, 6u, passthrough_uv0);
+    write_uint(base, 7u, passthrough_uv1);
+    write_uint(base, 8u,  passthrough_color0);
+    write_uint(base, 9u,  passthrough_color1);
+    write_uint(base, 10u, passthrough_color2);
+    write_uint(base, 11u, passthrough_color3);
+    write_vec3(base, 12u, skinned_tangent);
+    write_uint(base, 15u, passthrough_tan_w);
+}

@@ -109,6 +109,13 @@ public:
         std::uint32_t index_count = 0;
         std::uint64_t geometry_revision = 0;
         bool opaque = true;
+        // Persistent device-local scratch reused across BLAS refits (MODE_UPDATE).
+        // Allocated once (sized to max(buildScratchSize, updateScratchSize)) and
+        // kept alive for the lifetime of the BLAS to avoid per-frame
+        // vkAllocateMemory / vkFreeMemory churn.
+        GpuBuffer update_scratch_buffer{};
+        VkDeviceSize update_scratch_size = 0;
+        bool allow_update = false;
     };
 
     struct ShaderBindingTable
@@ -135,6 +142,25 @@ public:
 
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
+
+    // External (Phase C) compute-skinning dispatches recorded as part of the
+    // RT immediate command buffer just before the BLAS refits. Submitting the
+    // skin compute on the same CB as the BLAS update removes the extra
+    // queue-wait roundtrip and lets us insert the storage-write -> AS-build
+    // barrier directly. EnqueueSkinningDispatch is called by RuntimeRenderer
+    // during scene preparation; the dispatches are drained inside RenderFrame.
+    struct PendingSkinningDispatch
+    {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        VkBuffer output_vertex_buffer = VK_NULL_HANDLE;
+        std::uint32_t group_count_x = 0;
+        std::uint32_t vertex_count = 0;
+        std::uint32_t bone_count = 0;
+    };
+    void EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch);
+
     VkDescriptorSet GetOutputDescriptorSet() const { return output_descriptor_set_; }
     VkCommandPool GetCommandPool() const { return command_pool_; }
     VkCommandBuffer GetCommandBuffer() const { return command_buffer_; }
@@ -310,6 +336,29 @@ private:
     std::vector<VkAccelerationStructureInstanceKHR> pending_acceleration_instances_;
     bool tlas_rebuild_pending_ = false;  // full rebuild required (topology or capacity changed)
     bool tlas_refit_pending_   = false;  // transform-only update via VK UPDATE mode
+
+    // Pending BLAS refit requests collected by UpdateScene and submitted from
+    // RenderFrame. Recording the BLAS UPDATE on the same immediate command
+    // buffer as the TLAS work avoids a per-animated-frame extra
+    // vkQueueWaitIdle (which previously stalled the CPU on the prior frame's
+    // ray-tracing dispatch — the dominant source of animated-mesh stutter).
+    struct PendingBlasRefit
+    {
+        std::string mesh_key;
+        VkDeviceAddress vertex_device_address = 0;
+        VkDeviceAddress index_device_address = 0;
+        std::uint32_t vertex_count = 0;
+        std::uint32_t vertex_stride = 0;
+        std::uint32_t index_count = 0;
+        std::uint64_t geometry_revision = 0;
+        bool opaque = true;
+    };
+    std::vector<PendingBlasRefit> pending_blas_refits_;
+
+    // Phase C — pending compute-skinning dispatches recorded on the same
+    // immediate CB as BLAS refits, with a STORAGE_WRITE -> AS_BUILD_INPUT_READ
+    // memory barrier separating the two passes.
+    std::vector<PendingSkinningDispatch> pending_skinning_dispatches_;
 
     // Persistent device-local scratch buffer for TLAS build / refit.
     // Sized to max(buildScratchSize, updateScratchSize) at last full build.

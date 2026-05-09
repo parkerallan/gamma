@@ -1040,10 +1040,19 @@ struct RuntimeAnimationModelCacheEntry
     std::unordered_map<std::string, std::size_t> bone_index_by_name;
     std::vector<aiMatrix4x4> bone_offsets;
     std::vector<RuntimeSkinnedMeshData> skinned_meshes;
+    // Perf-counter ticks at which the next on-disk timestamp check is allowed.
+    // Throttles std::filesystem::last_write_time so it does not stutter the frame.
+    std::uint64_t next_disk_check_perf_ticks = 0;
+    // Cache of node-name -> aiNodeAnim* per animation, built lazily on first sample.
+    // Avoids rebuilding the unordered_map every frame inside SampleClipBoneMatrices.
+    std::unordered_map<const aiAnimation*, std::unordered_map<std::string, const aiNodeAnim*>> channels_by_animation;
 };
 
 std::unordered_map<std::string, RuntimeAnimationModelCacheEntry> g_runtime_animation_model_cache;
 std::unordered_map<std::string, std::vector<aiMatrix4x4>> g_runtime_animator_blend_snapshots;
+// Scratch buffers reused across frames during CPU vertex skinning.
+// Keyed by model path; cleared only when the runtime tears down.
+std::unordered_map<std::string, std::vector<SceneGpuVertex>> g_runtime_skinned_vertex_scratch;
 
 aiMatrix4x4 LerpMatrix(const aiMatrix4x4& from, const aiMatrix4x4& to, float alpha)
 {
@@ -1522,12 +1531,20 @@ void EvaluateAnimationHierarchy(
 
 RuntimeAnimationModelCacheEntry* GetRuntimeAnimationModelCacheEntry(const std::filesystem::path& model_path)
 {
-    std::error_code error;
-    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(model_path, error);
-    const bool has_filesystem_time = !error;
-
     RuntimeAnimationModelCacheEntry& cache_entry = g_runtime_animation_model_cache[model_path.generic_string()];
-    const bool should_reload = !cache_entry.loaded || (has_filesystem_time && cache_entry.write_time != write_time);
+
+    // Disk-timestamp checks are intentionally NOT performed during play mode.
+    // On Windows, std::filesystem::last_write_time() on a multi-MB asset can
+    // trigger Defender real-time scanning (tens of ms hitch). Doing it every
+    // 500ms produced a regular periodic stutter visible only in the editor's
+    // play-mode (the standalone game serves the asset from the pak archive
+    // and never hits the filesystem here, which is why the game build is
+    // smooth). Hot-reload-during-play is not a supported feature; assets are
+    // loaded once and reused for the duration of the play session.
+    bool should_reload = !cache_entry.loaded;
+    std::filesystem::file_time_type write_time{};
+    bool has_filesystem_time = false;
+
     if (should_reload)
     {
         cache_entry = {};
@@ -1594,7 +1611,7 @@ const aiAnimation* FindAnimationByName(const aiScene* scene, const std::string& 
 }
 
 bool SampleClipBoneMatrices(
-    const RuntimeAnimationModelCacheEntry& anim_cache_entry,
+    RuntimeAnimationModelCacheEntry& anim_cache_entry,
     const std::string& clip_name,
     float state_time_seconds,
     std::vector<aiMatrix4x4>& out_bone_matrices)
@@ -1615,15 +1632,22 @@ bool SampleClipBoneMatrices(
     const double raw_time_ticks = static_cast<double>(state_time_seconds) * ticks_per_second;
     const double animation_time = std::fmod(raw_time_ticks, duration);
 
-    std::unordered_map<std::string, const aiNodeAnim*> channels_by_name;
-    channels_by_name.reserve(animation->mNumChannels);
-    for (unsigned int channel_index = 0; channel_index < animation->mNumChannels; ++channel_index)
+    // Lazily build (and cache) the channel-by-node-name lookup for this animation.
+    // Previously this map was rebuilt every frame.
+    auto channels_it = anim_cache_entry.channels_by_animation.find(animation);
+    if (channels_it == anim_cache_entry.channels_by_animation.end())
     {
-        const aiNodeAnim* channel = animation->mChannels[channel_index];
-        if (channel != nullptr)
+        std::unordered_map<std::string, const aiNodeAnim*> channels_by_name;
+        channels_by_name.reserve(animation->mNumChannels);
+        for (unsigned int channel_index = 0; channel_index < animation->mNumChannels; ++channel_index)
         {
-            channels_by_name.emplace(ToDisplayString(channel->mNodeName), channel);
+            const aiNodeAnim* channel = animation->mChannels[channel_index];
+            if (channel != nullptr)
+            {
+                channels_by_name.emplace(ToDisplayString(channel->mNodeName), channel);
+            }
         }
+        channels_it = anim_cache_entry.channels_by_animation.emplace(animation, std::move(channels_by_name)).first;
     }
 
     out_bone_matrices.assign(anim_cache_entry.bone_offsets.size(), aiMatrix4x4());
@@ -1633,7 +1657,7 @@ bool SampleClipBoneMatrices(
         anim_cache_entry.scene->mRootNode,
         aiMatrix4x4(),
         anim_cache_entry,
-        channels_by_name,
+        channels_it->second,
         out_bone_matrices);
     return true;
 }
@@ -1740,6 +1764,166 @@ void RuntimeRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
     entry = {};
 }
 
+namespace
+{
+
+std::filesystem::path ResolveSkinningShaderPath(const char* file_name)
+{
+    const char* base_path_raw = SDL_GetBasePath();
+    const std::filesystem::path base_path =
+        base_path_raw != nullptr ? std::filesystem::path(base_path_raw) : std::filesystem::current_path();
+    return base_path / "shaders" / file_name;
+}
+
+VkShaderModule LoadSkinningShaderModule(VkDevice device, const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+    {
+        SDL_Log("Failed to read GPU skinning shader file: %s", path.string().c_str());
+        return VK_NULL_HANDLE;
+    }
+    const std::vector<std::uint8_t> bytes{
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    if (bytes.empty())
+    {
+        SDL_Log("GPU skinning shader file is empty: %s", path.string().c_str());
+        return VK_NULL_HANDLE;
+    }
+
+    VkShaderModuleCreateInfo create_info = {};
+    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = bytes.size();
+    create_info.pCode = reinterpret_cast<const std::uint32_t*>(bytes.data());
+
+    VkShaderModule shader = VK_NULL_HANDLE;
+    const VkResult result = vkCreateShaderModule(device, &create_info, nullptr, &shader);
+    VulkanContext::CheckVkResult(result);
+    return result == VK_SUCCESS ? shader : VK_NULL_HANDLE;
+}
+
+} // namespace
+
+bool RuntimeRenderer::EnsureSkinningPipeline()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (skinning_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        std::array<VkDescriptorSetLayoutBinding, 4> bindings = {};
+        for (std::uint32_t i = 0; i < bindings.size(); ++i)
+        {
+            bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        }
+        VkDescriptorSetLayoutCreateInfo layout_info = {};
+        layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        layout_info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &layout_info, allocator, &skinning_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
+
+    if (skinning_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange push = {};
+        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push.offset = 0;
+        push.size = 2 * sizeof(std::uint32_t);
+
+        VkPipelineLayoutCreateInfo layout_info = {};
+        layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layout_info.setLayoutCount = 1;
+        layout_info.pSetLayouts = &skinning_descriptor_set_layout_;
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges = &push;
+        VkResult result = vkCreatePipelineLayout(device, &layout_info, allocator, &skinning_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            return false;
+        }
+    }
+
+    if (skinning_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule shader = LoadSkinningShaderModule(device, ResolveSkinningShaderPath("skinning.comp.spv"));
+        if (shader == VK_NULL_HANDLE)
+        {
+            return false;
+        }
+
+        VkComputePipelineCreateInfo compute_info = {};
+        compute_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        compute_info.layout = skinning_pipeline_layout_;
+        compute_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        compute_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        compute_info.stage.module = shader;
+        compute_info.stage.pName = "main";
+
+        VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compute_info, allocator, &skinning_pipeline_);
+        VulkanContext::CheckVkResult(result);
+        vkDestroyShaderModule(device, shader, allocator);
+        if (result != VK_SUCCESS)
+        {
+            skinning_pipeline_ = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void RuntimeRenderer::DestroySkinningPipeline()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        skinning_pipeline_ = VK_NULL_HANDLE;
+        skinning_pipeline_layout_ = VK_NULL_HANDLE;
+        skinning_descriptor_set_layout_ = VK_NULL_HANDLE;
+        return;
+    }
+    VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (skinning_pipeline_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, skinning_pipeline_, allocator);
+        skinning_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (skinning_pipeline_layout_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipelineLayout(device, skinning_pipeline_layout_, allocator);
+        skinning_pipeline_layout_ = VK_NULL_HANDLE;
+    }
+    if (skinning_descriptor_set_layout_ != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, skinning_descriptor_set_layout_, allocator);
+        skinning_descriptor_set_layout_ = VK_NULL_HANDLE;
+    }
+}
+
+void RuntimeRenderer::ReleaseSkinningResources(GpuSkinningResources& resources)
+{
+    ReleaseBuffer(resources.bind_pose_buffer);
+    ReleaseBuffer(resources.influence_buffer);
+    ReleaseBuffer(resources.palette_buffer);
+    // Descriptor sets are freed implicitly when the pool is reset/destroyed.
+    resources.descriptor_set = VK_NULL_HANDLE;
+    resources.ready = false;
+    resources.vertex_count = 0;
+    resources.bone_count = 0;
+}
+
 void RuntimeRenderer::Shutdown()
 {
     skybox_renderer_.Shutdown();
@@ -1751,6 +1935,13 @@ void RuntimeRenderer::Shutdown()
     {
         ReleaseMeshCacheEntry(entry);
     }
+
+    for (auto& [path, resources] : gpu_skinning_resources_)
+    {
+        ReleaseSkinningResources(resources);
+    }
+    gpu_skinning_resources_.clear();
+    DestroySkinningPipeline();
 
     mesh_cache_.clear();
     script_cache_.clear();
@@ -1833,6 +2024,7 @@ bool RuntimeRenderer::StartSession(
     script_timer_pending_clear_.clear();
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
     animation_last_tick_ms_ = now_ms;
+    animation_last_perf_ticks_ = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     script_last_tick_ms_ = now_ms;
     script_session_start_ms_ = now_ms;
     runtime_animator_states_.clear();
@@ -1846,11 +2038,21 @@ bool RuntimeRenderer::StartSession(
 
 void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata)
 {
-    const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
-    const float delta_time = (animation_last_tick_ms_ != 0 && now_ms >= animation_last_tick_ms_)
-        ? static_cast<float>(now_ms - animation_last_tick_ms_) / 1000.0f
-        : 0.0f;
-    animation_last_tick_ms_ = now_ms;
+    // Use the high-resolution monotonic counter for animation delta time.
+    // SDL_GetTicks() has ~1ms quantization which produced visible jitter in the
+    // animated state-machine timing.
+    const std::uint64_t now_perf_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+    const std::uint64_t perf_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+    float delta_time = 0.0f;
+    if (animation_last_perf_ticks_ != 0 && now_perf_ticks > animation_last_perf_ticks_ && perf_freq > 0)
+    {
+        delta_time = static_cast<float>(
+            static_cast<double>(now_perf_ticks - animation_last_perf_ticks_) /
+            static_cast<double>(perf_freq));
+    }
+    animation_last_perf_ticks_ = now_perf_ticks;
+    // Keep the millisecond clock in sync for any other consumers.
+    animation_last_tick_ms_ = static_cast<std::uint64_t>(SDL_GetTicks());
 
     auto load_controller = [&](const std::filesystem::path& controller_path) -> const AnimatorControllerAsset*
     {
@@ -1859,17 +2061,17 @@ void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& sce
             return nullptr;
         }
 
-        std::error_code error;
-        const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(controller_path, error);
-        const bool has_filesystem_time = !error;
-
+        // No periodic disk-timestamp checks during play. See the matching
+        // comment in GetRuntimeAnimationModelCacheEntry — Defender scanning of
+        // the .anim file every 500 ms produces a periodic editor-only stutter.
         CachedAnimatorControllerEntry& cache_entry = animator_controller_cache_[controller_path];
-        const bool should_reload =
-            !cache_entry.loaded ||
-            (has_filesystem_time && cache_entry.write_time != write_time);
 
+        bool should_reload = !cache_entry.loaded;
         if (should_reload)
         {
+            std::error_code error;
+            const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(controller_path, error);
+            const bool has_filesystem_time = !error;
             std::string load_error;
             AnimatorControllerAsset asset;
             cache_entry.loaded = LoadAnimatorControllerAsset(controller_path, asset, load_error);
@@ -2121,16 +2323,17 @@ void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& sce
             RuntimeAnimatorState& runtime_state = runtime_animator_states_[runtime_key];
             runtime_state.runtime_key = runtime_key;
             const bool controller_changed = runtime_state.controller_path != attribute.animator.controller_path;
-            
-            // Check if the controller file has been modified on disk
-            std::error_code error;
-            const std::filesystem::file_time_type current_write_time = std::filesystem::last_write_time(controller_path, error);
-            const bool controller_reloaded = !error && runtime_state.controller_write_time != current_write_time;
-            
+
+            // Hot-reload of the controller's .anim file during play is not a
+            // supported feature — and `last_write_time` per-animator-per-frame
+            // is a measurable Defender-driven stutter source on Windows. Only
+            // react to a logical scene-side change of controller_path.
+            const bool controller_reloaded = false;
+
             if (controller_changed || controller_reloaded)
             {
                 runtime_state.controller_path = attribute.animator.controller_path;
-                runtime_state.controller_write_time = !error ? current_write_time : std::filesystem::file_time_type::min();
+                runtime_state.controller_write_time = std::filesystem::file_time_type::min();
                 runtime_state.active_state.clear();
                 runtime_state.active_clip_name.clear();
                 runtime_state.active_clip_source_model_path.clear();
@@ -2303,23 +2506,20 @@ void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& sce
 
 const RuntimeRenderer::CachedModelAssetEntry& RuntimeRenderer::GetModelAssetEntry(const std::filesystem::path& path)
 {
-    std::error_code error;
-    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
     CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
 
-    const bool has_filesystem_time = !error;
-    const bool exists_in_vfs = g_asset_reader && g_asset_reader->FileExists(path.generic_string());
-    const bool should_reload =
-        !cache_entry.asset.loaded ||
-        (has_filesystem_time && cache_entry.write_time != write_time) ||
-        (!has_filesystem_time && !exists_in_vfs);
-
-    if (should_reload)
+    // Cached for the lifetime of the play session — no per-frame re-stat,
+    // which is the dominant editor-only stutter source for the fox model.
+    if (cache_entry.asset.loaded)
     {
-        cache_entry.write_time = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
-        cache_entry.asset = LoadModelAsset(path);
+        return cache_entry;
     }
 
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
+    const bool has_filesystem_time = !error;
+    cache_entry.write_time = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
+    cache_entry.asset = LoadModelAsset(path);
     return cache_entry;
 }
 
@@ -2331,30 +2531,30 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
         return empty_metadata;
     }
 
+    // The scene file is loaded once per play session. Re-stat'ing it every
+    // frame triggers Defender scans on Windows and produces a periodic
+    // play-mode hitch that is not present in the standalone game build (the
+    // game serves the scene from the pak archive).
+    if (has_cached_scene_metadata_ && cached_scene_path_ == scene_path_)
+    {
+        return cached_scene_metadata_;
+    }
+
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(scene_path_, error);
 
     const bool has_filesystem_time = !error;
-    const bool exists_in_vfs = g_asset_reader && g_asset_reader->FileExists(scene_path_.generic_string());
-    const bool cache_valid =
-        has_cached_scene_metadata_ &&
-        cached_scene_path_ == scene_path_ &&
-        ((has_filesystem_time && cached_scene_write_time_ == write_time) || (!has_filesystem_time && exists_in_vfs));
+    const bool scene_changed = has_cached_scene_metadata_ && cached_scene_path_ == scene_path_;
+    const SceneMetadata previous_scene_metadata = cached_scene_metadata_;
+    cached_scene_path_ = scene_path_;
+    cached_scene_write_time_ = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
+    cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
+    has_cached_scene_metadata_ = true;
 
-    if (!cache_valid)
+    if (scene_changed && SceneChangeRequiresPhysicsReset(previous_scene_metadata, cached_scene_metadata_))
     {
-        const bool scene_changed = has_cached_scene_metadata_ && cached_scene_path_ == scene_path_;
-        const SceneMetadata previous_scene_metadata = cached_scene_metadata_;
-        cached_scene_path_ = scene_path_;
-        cached_scene_write_time_ = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
-        cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
-        has_cached_scene_metadata_ = true;
-
-        if (scene_changed && SceneChangeRequiresPhysicsReset(previous_scene_metadata, cached_scene_metadata_))
-        {
-            physics_world_built_ = false;
-            physics_object_transforms_.clear();
-        }
+        physics_world_built_ = false;
+        physics_object_transforms_.clear();
     }
 
     return cached_scene_metadata_;
@@ -2544,6 +2744,14 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
 bool RuntimeRenderer::EnsureScriptCacheEntry(const std::filesystem::path& script_path, std::string* error_message)
 {
     CachedScriptSourceEntry& cache_entry = script_cache_[script_path];
+
+    // Once a script is loaded, do not re-stat it every frame. Per-frame
+    // last_write_time on Lua source files trips Windows Defender scanning
+    // and contributes to play-mode stutter.
+    if (cache_entry.loaded)
+    {
+        return true;
+    }
 
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(script_path, error);
@@ -4501,9 +4709,17 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     {
         const std::uint64_t physics_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
-        const float phys_dt = (script_last_tick_ms_ != 0 && now_ms >= script_last_tick_ms_)
+        const float raw_phys_dt = (script_last_tick_ms_ != 0 && now_ms >= script_last_tick_ms_)
             ? static_cast<float>(now_ms - script_last_tick_ms_) / 1000.0f
             : 0.0f;
+        // Cap the physics step at ~30 FPS worth of time. A periodic editor
+        // hitch (filesystem scan, build, AV) can otherwise translate a frame
+        // dt of 40+ ms into a giant integration step which moves a
+        // velocity-driven body 2-3x its normal per-frame distance, producing
+        // a visible "snap forward" on the next frame. Capping converts that
+        // into a small slowdown instead of a teleport.
+        constexpr float kMaxPhysicsDt = 1.0f / 30.0f;
+        const float phys_dt = (std::min)(raw_phys_dt, kMaxPhysicsDt);
         physics_world_.Step(phys_dt);
         physics_object_transforms_ = physics_world_.GetSimulatedTransforms();
         const auto simulated = physics_world_.GetSimulatedPositions();
@@ -4680,7 +4896,295 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
         }
     }
 
-    std::vector<SceneGpuVertex> skinned_vertices;
+    // ---------- GPU compute-skinning fast path ----------
+    // Pre-baked bind-pose + per-vertex influences live in device-local-ish
+    // SSBOs; we only upload the per-frame bone palette and dispatch a compute
+    // shader on the same immediate command buffer the BLAS refit uses. This
+    // eliminates the per-vertex CPU loop (the dominant remaining cost in
+    // Debug builds) and the per-frame staging-vector reallocations.
+    if (ray_tracing_.IsAvailable() &&
+        EnsureSkinningPipeline() &&
+        mesh_cache_it->second.vertex_buffer.buffer != VK_NULL_HANDLE)
+    {
+        GpuSkinningResources& resources = gpu_skinning_resources_[object.model_path];
+
+        // Rebuild if source clip changed (write_time bump) or vertex count
+        // doesn't match the live mesh cache (model reloaded).
+        const bool source_changed =
+            resources.source_clip_model_path != clip_source_path ||
+            resources.source_clip_write_time != anim_cache_entry->write_time ||
+            resources.vertex_count != mesh_cache_it->second.vertex_count;
+        if (source_changed && (resources.bind_pose_buffer.buffer != VK_NULL_HANDLE ||
+                               resources.influence_buffer.buffer != VK_NULL_HANDLE ||
+                               resources.palette_buffer.buffer != VK_NULL_HANDLE))
+        {
+            ReleaseSkinningResources(resources);
+        }
+
+        if (!resources.ready)
+        {
+            // ---- Build bind-pose + influence buffers (one-time per model) ----
+            const std::uint32_t total_vertex_count = mesh_cache_it->second.vertex_count;
+            const std::uint32_t total_bone_count =
+                static_cast<std::uint32_t>(bone_matrices.size());
+            if (total_vertex_count > 0 && total_bone_count > 0)
+            {
+                std::vector<SceneGpuVertex> bind_pose_vertices;
+                bind_pose_vertices.reserve(total_vertex_count);
+
+                struct GpuVertexInfluence
+                {
+                    std::uint32_t bone_indices[4];
+                    float bone_weights[4];
+                };
+                std::vector<GpuVertexInfluence> influence_storage;
+                influence_storage.reserve(total_vertex_count);
+
+                const std::size_t mc =
+                    (std::min)(model_asset_entry.asset.meshes.size(),
+                               anim_cache_entry->skinned_meshes.size());
+                for (std::size_t mi = 0; mi < mc; ++mi)
+                {
+                    const ModelMeshAsset& model_mesh = model_asset_entry.asset.meshes[mi];
+                    const RuntimeSkinnedMeshData& skinned_mesh = anim_cache_entry->skinned_meshes[mi];
+                    if (skinned_mesh.mesh == nullptr)
+                    {
+                        continue;
+                    }
+                    const ModelMaterialAsset* material = nullptr;
+                    if (model_mesh.material_index < model_asset_entry.asset.materials.size())
+                    {
+                        material = &model_asset_entry.asset.materials[model_mesh.material_index];
+                    }
+
+                    aiMatrix3x3 bind_normal_transform(skinned_mesh.bind_node_transform);
+                    bind_normal_transform.Inverse().Transpose();
+                    aiMatrix3x3 bind_tangent_transform(skinned_mesh.bind_node_transform);
+
+                    for (unsigned int vi = 0; vi < skinned_mesh.mesh->mNumVertices; ++vi)
+                    {
+                        const aiVector3D raw_pos = skinned_mesh.mesh->mVertices[vi];
+                        const aiVector3D raw_n = skinned_mesh.mesh->HasNormals()
+                            ? skinned_mesh.mesh->mNormals[vi]
+                            : aiVector3D(0.0f, 1.0f, 0.0f);
+                        const aiVector3D raw_t = skinned_mesh.mesh->HasTangentsAndBitangents()
+                            ? skinned_mesh.mesh->mTangents[vi]
+                            : aiVector3D(1.0f, 0.0f, 0.0f);
+
+                        bool has_w = false;
+                        GpuVertexInfluence inf{};
+                        inf.bone_indices[0] = inf.bone_indices[1] =
+                            inf.bone_indices[2] = inf.bone_indices[3] = 0u;
+                        inf.bone_weights[0] = inf.bone_weights[1] =
+                            inf.bone_weights[2] = inf.bone_weights[3] = 0.0f;
+                        if (vi < skinned_mesh.influences.size())
+                        {
+                            const RuntimeSkinInfluence& src = skinned_mesh.influences[vi];
+                            for (int s = 0; s < 4; ++s)
+                            {
+                                const int b = src.bone_indices[s];
+                                const float w = src.bone_weights[s];
+                                if (b >= 0 && w > 0.0f &&
+                                    static_cast<std::size_t>(b) < bone_matrices.size())
+                                {
+                                    inf.bone_indices[s] = static_cast<std::uint32_t>(b);
+                                    inf.bone_weights[s] = w;
+                                    has_w = true;
+                                }
+                            }
+                        }
+                        influence_storage.push_back(inf);
+
+                        // Bake bind pose. For weighted vertices, store raw
+                        // values (the bone matrices include all needed
+                        // transforms). For unweighted vertices, pre-apply
+                        // bind_node_transform so the GPU shader's pass-through
+                        // path produces the right result.
+                        ModelVertex bind_v{};
+                        if (has_w)
+                        {
+                            bind_v.position = {raw_pos.x, raw_pos.y, raw_pos.z};
+                            bind_v.normal = {raw_n.x, raw_n.y, raw_n.z};
+                            bind_v.tangent = {raw_t.x, raw_t.y, raw_t.z, 1.0f};
+                        }
+                        else
+                        {
+                            aiVector3D p = raw_pos; p *= skinned_mesh.bind_node_transform;
+                            aiVector3D n = raw_n;   n *= bind_normal_transform;
+                            aiVector3D t = raw_t;   t *= bind_tangent_transform;
+                            n.NormalizeSafe(); t.NormalizeSafe();
+                            bind_v.position = {p.x, p.y, p.z};
+                            bind_v.normal = {n.x, n.y, n.z};
+                            bind_v.tangent = {t.x, t.y, t.z, 1.0f};
+                        }
+                        if (skinned_mesh.mesh->HasTextureCoords(0))
+                        {
+                            std::array<float, 2> uv = {
+                                skinned_mesh.mesh->mTextureCoords[0][vi].x,
+                                skinned_mesh.mesh->mTextureCoords[0][vi].y,
+                            };
+                            if (material != nullptr)
+                            {
+                                uv = ApplyUvTransformLocal(uv, material->uv_transform);
+                            }
+                            bind_v.uv0 = uv;
+                        }
+                        bind_pose_vertices.push_back(BuildSceneGpuVertex(bind_v, material));
+                    }
+                }
+
+                if (bind_pose_vertices.size() == total_vertex_count &&
+                    influence_storage.size() == total_vertex_count)
+                {
+                    const VkDeviceSize bind_size =
+                        static_cast<VkDeviceSize>(bind_pose_vertices.size() * sizeof(SceneGpuVertex));
+                    const VkDeviceSize inf_size =
+                        static_cast<VkDeviceSize>(influence_storage.size() * sizeof(GpuVertexInfluence));
+                    const VkDeviceSize palette_size =
+                        static_cast<VkDeviceSize>(total_bone_count * 16 * sizeof(float));
+
+                    const bool buffers_ok =
+                        CreateVulkanBuffer(*vulkan_context_, bind_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            resources.bind_pose_buffer) &&
+                        CreateVulkanBuffer(*vulkan_context_, inf_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            resources.influence_buffer) &&
+                        CreateVulkanBuffer(*vulkan_context_, palette_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            resources.palette_buffer);
+                    bool uploaded_static =
+                        buffers_ok &&
+                        UploadBufferData(vulkan_context_->GetDevice(), resources.bind_pose_buffer,
+                            bind_pose_vertices.data(), static_cast<std::size_t>(bind_size)) &&
+                        UploadBufferData(vulkan_context_->GetDevice(), resources.influence_buffer,
+                            influence_storage.data(), static_cast<std::size_t>(inf_size));
+
+                    VkDescriptorSet desc_set = VK_NULL_HANDLE;
+                    if (uploaded_static)
+                    {
+                        VkDescriptorSetAllocateInfo ds_alloc = {};
+                        ds_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                        ds_alloc.descriptorPool = vulkan_context_->GetDescriptorPool();
+                        ds_alloc.descriptorSetCount = 1;
+                        ds_alloc.pSetLayouts = &skinning_descriptor_set_layout_;
+                        VkResult r = vkAllocateDescriptorSets(vulkan_context_->GetDevice(), &ds_alloc, &desc_set);
+                        if (r != VK_SUCCESS)
+                        {
+                            desc_set = VK_NULL_HANDLE;
+                            uploaded_static = false;
+                        }
+                    }
+
+                    if (uploaded_static && desc_set != VK_NULL_HANDLE)
+                    {
+                        std::array<VkDescriptorBufferInfo, 4> buf_infos = {};
+                        buf_infos[0] = {resources.bind_pose_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[1] = {mesh_cache_it->second.vertex_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[2] = {resources.influence_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[3] = {resources.palette_buffer.buffer, 0, VK_WHOLE_SIZE};
+
+                        std::array<VkWriteDescriptorSet, 4> writes = {};
+                        for (std::uint32_t i = 0; i < 4; ++i)
+                        {
+                            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                            writes[i].dstSet = desc_set;
+                            writes[i].dstBinding = i;
+                            writes[i].descriptorCount = 1;
+                            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                            writes[i].pBufferInfo = &buf_infos[i];
+                        }
+                        vkUpdateDescriptorSets(vulkan_context_->GetDevice(),
+                            static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+                        resources.descriptor_set = desc_set;
+                        resources.vertex_count = total_vertex_count;
+                        resources.bone_count = total_bone_count;
+                        resources.source_clip_model_path = clip_source_path;
+                        resources.source_clip_write_time = anim_cache_entry->write_time;
+                        resources.ready = true;
+                    }
+                    else
+                    {
+                        ReleaseSkinningResources(resources);
+                    }
+                }
+            }
+        }
+
+        if (resources.ready && resources.bone_count == bone_matrices.size())
+        {
+            // Per-frame: blend palette on CPU (matrix lerp – cheap and a
+            // reasonable approximation of per-vertex cross-fade), upload to
+            // host-coherent palette buffer, enqueue compute dispatch.
+            std::vector<float> palette_floats(static_cast<std::size_t>(resources.bone_count) * 16);
+            for (std::size_t bi = 0; bi < bone_matrices.size(); ++bi)
+            {
+                aiMatrix4x4 m = bone_matrices[bi];
+                if (has_blend && bi < previous_bone_matrices.size())
+                {
+                    m = LerpMatrix(previous_bone_matrices[bi], m, blend_alpha);
+                }
+                // Store as column-major (GLSL mat4 default).
+                float* dst = palette_floats.data() + bi * 16;
+                dst[ 0] = m.a1; dst[ 1] = m.b1; dst[ 2] = m.c1; dst[ 3] = m.d1;
+                dst[ 4] = m.a2; dst[ 5] = m.b2; dst[ 6] = m.c2; dst[ 7] = m.d2;
+                dst[ 8] = m.a3; dst[ 9] = m.b3; dst[10] = m.c3; dst[11] = m.d3;
+                dst[12] = m.a4; dst[13] = m.b4; dst[14] = m.c4; dst[15] = m.d4;
+            }
+
+            const bool palette_uploaded = UploadBufferData(
+                vulkan_context_->GetDevice(),
+                resources.palette_buffer,
+                palette_floats.data(),
+                palette_floats.size() * sizeof(float));
+
+            if (palette_uploaded)
+            {
+                RayTracing::PendingSkinningDispatch dispatch{};
+                dispatch.pipeline = skinning_pipeline_;
+                dispatch.pipeline_layout = skinning_pipeline_layout_;
+                dispatch.descriptor_set = resources.descriptor_set;
+                dispatch.output_vertex_buffer = mesh_cache_it->second.vertex_buffer.buffer;
+                dispatch.vertex_count = resources.vertex_count;
+                dispatch.bone_count = resources.bone_count;
+                dispatch.group_count_x = (resources.vertex_count + 63u) / 64u;
+                ray_tracing_.EnqueueSkinningDispatch(dispatch);
+
+                static bool gpu_skinning_logged = false;
+                if (!gpu_skinning_logged)
+                {
+                    gpu_skinning_logged = true;
+                    SDL_Log(
+                        "[Skinning] GPU compute skinning ACTIVE (first dispatch: object=\"%s\", vertices=%u, bones=%u)",
+                        object.name.c_str(),
+                        resources.vertex_count,
+                        resources.bone_count);
+                }
+
+                ++animated_mesh_revisions_[object.model_path];
+                return true;
+            }
+        }
+        // Fall through to CPU path on any failure above.
+    }
+
+    {
+        static bool cpu_skinning_logged = false;
+        if (!cpu_skinning_logged)
+        {
+            cpu_skinning_logged = true;
+            SDL_Log(
+                "[Skinning] CPU skinning fallback in use for object=\"%s\" (GPU compute skinning unavailable or setup failed)",
+                object.name.c_str());
+        }
+    }
+
+    std::vector<SceneGpuVertex>& skinned_vertices = g_runtime_skinned_vertex_scratch[object.model_path.generic_string()];
+    skinned_vertices.clear();
     skinned_vertices.reserve(mesh_cache_it->second.vertex_count);
 
     const std::size_t mesh_count = (std::min)(model_asset_entry.asset.meshes.size(), anim_cache_entry->skinned_meshes.size());

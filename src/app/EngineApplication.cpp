@@ -769,7 +769,12 @@ bool EngineApplication::StartRuntimeSession()
         return false;
     }
 
-    if (!vulkan_context_.CreateWindowContext(runtime_window_, runtime_window_context_))
+    // The runtime window must use a non-blocking present mode (MAILBOX) so
+    // that two FIFO swapchains (editor + runtime) on one queue do not stutter
+    // by serializing on each window's vblank. The standalone game has only
+    // one swapchain and is smooth on FIFO; this gives play-mode comparable
+    // pacing.
+    if (!vulkan_context_.CreateWindowContext(runtime_window_, runtime_window_context_, /*prefer_low_latency=*/true))
     {
         SDL_DestroyWindow(runtime_window_);
         runtime_window_ = nullptr;
