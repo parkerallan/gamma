@@ -2624,17 +2624,17 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     cache_entry.write_time = resolved_model.write_time;
 
     const std::uint64_t freq = SDL_GetPerformanceFrequency();
-    if (freq > 0)
-    {
-        const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);
-        SDL_Log(
-            "Viewport mesh upload '%s': %.2f ms (%zu materials, %u verts, %u indices)",
-            model_path.filename().string().c_str(),
-            upload_ms,
-            resolved_model.asset->materials.size(),
-            cache_entry.vertex_count,
-            cache_entry.index_count);
-    }
+    // if (freq > 0)
+    // {
+    //     const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);
+    //     SDL_Log(
+    //         "Viewport mesh upload '%s': %.2f ms (%zu materials, %u verts, %u indices)",
+    //         model_path.filename().string().c_str(),
+    //         upload_ms,
+    //         resolved_model.asset->materials.size(),
+    //         cache_entry.vertex_count,
+    //         cache_entry.index_count);
+    // }
     return true;
 }
 

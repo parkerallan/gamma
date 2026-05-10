@@ -46,6 +46,7 @@ struct GltfMaterialExtensionData
     bool has_ior = false;
     bool has_clearcoat = false;
     bool has_emissive_strength = false;
+    bool has_specular = false;
     float factor = 0.0f;
     float ior = 1.3f;
     float thickness_minimum = 100.0f;
@@ -58,7 +59,9 @@ struct GltfMaterialExtensionData
     float clearcoat_roughness_factor = 0.0f;
     float clearcoat_normal_scale = 1.0f;
     float emissive_strength = 1.0f;
+    float specular_factor = 1.0f;
     std::array<float, 3> attenuation_color = {1.0f, 1.0f, 1.0f};
+    std::array<float, 3> specular_color_factor = {1.0f, 1.0f, 1.0f};
     std::string transmission_texture_reference;
     std::string texture_reference;
     std::string thickness_texture_reference;
@@ -66,6 +69,8 @@ struct GltfMaterialExtensionData
     std::string clearcoat_texture_reference;
     std::string clearcoat_roughness_texture_reference;
     std::string clearcoat_normal_texture_reference;
+    std::string specular_texture_reference;
+    std::string specular_color_texture_reference;
 };
 
 std::string ToLowerExtension(const std::filesystem::path& path)
@@ -336,6 +341,25 @@ std::vector<GltfMaterialExtensionData> LoadGltfMaterialExtensionData(const std::
             {
                 extension_data.has_emissive_strength = true;
                 extension_data.emissive_strength = ReadJsonFloat(*emissive_strength_it, "emissiveStrength", 1.0f);
+            }
+
+            // KHR_materials_specular: parsed here because Assimp's GLTF importer does
+            // not reliably populate AI_MATKEY_SPECULAR_FACTOR / AI_MATKEY_COLOR_SPECULAR
+            // for this extension. Without this, materials with specularFactor=0 fall
+            // back to the default 1.0 and incorrectly render shiny.
+            if (const auto specular_it = extensions_it->find("KHR_materials_specular"); specular_it != extensions_it->end() && specular_it->is_object())
+            {
+                extension_data.has_specular = true;
+                extension_data.specular_factor = ReadJsonFloat(*specular_it, "specularFactor", 1.0f);
+                extension_data.specular_color_factor = ReadJsonFloat3(*specular_it, "specularColorFactor", {1.0f, 1.0f, 1.0f});
+                extension_data.specular_texture_reference = ResolveGltfTextureReference(
+                    specular_it->value("specularTexture", json::object()),
+                    texture_sources,
+                    image_uris);
+                extension_data.specular_color_texture_reference = ResolveGltfTextureReference(
+                    specular_it->value("specularColorTexture", json::object()),
+                    texture_sources,
+                    image_uris);
             }
         }
     }
@@ -1159,16 +1183,21 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
         return asset;
     }
 
-    const std::uint64_t parse_start_ticks = SDL_GetPerformanceCounter();
+    //const std::uint64_t parse_start_ticks = SDL_GetPerformanceCounter();
 
     Assimp::Importer importer;
+    // Note: aiProcess_ValidateDataStructure is intentionally omitted. Assimp's validator
+    // false-positives on several glTF 2.0 PBR extensions (notably KHR_materials_specular,
+    // which registers specularTexture and specularColorTexture as two SPECULAR slots
+    // without updating the slot count, causing
+    //   "Specular #1 is set, but there are only 1 specular textures"
+    // and rejecting otherwise valid assets).
     const unsigned int import_flags =
         aiProcess_Triangulate |
         aiProcess_JoinIdenticalVertices |
         aiProcess_ImproveCacheLocality |
         aiProcess_CalcTangentSpace |
         aiProcess_GenSmoothNormals |
-        aiProcess_ValidateDataStructure |
         aiProcess_SortByPType;
 
     const bool use_pak = g_asset_reader != nullptr;
@@ -1443,6 +1472,34 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
                     material_asset.volume_thickness_texture_source,
                     material_asset.volume_thickness_texture);
             }
+
+            if (extension_data.has_specular)
+            {
+                material_asset.specular_factor = extension_data.specular_factor;
+                material_asset.specular_color = extension_data.specular_color_factor;
+
+                if (!extension_data.specular_texture_reference.empty())
+                {
+                    LoadTextureReference(
+                        scene,
+                        path,
+                        extension_data.specular_texture_reference,
+                        false,
+                        material_asset.specular_texture_source,
+                        material_asset.specular_texture);
+                }
+
+                if (!extension_data.specular_color_texture_reference.empty())
+                {
+                    LoadTextureReference(
+                        scene,
+                        path,
+                        extension_data.specular_color_texture_reference,
+                        true,
+                        material_asset.specular_color_texture_source,
+                        material_asset.specular_color_texture);
+                }
+            }
         }
 
         material_asset.base_color[3] = std::clamp(material_asset.base_color[3] * material_asset.opacity_factor, 0.0f, 1.0f);
@@ -1455,17 +1512,17 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
 
     asset.loaded = true;
 
-    const std::uint64_t freq = SDL_GetPerformanceFrequency();
-    if (freq > 0)
-    {
-        const double parse_ms = static_cast<double>(SDL_GetPerformanceCounter() - parse_start_ticks) * 1000.0 / static_cast<double>(freq);
-        SDL_Log(
-            "ModelAsset parse '%s': %.2f ms (%zu meshes, %zu materials)",
-            path.filename().string().c_str(),
-            parse_ms,
-            asset.meshes.size(),
-            asset.materials.size());
-    }
+    //const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    // if (freq > 0)
+    // {
+    //     const double parse_ms = static_cast<double>(SDL_GetPerformanceCounter() - parse_start_ticks) * 1000.0 / static_cast<double>(freq);
+    //     SDL_Log(
+    //         "ModelAsset parse '%s': %.2f ms (%zu meshes, %zu materials)",
+    //         path.filename().string().c_str(),
+    //         parse_ms,
+    //         asset.meshes.size(),
+    //         asset.materials.size());
+    // }
 
     return asset;
 }

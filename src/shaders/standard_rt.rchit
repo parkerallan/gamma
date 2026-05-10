@@ -699,11 +699,17 @@ vec3 evaluate_sheen_direct_brdf(vec3 sheen_color, float sheen_roughness, vec3 wo
     return sheen_color * distribution * visibility * dot_nl;
 }
 
+// Approximate Charlie sheen directional albedo (energy taken by the sheen lobe).
+// Bounded so the base-layer scaling never collapses to zero -- the previous formula
+// drove base color to 0 at silhouettes which produced the blue/black outline
+// artifacts on SheenDamask / SheenChair. Roughness factor keeps narrow (low-r)
+// sheen lobes from stealing too much base energy.
 float compute_sheen_base_scaling(vec3 sheen_color, float dot_nv)
 {
     float strength = clamp(max_component(sheen_color), 0.0, 1.0);
-    float grazing = pow(1.0 - clamp(dot_nv, 0.0, 1.0), 5.0);
-    return clamp(1.0 - strength * (0.25 + 0.75 * grazing), 0.0, 1.0);
+    float grazing = pow(1.0 - clamp(dot_nv, 0.0, 1.0), 2.5);
+    float directional_albedo = 0.157 * grazing;
+    return clamp(1.0 - strength * directional_albedo, 0.0, 1.0);
 }
 
 vec3 layer_sheen_over_brdf(vec3 base_brdf, vec3 sheen_color, float sheen_roughness, float base_scaling, vec3 world_normal, vec3 view_direction, vec3 light_direction)
@@ -1169,6 +1175,13 @@ void main()
         float reflection_sharpness = clamp(1.0 - roughness, 0.0, 1.0);
         float reflection_weight = reflection_sharpness * reflection_sharpness;
         reflection_weight *= reflection_weight;
+        // Metals at high roughness would otherwise have weight ~= 0 and never trace,
+        // leaving gold/silver surfaces pitch black when no environment is reflected.
+        // For a metal the GGX lobe integrates to ~1 (no diffuse fallback exists), so a
+        // single-ray reflection estimate needs full weight to match the energy that
+        // would arrive via prefiltered IBL. Dielectrics keep the original (1-r)^4
+        // attenuation so silhouettes are unchanged.
+        reflection_weight = max(reflection_weight, metallic);
         if (max(max(fresnel.r, fresnel.g), fresnel.b) * reflection_weight * base_layer_weight > 0.01)
         {
             vec3 reflection_direction = reflect(gl_WorldRayDirectionEXT, world_normal);

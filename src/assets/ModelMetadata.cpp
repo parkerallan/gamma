@@ -342,12 +342,14 @@ ModelMetadata LoadModelMetadata(const std::filesystem::path& path)
     }
 
     Assimp::Importer importer;
+    // aiProcess_ValidateDataStructure is intentionally omitted to match ModelAsset.cpp;
+    // Assimp's validator false-positives on KHR_materials_specular (and a few other PBR
+    // extensions) and would otherwise reject valid glTF 2.0 assets here as well.
     const aiScene* scene = importer.ReadFile(
         path.string(),
         aiProcess_JoinIdenticalVertices |
             aiProcess_Triangulate |
-            aiProcess_SortByPType |
-            aiProcess_ValidateDataStructure);
+            aiProcess_SortByPType);
 
     if (scene == nullptr)
     {
