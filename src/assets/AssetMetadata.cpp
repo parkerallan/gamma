@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 
@@ -138,6 +139,85 @@ std::string GetTextureSlotLabel(const std::string& lowered_key)
 
     return "Texture";
 }
+
+bool ParseIcoMetadata(const std::filesystem::path& path, ImageMetadata& metadata)
+{
+    struct IcoDirEntry
+    {
+        std::uint8_t width;
+        std::uint8_t height;
+        std::uint8_t color_count;
+        std::uint8_t reserved;
+        std::uint16_t planes;
+        std::uint16_t bit_count;
+        std::uint32_t bytes_in_res;
+        std::uint32_t image_offset;
+    };
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+    {
+        metadata.error_message = "Failed to open ICO file.";
+        return false;
+    }
+
+    std::uint16_t reserved = 0;
+    std::uint16_t type = 0;
+    std::uint16_t count = 0;
+    input.read(reinterpret_cast<char*>(&reserved), sizeof(reserved));
+    input.read(reinterpret_cast<char*>(&type), sizeof(type));
+    input.read(reinterpret_cast<char*>(&count), sizeof(count));
+    if (!input)
+    {
+        metadata.error_message = "Failed to read ICO header.";
+        return false;
+    }
+
+    if (reserved != 0 || type != 1 || count == 0)
+    {
+        metadata.error_message = "Invalid ICO header.";
+        return false;
+    }
+
+    int best_width = 0;
+    int best_height = 0;
+    int best_bit_count = 0;
+    for (std::uint16_t index = 0; index < count; ++index)
+    {
+        IcoDirEntry entry{};
+        input.read(reinterpret_cast<char*>(&entry), sizeof(entry));
+        if (!input)
+        {
+            metadata.error_message = "Failed to read ICO directory entry.";
+            return false;
+        }
+
+        const int entry_width = entry.width == 0 ? 256 : static_cast<int>(entry.width);
+        const int entry_height = entry.height == 0 ? 256 : static_cast<int>(entry.height);
+        const int entry_bit_count = static_cast<int>(entry.bit_count);
+        const int current_score = (entry_width * entry_height * 100) + entry_bit_count;
+        const int best_score = (best_width * best_height * 100) + best_bit_count;
+        if (current_score > best_score)
+        {
+            best_width = entry_width;
+            best_height = entry_height;
+            best_bit_count = entry_bit_count;
+        }
+    }
+
+    if (best_width <= 0 || best_height <= 0)
+    {
+        metadata.error_message = "ICO file does not contain valid image entries.";
+        return false;
+    }
+
+    metadata.width = best_width;
+    metadata.height = best_height;
+    metadata.channel_count = best_bit_count >= 32 ? 4 : 3;
+    metadata.bits_per_channel = 8;
+    metadata.parsed = true;
+    return true;
+}
 }
 
 bool ParsedMaterialMetadata::IsSupportedPath(const std::filesystem::path& path)
@@ -155,8 +235,9 @@ bool ImageMetadata::IsSupportedPath(const std::filesystem::path& path)
         extension == ".bmp" ||
         extension == ".psd" ||
         extension == ".gif" ||
-    extension == ".hdr" ||
-    extension == ".exr";
+        extension == ".hdr" ||
+        extension == ".exr" ||
+        extension == ".ico";
 }
 
 bool FontMetadata::IsSupportedPath(const std::filesystem::path& path)
@@ -315,6 +396,14 @@ ImageMetadata LoadImageMetadata(const std::filesystem::path& path)
         metadata.parsed = true;
         FreeEXRHeader(&header);
         return metadata;
+    }
+
+    if (extension == ".ico")
+    {
+        if (ParseIcoMetadata(path, metadata))
+        {
+            return metadata;
+        }
     }
 
     if (stbi_info(path.string().c_str(), &metadata.width, &metadata.height, &metadata.channel_count) == 0)

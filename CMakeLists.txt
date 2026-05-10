@@ -4,16 +4,20 @@ if(POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
 endif()
 
-project(EngineSkeleton LANGUAGES C CXX)
+project(Gamma LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# When ON, only the standalone game target is built (no engine editor).
+# When ON, only the standalone game target is built (no engine app).
 # Set by the engine's build dialog: cmake -DENGINE_BUILD_GAME=ON ...
 # The default cmake --build build command leaves this OFF and builds only the engine.
-option(ENGINE_BUILD_GAME "Build the standalone game target instead of the engine editor" OFF)
+option(ENGINE_BUILD_GAME "Build the standalone game target instead of the engine app" OFF)
+
+# Windows engine executable branding (ENGINE target only).
+# This does not affect the standalone game target when ENGINE_BUILD_GAME=ON.
+set(ENGINE_EXE_NAME "Gamma" CACHE STRING "Output executable name for the engine target on Windows")
 
 find_package(Vulkan REQUIRED)
 
@@ -48,7 +52,7 @@ endif()
 
 include(FetchContent)
 
-# SDL3: shared for the engine editor, static for the standalone game so that
+# SDL3: shared for the engine app, static for the standalone game so that
 # no SDL3.dll needs to be distributed with the game.
 if(ENGINE_BUILD_GAME)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
@@ -273,13 +277,18 @@ set(IMGUICOLORTEXTEDIT_DIR ${imguicolortextedit_SOURCE_DIR})
 
 # ---------------------------------------------------------------------------
 # ENGINE_BUILD_GAME=ON  → build only the standalone game target
-# ENGINE_BUILD_GAME=OFF → build only the engine editor (default)
+# ENGINE_BUILD_GAME=OFF → build only the engine app (default)
 # ---------------------------------------------------------------------------
 if(ENGINE_BUILD_GAME)
 
     include(cmake/game.cmake)
 
-else() # engine editor build ---------------------------------------------------
+else() # engine app build ------------------------------------------------------
+
+set(ENGINE_ICON_RC)
+if(WIN32)
+    set(ENGINE_ICON_RC src/app/engine_icon.rc)
+endif()
 
 set(ENGINE_SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/shaders)
 set(ENGINE_SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
@@ -369,6 +378,7 @@ if(MSVC)
 endif()
 
 add_executable(engine
+    ${ENGINE_ICON_RC}
     src/app/main.cpp
     src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
@@ -439,6 +449,12 @@ add_dependencies(engine engine_scene_shaders)
 
 if(WIN32)
     target_link_libraries(engine PRIVATE Ole32 Shell32)
+
+    # Apply Windows executable branding only to the engine target.
+    # The logical CMake target name stays "engine"; only the produced .exe name changes.
+    set_target_properties(engine PROPERTIES
+        OUTPUT_NAME "${ENGINE_EXE_NAME}"
+    )
 
     add_custom_command(TARGET engine POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory

@@ -15,6 +15,7 @@
 #include <system_error>
 #include <string>
 #include <vector>
+#include <stb_image.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -117,6 +118,82 @@ std::filesystem::path ResolveCodiconFontPath(const std::filesystem::path& worksp
     }
 
     return {};
+}
+
+std::filesystem::path ResolveWindowIconPath(const std::filesystem::path& workspace_root)
+{
+    const std::array<std::filesystem::path, 3> relative_paths = {
+        std::filesystem::path("src/ui/logo256.png"),
+        std::filesystem::path("ui/logo256.png"),
+        std::filesystem::path("logo256.png"),
+    };
+
+    std::error_code error;
+    if (!workspace_root.empty())
+    {
+        for (const std::filesystem::path& relative_path : relative_paths)
+        {
+            const std::filesystem::path candidate = workspace_root / relative_path;
+            if (std::filesystem::exists(candidate, error))
+            {
+                return candidate;
+            }
+            error.clear();
+        }
+    }
+
+    const std::filesystem::path current = std::filesystem::current_path(error);
+    if (!error)
+    {
+        for (const std::filesystem::path& relative_path : relative_paths)
+        {
+            const std::filesystem::path candidate = current / relative_path;
+            if (std::filesystem::exists(candidate, error))
+            {
+                return candidate;
+            }
+            error.clear();
+        }
+    }
+
+    return {};
+}
+
+void ApplyWindowIcon(SDL_Window* window, const std::filesystem::path& workspace_root)
+{
+    if (window == nullptr)
+    {
+        return;
+    }
+
+    const std::filesystem::path icon_path = ResolveWindowIconPath(workspace_root);
+    if (icon_path.empty())
+    {
+        SDL_Log("Window icon not found; expected src/ui/logo256.png");
+        return;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* rgba_pixels = stbi_load(icon_path.string().c_str(), &width, &height, &channels, 4);
+    if (rgba_pixels == nullptr)
+    {
+        SDL_Log("Failed to load window icon %s", icon_path.string().c_str());
+        return;
+    }
+
+    SDL_Surface* surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, rgba_pixels, width * 4);
+    if (surface == nullptr)
+    {
+        SDL_Log("Failed to create icon surface: %s", SDL_GetError());
+        stbi_image_free(rgba_pixels);
+        return;
+    }
+
+    SDL_SetWindowIcon(window, surface);
+    SDL_DestroySurface(surface);
+    stbi_image_free(rgba_pixels);
 }
 
 void LoadUserInterfaceFonts(ImGuiIO& io, const std::filesystem::path& workspace_root)
@@ -441,6 +518,46 @@ bool LinuxBuildCacheNeedsRefresh(const std::filesystem::path& external_build_dir
         cache_contents.find("CMAKE_MAKE_PROGRAM:FILEPATH=CMAKE_MAKE_PROGRAM-NOTFOUND") != std::string::npos;
 }
 
+std::string NormalizeCachePathForCompare(std::string value)
+{
+    std::replace(value.begin(), value.end(), '\\', '/');
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
+    {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool WindowsGameIconCacheNeedsRefresh(
+    const std::filesystem::path& external_build_directory,
+    const std::filesystem::path& requested_icon_path)
+{
+    const std::filesystem::path cmake_cache = external_build_directory / "CMakeCache.txt";
+    std::string cache_contents;
+    if (!ReadTextFile(cmake_cache, cache_contents))
+    {
+        return true;
+    }
+
+    const std::string marker = "GAME_WINDOWS_ICON_PATH:STRING=";
+    const std::size_t marker_pos = cache_contents.find(marker);
+    std::string cached_path;
+    if (marker_pos != std::string::npos)
+    {
+        const std::size_t value_start = marker_pos + marker.size();
+        const std::size_t value_end = cache_contents.find_first_of("\r\n", value_start);
+        cached_path = cache_contents.substr(value_start, value_end == std::string::npos ? std::string::npos : value_end - value_start);
+    }
+
+    std::string requested_path;
+    if (!requested_icon_path.empty())
+    {
+        requested_path = requested_icon_path.lexically_normal().generic_string();
+    }
+
+    return NormalizeCachePathForCompare(cached_path) != NormalizeCachePathForCompare(requested_path);
+}
+
 // Convert an absolute Windows path to the equivalent WSL path under /mnt/<drive>/...
 // e.g.  E:\Projects\engine  ->  /mnt/e/Projects/engine
 std::string WindowsPathToWsl(const std::filesystem::path& windows_path)
@@ -529,7 +646,7 @@ bool EngineApplication::Init()
 
     const SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     window_ = SDL_CreateWindow(
-        "Engine",
+        "Gamma",
         static_cast<int>(1600.0f * display_scale_),
         static_cast<int>(900.0f * display_scale_),
         window_flags);
@@ -540,14 +657,15 @@ bool EngineApplication::Init()
         return false;
     }
 
+    const std::filesystem::path workspace_root = ResolveWorkspaceRoot();
+    ApplyWindowIcon(window_, workspace_root);
+
     if (!vulkan_context_.Initialize(window_))
     {
         return false;
     }
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window_);
-
-    const std::filesystem::path workspace_root = ResolveWorkspaceRoot();
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -592,7 +710,7 @@ bool EngineApplication::Init()
     state_.SetWorkspaceRoot(workspace_root);
     state_.AddLog("Workspace root: " + state_.workspace_root.generic_string());
     state_.AddLog("Rendering backend: raw Vulkan API");
-    state_.AddLog("Engine started");
+    state_.AddLog("Gamma started");
     running_ = true;
     return true;
 }
@@ -784,7 +902,7 @@ bool EngineApplication::StartRuntimeSession()
 
     const SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     runtime_window_ = SDL_CreateWindow(
-        "Runtime",
+        "Gamma Runtime",
         static_cast<int>(1280.0f * display_scale_),
         static_cast<int>(720.0f * display_scale_),
         window_flags);
@@ -793,6 +911,8 @@ bool EngineApplication::StartRuntimeSession()
         state_.SetPlayError(std::string("Failed to create runtime window: ") + SDL_GetError());
         return false;
     }
+
+    ApplyWindowIcon(runtime_window_, state_.workspace_root);
 
     // The runtime window must use a non-blocking present mode (MAILBOX) so
     // that two FIFO swapchains (editor + runtime) on one queue do not stutter
@@ -1469,6 +1589,12 @@ void EngineApplication::ExecuteBuildRequest(
         needs_configure = true;
     }
 
+    if (!needs_configure && request.build_platform == EngineBuildPlatform::Windows && WindowsGameIconCacheNeedsRefresh(external_build_directory, request.app_icon_path))
+    {
+        log("[Build] Build cache icon path changed; rerunning configure step");
+        needs_configure = true;
+    }
+
     if (was_cancelled())
     {
         fail("Game build cancelled");
@@ -1496,10 +1622,21 @@ void EngineApplication::ExecuteBuildRequest(
         }
         else
         {
+            std::string icon_path_for_cmake;
+            if (!request.app_icon_path.empty())
+            {
+                const std::string icon_extension = ToLowerCopy(request.app_icon_path.extension().string());
+                if (icon_extension == ".ico")
+                {
+                    icon_path_for_cmake = request.app_icon_path.lexically_normal().generic_string();
+                }
+            }
+
             configure_command =
                 "cmake -S " + QuoteCommandArgument(state_.workspace_root.string()) +
                 " -B " + QuoteCommandArgument(external_build_directory.string()) +
                 " -DENGINE_BUILD_GAME=ON" +
+                " -DGAME_WINDOWS_ICON_PATH=" + QuoteCommandArgument(icon_path_for_cmake) +
                 " --log-level=WARNING" +
                 " -Wno-dev";
         }

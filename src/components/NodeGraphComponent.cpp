@@ -141,43 +141,68 @@ void NodeGraphComponent::Render(EngineState& state)
         ImGui::EndDisabled();
     }
 
-    ImGui::SameLine();
-    const std::string save_label = std::string(ICON_CI_SAVE) + " Save";
-    if (ImGui::Button(save_label.c_str()))
     {
-        if (is_new)
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        const float save_w = ImGui::CalcTextSize(ICON_CI_SAVE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float build_w = ImGui::CalcTextSize(ICON_CI_RUN_WITH_DEPS).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float play_w = ImGui::CalcTextSize(ICON_CI_DEBUG_START).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float toolbar_total = save_w + build_w + play_w + sp * 2.0f;
+        const float cur_x = ImGui::GetCursorPosX();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (state.open_graph_dirty)
         {
-            if (!state.project_root.empty() && new_graph_name[0] != '\0')
+            ImGui::SameLine();
+            ImGui::TextDisabled("Unsaved changes");
+        }
+        ImGui::SameLine();
+        if (avail > toolbar_total)
+        {
+            ImGui::SetCursorPosX(cur_x + avail - toolbar_total);
+        }
+        if (ImGui::Button(ICON_CI_SAVE))
+        {
+            if (is_new)
             {
-                const std::filesystem::path graphs_dir = state.project_root / "Graphs";
-                std::error_code ec;
-                std::filesystem::create_directories(graphs_dir, ec);
-                const std::filesystem::path new_path = graphs_dir / (std::string(new_graph_name) + ".graph");
+                if (!state.project_root.empty() && new_graph_name[0] != '\0')
+                {
+                    const std::filesystem::path graphs_dir = state.project_root / "Graphs";
+                    std::error_code ec;
+                    std::filesystem::create_directories(graphs_dir, ec);
+                    const std::filesystem::path new_path = graphs_dir / (std::string(new_graph_name) + ".graph");
 
-                std::ofstream output(new_path, std::ios::binary | std::ios::trunc);
-                if (output)
-                {
-                    output << "{}\n";
-                    const std::string created_graph_name = new_graph_name;
-                    graph_names.push_back(created_graph_name);
-                    graph_paths.push_back(new_path);
-                    selected_graph_index = static_cast<int>(graph_paths.size()) - 1;
-                    new_graph_name[0] = '\0';
-                    state.open_graph_path = new_path;
-                    state.open_graph_dirty = false;
-                    state.AddLog(std::string("Created graph: ") + created_graph_name);
-                }
-                else
-                {
-                    state.AddLog("Failed to create graph: " + state.GetDisplayPath(new_path));
+                    std::ofstream output(new_path, std::ios::binary | std::ios::trunc);
+                    if (output)
+                    {
+                        output << "{}\n";
+                        const std::string created_graph_name = new_graph_name;
+                        graph_names.push_back(created_graph_name);
+                        graph_paths.push_back(new_path);
+                        selected_graph_index = static_cast<int>(graph_paths.size()) - 1;
+                        new_graph_name[0] = '\0';
+                        state.open_graph_path = new_path;
+                        state.open_graph_dirty = false;
+                        state.AddLog(std::string("Created graph: ") + created_graph_name);
+                    }
+                    else
+                    {
+                        state.AddLog("Failed to create graph: " + state.GetDisplayPath(new_path));
+                    }
                 }
             }
+            else if (selected_graph_index >= 0 && selected_graph_index < static_cast<int>(graph_paths.size()))
+            {
+                state.open_graph_dirty = false;
+                state.AddLog("Saved graph: " + graph_paths[selected_graph_index].filename().string());
+            }
         }
-        else if (selected_graph_index >= 0 && selected_graph_index < static_cast<int>(graph_paths.size()))
-        {
-            state.open_graph_dirty = false;
-            state.AddLog("Saved graph: " + graph_paths[selected_graph_index].filename().string());
-        }
+        ImGui::SameLine();
+        if (!state.CanBuildProject()) { ImGui::BeginDisabled(); }
+        if (ImGui::Button(ICON_CI_RUN_WITH_DEPS)) { state.TriggerBuildAction(); }
+        if (!state.CanBuildProject()) { ImGui::EndDisabled(); }
+        ImGui::SameLine();
+        if (!state.CanPlayScene()) { ImGui::BeginDisabled(); }
+        if (ImGui::Button(ICON_CI_DEBUG_START)) { state.TriggerPlayAction(); }
+        if (!state.CanPlayScene()) { ImGui::EndDisabled(); }
     }
 
     ImGui::Separator();

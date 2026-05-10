@@ -2451,7 +2451,7 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         return true;
     }
 
-    const std::uint64_t mesh_upload_start_ticks = SDL_GetPerformanceCounter();
+    //const std::uint64_t mesh_upload_start_ticks = SDL_GetPerformanceCounter();
 
     ReleaseMeshCacheEntry(cache_entry);
 
@@ -2623,7 +2623,7 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     cache_entry.index_count = static_cast<std::uint32_t>(indices.size());
     cache_entry.write_time = resolved_model.write_time;
 
-    const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    //const std::uint64_t freq = SDL_GetPerformanceFrequency();
     // if (freq > 0)
     // {
     //     const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);

@@ -110,6 +110,7 @@ struct EngineState
     std::string build_executable_name = "Game";
     std::string build_folder_name = "Game";
     std::string build_window_title = "Game";
+    EngineBuildType build_target_type = EngineBuildType::Debug;
     EngineBuildPlatform build_target_platform = EngineBuildPlatform::Windows;
     std::filesystem::path build_output_root;
     std::filesystem::path build_app_icon_path;
@@ -305,6 +306,7 @@ struct EngineState
         build_executable_name = "Game";
         build_folder_name = "Game";
         build_window_title = "Game";
+        build_target_type = EngineBuildType::Debug;
         build_target_platform = EngineBuildPlatform::Windows;
         build_output_root.clear();
         build_app_icon_path.clear();
@@ -984,6 +986,7 @@ struct EngineState
         if (!UpsertProjectValue(manifest_contents, "buildExeName", SanitizeProjectValue(build_executable_name)) ||
             !UpsertProjectValue(manifest_contents, "buildFolderName", SanitizeProjectValue(build_folder_name)) ||
             !UpsertProjectValue(manifest_contents, "buildWindowTitle", SanitizeProjectValue(build_window_title)) ||
+            !UpsertProjectValue(manifest_contents, "buildType", build_target_type == EngineBuildType::Final ? "Final" : "Debug") ||
             !UpsertProjectValue(manifest_contents, "buildPlatform", build_target_platform == EngineBuildPlatform::Linux ? "Linux" : "Windows") ||
             !UpsertProjectValue(manifest_contents, "buildOutputRoot", encode_path(build_output_root)) ||
             !UpsertProjectValue(manifest_contents, "buildAppIcon", encode_path(build_app_icon_path)))
@@ -1100,6 +1103,15 @@ struct EngineState
         if (build_window_title.empty())
         {
             build_window_title = build_executable_name;
+        }
+
+        build_target_type = EngineBuildType::Debug;
+        std::string build_type_value = ExtractProjectValue(manifest_contents, "buildType");
+        std::transform(build_type_value.begin(), build_type_value.end(), build_type_value.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (build_type_value == "final" || build_type_value == "release")
+        {
+            build_target_type = EngineBuildType::Final;
         }
 
         build_target_platform = EngineBuildPlatform::Windows;

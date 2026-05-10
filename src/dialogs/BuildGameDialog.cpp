@@ -71,28 +71,25 @@ const char* GetBuildPlatformLabel(EngineBuildPlatform platform)
     return platform == EngineBuildPlatform::Windows ? "Windows (MSVC)" : "Linux (GCC)";
 }
 
-std::string GetBuildCacheFolderName(const std::string& folder_name, EngineBuildPlatform platform, int build_type_index)
+std::string GetBuildCacheFolderName(const std::string& folder_name, EngineBuildPlatform platform, EngineBuildType build_type)
 {
 	std::string cache_folder_name = folder_name + "-build-" + (platform == EngineBuildPlatform::Windows ? std::string("windows") : std::string("linux"));
 	if (platform == EngineBuildPlatform::Linux)
 	{
-		cache_folder_name += build_type_index == 0 ? "-debug" : "-release";
+		cache_folder_name += build_type == EngineBuildType::Debug ? "-debug" : "-release";
 	}
 	return cache_folder_name;
 }
 
-const char* GetBuildTypeLabel(int build_type_index)
+const char* GetBuildTypeLabel(EngineBuildType build_type)
 {
-	return build_type_index == 0 ? "Debug" : "Final";
+	return build_type == EngineBuildType::Debug ? "Debug" : "Final";
 }
 }
 
 void BuildGameDialog::Open(const EngineState& state)
 {
-	if (!state.pending_build_request.game_name.empty())
-	{
-		build_type_index_ = state.pending_build_request.build_type == EngineBuildType::Debug ? 0 : 1;
-	}
+	(void)state;
 	ImGui::OpenPopup("Build Game");
 }
 
@@ -109,9 +106,6 @@ bool BuildGameDialog::Render(EngineState& state)
 
 	BuildSettingsComponent::Render(state);
 
-	const char* build_type_labels[] = {"Debug", "Final"};
-	ImGui::Combo("Build type", &build_type_index_, build_type_labels, IM_ARRAYSIZE(build_type_labels));
-
 	const std::string trimmed_game_name = TrimCopy(state.build_executable_name);
 	const std::string trimmed_folder_name = TrimCopy(state.build_folder_name);
 	std::filesystem::path stage_root;
@@ -123,7 +117,7 @@ bool BuildGameDialog::Render(EngineState& state)
 	if (!state.build_output_root.empty() && !trimmed_folder_name.empty())
 	{
 		build_cache_root = std::filesystem::path(state.build_output_root) /
-			GetBuildCacheFolderName(trimmed_folder_name, state.build_target_platform, build_type_index_);
+			GetBuildCacheFolderName(trimmed_folder_name, state.build_target_platform, state.build_target_type);
 	}
 	ImGui::Separator();
 	ImGui::TextWrapped("Staged output folder: %s", stage_root.empty() ? "Pending folder name and build location" : stage_root.generic_string().c_str());
@@ -135,8 +129,8 @@ bool BuildGameDialog::Render(EngineState& state)
 	ImGui::TextWrapped("Window title: %s", state.build_window_title.empty() ? "<defaults to executable name>" : state.build_window_title.c_str());
 	ImGui::TextWrapped("App icon: %s", state.build_app_icon_path.empty() ? "None" : state.build_app_icon_path.generic_string().c_str());
 	ImGui::TextWrapped("Platform: %s", GetBuildPlatformLabel(state.build_target_platform));
-	ImGui::TextWrapped("Configuration: %s", GetBuildTypeLabel(build_type_index_));
-	if (state.build_target_platform == EngineBuildPlatform::Linux && build_type_index_ == 0)
+	ImGui::TextWrapped("Configuration: %s", GetBuildTypeLabel(state.build_target_type));
+	if (state.build_target_platform == EngineBuildPlatform::Linux && state.build_target_type == EngineBuildType::Debug)
 	{
 		ImGui::TextWrapped("Debug build keeps terminal output visible when launched from a terminal.");
 	}
@@ -246,7 +240,7 @@ bool BuildGameDialog::SubmitBuildRequest(EngineState& state)
 	request.window_title = window_title;
 	request.output_root = output_root;
 	request.app_icon_path = app_icon_path;
-	request.build_type = build_type_index_ == 0 ? EngineBuildType::Debug : EngineBuildType::Final;
+	request.build_type = state.build_target_type;
 	request.build_platform = state.build_target_platform;
 	state.QueueBuildRequest(std::move(request));
 	return true;

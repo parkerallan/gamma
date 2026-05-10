@@ -9,7 +9,5 @@ public:
     bool Render(EngineState& state);
 
 private:
-    int build_type_index_ = 0;
-
     bool SubmitBuildRequest(EngineState& state);
 };

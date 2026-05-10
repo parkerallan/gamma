@@ -186,6 +186,14 @@ bool BuildSettingsComponent::Render(EngineState& state)
     changed |= EditStringField("Folder name", state.build_folder_name, kNameCapacity);
     changed |= EditStringField("Window title", state.build_window_title, kTitleCapacity);
 
+    int build_type_index = state.build_target_type == EngineBuildType::Debug ? 0 : 1;
+    const char* build_type_labels[] = {"Debug", "Final"};
+    if (ImGui::Combo("Build type", &build_type_index, build_type_labels, IM_ARRAYSIZE(build_type_labels)))
+    {
+        state.build_target_type = build_type_index == 0 ? EngineBuildType::Debug : EngineBuildType::Final;
+        changed = true;
+    }
+
     int platform_index = state.build_target_platform == EngineBuildPlatform::Windows ? 0 : 1;
     const char* platform_labels[] = {"Windows (MSVC)", "Linux (GCC)"};
     if (ImGui::Combo("Build platform", &platform_index, platform_labels, IM_ARRAYSIZE(platform_labels)))

@@ -29,6 +29,7 @@ void EffectsPanel::Render(EngineState& state)
     static bool preview_playing = false;
     static bool preview_paused = false;
     static int selected_effect_index = 0;
+    static bool effect_dirty = false;
     static int random_seed = 1337;
     static int max_particles = 20000;
     static int burst_count = 120;
@@ -174,6 +175,7 @@ void EffectsPanel::Render(EngineState& state)
     ImGui::Combo("##EffectsSelector", &selected_effect_index, effect_name_ptrs.data(), static_cast<int>(effect_name_ptrs.size()));
     if (selected_effect_index != previous_effect_index)
     {
+        effect_dirty = false;
         if (selected_effect_index == 0)
         {
             if (effect_name[0] == '\0')
@@ -200,64 +202,91 @@ void EffectsPanel::Render(EngineState& state)
         ImGui::EndDisabled();
     }
 
-    ImGui::SameLine();
-    if (ImGui::Button(save_label.c_str()))
     {
-        if (editing_new_effect)
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        const float save_w = ImGui::CalcTextSize(ICON_CI_SAVE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float build_w = ImGui::CalcTextSize(ICON_CI_RUN_WITH_DEPS).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float play_w = ImGui::CalcTextSize(ICON_CI_DEBUG_START).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float toolbar_total = save_w + build_w + play_w + sp * 2.0f;
+        const float cur_x = ImGui::GetCursorPosX();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (effect_dirty)
         {
-            if (state.project_root.empty() || effect_name[0] == '\0')
+            ImGui::SameLine();
+            ImGui::TextDisabled("Unsaved changes");
+        }
+        ImGui::SameLine();
+        if (avail > toolbar_total)
+        {
+            ImGui::SetCursorPosX(cur_x + avail - toolbar_total);
+        }
+        if (ImGui::Button(ICON_CI_SAVE))
+        {
+            if (editing_new_effect)
             {
-                state.AddLog("Cannot create effect: missing project root or effect name");
-            }
-            else
-            {
-                const std::filesystem::path effects_dir = state.project_root / "Assets" / "Effects";
-                std::error_code ec;
-                std::filesystem::create_directories(effects_dir, ec);
-                const std::string created_effect_name = effect_name;
-                const std::filesystem::path new_effect_path = effects_dir / (created_effect_name + ".fx");
-
-                std::ofstream out(new_effect_path, std::ios::binary);
-                if (!out)
+                if (state.project_root.empty() || effect_name[0] == '\0')
                 {
-                    state.AddLog("Failed to create effect: " + state.GetDisplayPath(new_effect_path));
+                    state.AddLog("Cannot create effect: missing project root or effect name");
                 }
                 else
                 {
-                    out << "{\n";
-                    out << "  \"name\": \"" << created_effect_name << "\",\n";
-                    out << "  \"version\": 1\n";
-                    out << "}\n";
-                    out.close();
+                    const std::filesystem::path effects_dir = state.project_root / "Assets" / "Effects";
+                    std::error_code ec;
+                    std::filesystem::create_directories(effects_dir, ec);
+                    const std::string created_effect_name = effect_name;
+                    const std::filesystem::path new_effect_path = effects_dir / (created_effect_name + ".fx");
 
-                    effect_names.push_back(created_effect_name);
-                    effect_paths.push_back(new_effect_path);
-                    selected_effect_index = static_cast<int>(effect_paths.size()) - 1;
-                    effect_name[0] = '\0';
-                    state.request_files_tree_refresh = true;
-                    state.AddLog("Created effect: " + created_effect_name);
+                    std::ofstream out(new_effect_path, std::ios::binary);
+                    if (!out)
+                    {
+                        state.AddLog("Failed to create effect: " + state.GetDisplayPath(new_effect_path));
+                    }
+                    else
+                    {
+                        out << "{\n";
+                        out << "  \"name\": \"" << created_effect_name << "\",\n";
+                        out << "  \"version\": 1\n";
+                        out << "}\n";
+                        out.close();
+
+                        effect_names.push_back(created_effect_name);
+                        effect_paths.push_back(new_effect_path);
+                        selected_effect_index = static_cast<int>(effect_paths.size()) - 1;
+                        effect_name[0] = '\0';
+                        state.request_files_tree_refresh = true;
+                        state.AddLog("Created effect: " + created_effect_name);
+                    }
                 }
-            }
-        }
-        else
-        {
-            const std::filesystem::path active_effect_path = effect_paths[selected_effect_index];
-            std::ofstream out(active_effect_path, std::ios::binary);
-            if (!out)
-            {
-                state.AddLog("Failed to save effect: " + state.GetDisplayPath(active_effect_path));
             }
             else
             {
-                const std::string active_effect_name = active_effect_path.stem().string();
-                out << "{\n";
-                out << "  \"name\": \"" << active_effect_name << "\",\n";
-                out << "  \"version\": 1\n";
-                out << "}\n";
-                out.close();
-                state.AddLog("Saved effect: " + active_effect_name);
+                const std::filesystem::path active_effect_path = effect_paths[selected_effect_index];
+                std::ofstream out(active_effect_path, std::ios::binary);
+                if (!out)
+                {
+                    state.AddLog("Failed to save effect: " + state.GetDisplayPath(active_effect_path));
+                }
+                else
+                {
+                    const std::string active_effect_name = active_effect_path.stem().string();
+                    out << "{\n";
+                    out << "  \"name\": \"" << active_effect_name << "\",\n";
+                    out << "  \"version\": 1\n";
+                    out << "}\n";
+                    out.close();
+                    state.AddLog("Saved effect: " + active_effect_name);
+                    effect_dirty = false;
+                }
             }
         }
+        ImGui::SameLine();
+        if (!state.CanBuildProject()) { ImGui::BeginDisabled(); }
+        if (ImGui::Button(ICON_CI_RUN_WITH_DEPS)) { state.TriggerBuildAction(); }
+        if (!state.CanBuildProject()) { ImGui::EndDisabled(); }
+        ImGui::SameLine();
+        if (!state.CanPlayScene()) { ImGui::BeginDisabled(); }
+        if (ImGui::Button(ICON_CI_DEBUG_START)) { state.TriggerPlayAction(); }
+        if (!state.CanPlayScene()) { ImGui::EndDisabled(); }
     }
 
     const float content_height = ImGui::GetContentRegionAvail().y;

@@ -193,9 +193,9 @@ bool VulkanContext::CreateInstance()
 
     VkApplicationInfo application_info = {};
     application_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    application_info.pApplicationName = "Engine";
+    application_info.pApplicationName = "Gamma";
     application_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
-    application_info.pEngineName = "EngineSkeleton";
+    application_info.pEngineName = "Gamma";
     application_info.engineVersion = VK_MAKE_VERSION(0, 1, 0);
     application_info.apiVersion = VK_API_VERSION_1_3;
 
@@ -389,7 +389,7 @@ namespace
 {
 std::filesystem::path ResolvePipelineCachePath()
 {
-    char* pref = SDL_GetPrefPath("EngineSkeleton", "EngineSkeleton");
+    char* pref = SDL_GetPrefPath("Gamma", "Gamma");
     if (pref == nullptr)
     {
         return std::filesystem::path("vk_pipeline_cache.bin");

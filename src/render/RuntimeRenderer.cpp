@@ -2788,7 +2788,7 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         return true;
     }
 
-    const std::uint64_t mesh_upload_start_ticks = SDL_GetPerformanceCounter();
+    //const std::uint64_t mesh_upload_start_ticks = SDL_GetPerformanceCounter();
 
     ReleaseMeshCacheEntry(cache_entry);
 
@@ -2972,18 +2972,18 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
     cache_entry.index_count = static_cast<std::uint32_t>(indices.size());
     cache_entry.write_time = model_asset_entry.write_time;
 
-    const std::uint64_t freq = SDL_GetPerformanceFrequency();
-    if (freq > 0)
-    {
-        const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);
-        SDL_Log(
-            "Mesh upload '%s': %.2f ms (%zu materials, %u verts, %u indices)",
-            model_path.filename().string().c_str(),
-            upload_ms,
-            model_asset_entry.asset.materials.size(),
-            cache_entry.vertex_count,
-            cache_entry.index_count);
-    }
+    // const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    // if (freq > 0)
+    // {
+    //     const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);
+    //     SDL_Log(
+    //         "Mesh upload '%s': %.2f ms (%zu materials, %u verts, %u indices)",
+    //         model_path.filename().string().c_str(),
+    //         upload_ms,
+    //         model_asset_entry.asset.materials.size(),
+    //         cache_entry.vertex_count,
+    //         cache_entry.index_count);
+    // }
     return true;
 }
 

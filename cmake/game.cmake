@@ -79,10 +79,37 @@ add_custom_target(game_shaders
     DEPENDS ${GAME_SHADER_OUTPUTS}
 )
 
+set(GAME_ICON_RC)
+if(WIN32)
+    # Path to an .ico selected from the engine build dialog. When provided,
+    # we generate a tiny .rc file so the built game.exe has an embedded EXE icon.
+    # This controls Explorer/taskbar executable branding (separate from SDL
+    # runtime window icon, which is still loaded from assets.pak at startup).
+    set(GAME_WINDOWS_ICON_PATH "${GAME_WINDOWS_ICON_PATH}" CACHE STRING "Optional absolute path to game EXE icon (.ico) on Windows")
+
+    if(NOT GAME_WINDOWS_ICON_PATH STREQUAL "")
+        if(EXISTS "${GAME_WINDOWS_ICON_PATH}")
+            get_filename_component(GAME_WINDOWS_ICON_EXT "${GAME_WINDOWS_ICON_PATH}" EXT)
+            string(TOLOWER "${GAME_WINDOWS_ICON_EXT}" GAME_WINDOWS_ICON_EXT_LOWER)
+            if(GAME_WINDOWS_ICON_EXT_LOWER STREQUAL ".ico")
+                file(TO_CMAKE_PATH "${GAME_WINDOWS_ICON_PATH}" GAME_WINDOWS_ICON_PATH_CMAKE)
+                set(GAME_ICON_RC "${CMAKE_CURRENT_BINARY_DIR}/game_icon.rc")
+                file(WRITE "${GAME_ICON_RC}" "IDI_GAME_ICON ICON \"${GAME_WINDOWS_ICON_PATH_CMAKE}\"\n")
+                message(STATUS "Game EXE icon resource enabled: ${GAME_WINDOWS_ICON_PATH}")
+            else()
+                message(WARNING "GAME_WINDOWS_ICON_PATH is not an .ico file: ${GAME_WINDOWS_ICON_PATH} (skipping EXE icon embedding; runtime window icon from assets.pak still works)")
+            endif()
+        else()
+            message(WARNING "GAME_WINDOWS_ICON_PATH does not exist: ${GAME_WINDOWS_ICON_PATH} (building game.exe without embedded icon)")
+        endif()
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Game executable
 # ---------------------------------------------------------------------------
 add_executable(game
+    ${GAME_ICON_RC}
     game/main.cpp
     game/GameApplication.cpp
     src/app/VulkanContext.cpp

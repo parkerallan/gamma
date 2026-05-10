@@ -557,11 +557,12 @@ std::filesystem::path ShowNativeFontImportDialog()
 std::filesystem::path ShowNativeImageImportDialog()
 {
     const COMDLG_FILTERSPEC filters[] = {
-        {L"Images", L"*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.gif;*.psd;*.hdr;*.exr"},
+        {L"Images", L"*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.gif;*.psd;*.hdr;*.exr;*.ico"},
         {L"PNG", L"*.png"},
         {L"JPEG", L"*.jpg;*.jpeg"},
         {L"Targa", L"*.tga"},
         {L"OpenEXR", L"*.exr"},
+        {L"Icon", L"*.ico"},
         {L"Bitmap", L"*.bmp"},
         {L"All Files", L"*.*"},
     };
@@ -980,7 +981,7 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
         return false;
     }
 
-    if (!HasExtension(source_path, {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".psd", ".hdr", ".exr"}))
+    if (!HasExtension(source_path, {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".psd", ".hdr", ".exr", ".ico"}))
     {
         state.AddLog("Cannot import Image: unsupported Image format");
         return false;

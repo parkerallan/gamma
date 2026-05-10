@@ -298,6 +298,7 @@ void AnimatorPanel::Render(EngineState& state)
         }
         else
         {
+            new_controller_name_[0] = '\0';
             EnsureControllerLoaded(controller_paths_[selected_controller_index_], state);
         }
     }
@@ -335,53 +336,72 @@ void AnimatorPanel::Render(EngineState& state)
         ImGui::EndDisabled();
     }
 
-    ImGui::SameLine();
-    const std::string save_label = std::string(ICON_CI_SAVE) + " Save";
-    if (ImGui::Button(save_label.c_str()))
     {
-        if (is_new_controller)
+        const float sp = ImGui::GetStyle().ItemSpacing.x;
+        const float save_w = ImGui::CalcTextSize(ICON_CI_SAVE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float build_w = ImGui::CalcTextSize(ICON_CI_RUN_WITH_DEPS).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float play_w = ImGui::CalcTextSize(ICON_CI_DEBUG_START).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float toolbar_total = save_w + build_w + play_w + sp * 2.0f;
+        const float cur_x = ImGui::GetCursorPosX();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (controller_dirty_)
         {
-            if (!state.project_root.empty() && new_controller_name_[0] != '\0')
+            ImGui::SameLine();
+            ImGui::TextDisabled("Unsaved changes");
+        }
+        ImGui::SameLine();
+        if (avail > toolbar_total)
+        {
+            ImGui::SetCursorPosX(cur_x + avail - toolbar_total);
+        }
+        if (ImGui::Button(ICON_CI_SAVE))
+        {
+            if (is_new_controller)
             {
-                const std::filesystem::path graphs_dir = state.project_root / "Assets" / "Animators";
-                std::error_code ec;
-                std::filesystem::create_directories(graphs_dir, ec);
-
-                controller_.name = new_controller_name_;
-                const std::filesystem::path target_path = graphs_dir / (std::string(new_controller_name_) + ".anim");
-                if (SaveCurrentController(target_path, state))
+                if (!state.project_root.empty() && new_controller_name_[0] != '\0')
                 {
-                    MarkControllerListDirty();
-                    RefreshControllerList(current_animators_dir);
-                    for (int index = 1; index < static_cast<int>(controller_paths_.size()); ++index)
+                    const std::filesystem::path graphs_dir = state.project_root / "Assets" / "Animators";
+                    std::error_code ec;
+                    std::filesystem::create_directories(graphs_dir, ec);
+
+                    controller_.name = new_controller_name_;
+                    const std::filesystem::path target_path = graphs_dir / (std::string(new_controller_name_) + ".anim");
+                    if (SaveCurrentController(target_path, state))
                     {
-                        if (controller_paths_[index] == target_path)
+                        MarkControllerListDirty();
+                        RefreshControllerList(current_animators_dir);
+                        for (int index = 1; index < static_cast<int>(controller_paths_.size()); ++index)
                         {
-                            selected_controller_index_ = index;
-                            break;
+                            if (controller_paths_[index] == target_path)
+                            {
+                                selected_controller_index_ = index;
+                                break;
+                            }
                         }
                     }
                 }
+                else
+                {
+                    state.AddLog("Controller name is required.");
+                }
             }
-            else
+            else if (selected_controller_index_ >= 0 && selected_controller_index_ < static_cast<int>(controller_paths_.size()))
             {
-                state.AddLog("Controller name is required.");
+                if (!controller_.name.empty())
+                {
+                    controller_names_[selected_controller_index_] = controller_.name;
+                }
+                SaveCurrentController(controller_paths_[selected_controller_index_], state);
             }
         }
-        else if (selected_controller_index_ >= 0 && selected_controller_index_ < static_cast<int>(controller_paths_.size()))
-        {
-            if (!controller_.name.empty())
-            {
-                controller_names_[selected_controller_index_] = controller_.name;
-            }
-            SaveCurrentController(controller_paths_[selected_controller_index_], state);
-        }
-    }
-
-    ImGui::SameLine();
-    if (controller_dirty_)
-    {
-        ImGui::TextDisabled("Unsaved changes");
+        ImGui::SameLine();
+        if (!state.CanBuildProject()) { ImGui::BeginDisabled(); }
+        if (ImGui::Button(ICON_CI_RUN_WITH_DEPS)) { state.TriggerBuildAction(); }
+        if (!state.CanBuildProject()) { ImGui::EndDisabled(); }
+        ImGui::SameLine();
+        if (!state.CanPlayScene()) { ImGui::BeginDisabled(); }
+        if (ImGui::Button(ICON_CI_DEBUG_START)) { state.TriggerPlayAction(); }
+        if (!state.CanPlayScene()) { ImGui::EndDisabled(); }
     }
 
     ImGui::Separator();
