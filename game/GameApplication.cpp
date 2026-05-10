@@ -1,5 +1,6 @@
 #include "GameApplication.h"
 
+#include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "vfs/PakArchive.h"
 #include "vfs/AssetVFS.h"
@@ -17,9 +18,13 @@
 #include <filesystem>
 #include <fstream>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -211,6 +216,24 @@ bool GameApplication::ApplyWindowIconFromPak()
 
 bool GameApplication::Init(int argc, char* argv[])
 {
+    const std::uint64_t init_start_ticks = SDL_GetPerformanceCounter();
+    const std::uint64_t perf_freq = SDL_GetPerformanceFrequency();
+    auto ms_since = [perf_freq](std::uint64_t start) -> double
+    {
+        if (perf_freq == 0)
+        {
+            return 0.0;
+        }
+        return static_cast<double>(SDL_GetPerformanceCounter() - start) * 1000.0 / static_cast<double>(perf_freq);
+    };
+    auto stage = [&](const char* name, std::uint64_t& mark)
+    {
+        SDL_Log("Game init [%s]: %.2f ms (cumulative %.2f ms)",
+                name, ms_since(mark), ms_since(init_start_ticks));
+        mark = SDL_GetPerformanceCounter();
+    };
+    std::uint64_t stage_mark = init_start_ticks;
+
     const std::filesystem::path exe_dir = ResolveExeDirectory(argc > 0 ? argv[0] : nullptr);
 
     if (!SDL_Init(SDL_INIT_VIDEO))
@@ -218,16 +241,74 @@ bool GameApplication::Init(int argc, char* argv[])
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return false;
     }
+    stage("SDL_Init", stage_mark);
 
     if (!LoadConfig(exe_dir))
     {
         return false;
     }
+    stage("LoadConfig", stage_mark);
 
     if (!InitializeAssetStreaming(exe_dir))
     {
         return false;
     }
+    stage("InitializeAssetStreaming", stage_mark);
+
+    // Parse the scene now (cheap — ~5 ms) so we can immediately dispatch
+    // per-model Assimp parses on a background thread. They run sequentially
+    // there (the pak reader holds a single file handle and is not safe to
+    // call concurrently), but the whole batch overlaps with
+    // VulkanContext::Initialize (~1.2 s of driver work), which collapses the
+    // dominant startup cost.
+    SceneMetadata preloaded_scene = LoadSceneMetadata(startup_scene_path_);
+    stage("LoadSceneMetadata (early)", stage_mark);
+
+    struct PreloadedModel
+    {
+        std::filesystem::path path;
+        std::filesystem::file_time_type write_time = std::filesystem::file_time_type::min();
+        ModelAsset asset;
+    };
+
+    std::vector<std::filesystem::path> model_paths;
+    {
+        std::unordered_set<std::string> seen;
+        model_paths.reserve(preloaded_scene.objects.size());
+        for (const SceneObjectMetadata& object : preloaded_scene.objects)
+        {
+            if (object.model_path.empty())
+            {
+                continue;
+            }
+            if (!seen.insert(object.model_path).second)
+            {
+                continue;
+            }
+            model_paths.emplace_back(object.model_path);
+        }
+    }
+
+    std::future<std::vector<PreloadedModel>> models_future = std::async(
+        std::launch::async,
+        [model_paths]() -> std::vector<PreloadedModel>
+        {
+            std::vector<PreloadedModel> out;
+            out.reserve(model_paths.size());
+            for (const std::filesystem::path& model_path : model_paths)
+            {
+                PreloadedModel result;
+                result.path = model_path;
+                std::error_code ec;
+                const auto wt = std::filesystem::last_write_time(model_path, ec);
+                result.write_time = ec ? std::filesystem::file_time_type::min() : wt;
+                result.asset = LoadModelAsset(model_path);
+                out.push_back(std::move(result));
+            }
+            return out;
+        });
+    SDL_Log("Game init: dispatched %zu model preload(s) on background thread",
+            model_paths.size());
 
     const SDL_WindowFlags window_flags =
         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
@@ -248,6 +329,7 @@ bool GameApplication::Init(int argc, char* argv[])
         SDL_Log("VulkanContext::Initialize failed");
         return false;
     }
+    stage("VulkanContext::Initialize", stage_mark);
 
     // Minimal ImGui init — required because VulkanContext uses ImGui data
     // structures for swapchain resource management. No ImGui widgets are shown.
@@ -272,15 +354,17 @@ bool GameApplication::Init(int argc, char* argv[])
     init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     init_info.CheckVkResultFn = VulkanContext::CheckVkResult;
     ImGui_ImplVulkan_Init(&init_info);
+    stage("ImGui_ImplVulkan_Init", stage_mark);
 
     if (!renderer_.Initialize(&vulkan_context_))
     {
         SDL_Log("RuntimeRenderer::Initialize failed");
         return false;
     }
+    stage("RuntimeRenderer::Initialize", stage_mark);
 
     const std::filesystem::path scene_path = startup_scene_path_;
-    const SceneMetadata scene_metadata = LoadSceneMetadata(scene_path);
+    SceneMetadata scene_metadata = std::move(preloaded_scene);
     const ActiveSceneCameraSelection camera = FindActiveSceneCamera(scene_metadata);
 
     std::string start_error;
@@ -289,10 +373,29 @@ bool GameApplication::Init(int argc, char* argv[])
         SDL_Log("RuntimeRenderer::StartSession failed: %s", start_error.c_str());
         return false;
     }
+    stage("RuntimeRenderer::StartSession", stage_mark);
+
+    // Hand the seeded scene + preloaded models to the renderer so the first
+    // RenderFrame skips Assimp parsing and metadata I/O entirely.
+    renderer_.SeedSceneMetadata(scene_path, scene_metadata);
+    std::vector<PreloadedModel> preloaded_models = models_future.get();
+    std::size_t seeded_models = 0;
+    for (PreloadedModel& model : preloaded_models)
+    {
+        if (!model.asset.loaded)
+        {
+            continue;
+        }
+        renderer_.SeedModelAsset(model.path, model.write_time, std::move(model.asset));
+        ++seeded_models;
+    }
+    stage("Wait+seed preloaded models", stage_mark);
+    SDL_Log("Game init: seeded %zu preloaded model(s) into runtime cache", seeded_models);
 
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window_);
     running_ = true;
+    SDL_Log("Game init total: %.2f ms (window now visible; first RenderFrame next)", ms_since(init_start_ticks));
     return true;
 }
 

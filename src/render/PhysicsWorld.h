@@ -5,10 +5,13 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+struct ModelAsset;
 
 // Forward declarations — callers don't need Jolt headers
 namespace JPH
@@ -56,10 +59,14 @@ public:
     bool Initialize(std::string* error_message = nullptr);
     void Shutdown();
 
-    // Called at the start of a play session — populates bodies from scene metadata
+    // Called at the start of a play session — populates bodies from scene metadata.
+    // model_resolver, if provided, returns a cached ModelAsset* for a given absolute
+    // model path so PhysicsWorld doesn't re-parse meshes via Assimp on every rebuild.
+    using ModelAssetResolver = std::function<const ModelAsset*(const std::filesystem::path&)>;
     void BuildFromScene(const SceneMetadata& scene_metadata,
                         const std::unordered_map<std::string, std::array<float, 16>>& world_matrices,
-                        const std::filesystem::path& project_root = {});
+                        const std::filesystem::path& project_root = {},
+                        const ModelAssetResolver& model_resolver = {});
 
     // Step the simulation. delta_time is clamped to a sane maximum.
     void Step(float delta_time);

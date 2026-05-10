@@ -35,6 +35,8 @@ public:
         float animation_time_ms = 0.0f;
         float audio_time_ms = 0.0f;
         float video_time_ms = 0.0f;
+        float gpu_time_ms = 0.0f;
+        float cpu_time_ms = 0.0f;
     };
 
     bool Initialize(VulkanContext* context);
@@ -45,6 +47,14 @@ public:
         const ActiveSceneCameraSelection& active_camera,
         std::string* error_message = nullptr);
     bool RenderFrame(std::uint32_t target_width, std::uint32_t target_height, std::string* error_message = nullptr);
+
+    // Editor->runtime hand-off: pre-populate caches so the first runtime frame
+    // doesn't pay the Assimp + scene-text parse cost again. Call AFTER
+    // StartSession() (which clears these caches for the incoming scene path).
+    void SeedSceneMetadata(const std::filesystem::path& scene_path, SceneMetadata metadata);
+    void SeedModelAsset(const std::filesystem::path& absolute_model_path,
+                        std::filesystem::file_time_type write_time,
+                        ModelAsset asset);
 
     VkImage GetOutputImage() const { return ray_tracing_.GetOutputImage(); }
     VkImageLayout GetOutputLayout() const { return ray_tracing_.GetOutputLayout(); }
@@ -369,7 +379,7 @@ private:
         std::array<float, 16>& projection_inverse,
         ResolvedSceneLighting& lighting,
         std::string* error_message);
-    bool SyncRayTracingScene(std::string* error_message);
+    bool SyncRayTracingScene(std::string* error_message, float* out_skinning_ms = nullptr);
 
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
@@ -423,4 +433,5 @@ private:
     std::vector<QueuedSceneObject> queued_objects_;
     std::string pending_scene_load_path_;
     RuntimePerformanceStats performance_stats_{};
+    bool first_frame_logged_ = false;
 };

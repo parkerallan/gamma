@@ -741,7 +741,32 @@ bool EngineApplication::StartRuntimeSession()
         return false;
     }
 
-    const SceneMetadata scene_metadata = LoadSceneMetadata(state_.active_scene_path);
+    const std::uint64_t play_start_ticks = SDL_GetPerformanceCounter();
+    const std::uint64_t perf_freq = SDL_GetPerformanceFrequency();
+    auto ms_since = [&](std::uint64_t start) -> double
+    {
+        if (perf_freq == 0)
+        {
+            return 0.0;
+        }
+        return static_cast<double>(SDL_GetPerformanceCounter() - start) * 1000.0 / static_cast<double>(perf_freq);
+    };
+
+    // The editor preloads scene metadata (and all referenced models) on a
+    // worker thread the first time the Scene tab is shown. If that load is
+    // still in flight when the user clicks Play, block on it now so we can
+    // hand its results to the runtime renderer instead of re-parsing.
+    workspace_panel_.WaitForPendingViewportLoad(state_);
+
+    SceneMetadata scene_metadata;
+    if (const SceneMetadata* cached = workspace_panel_.TryGetCachedSceneMetadata(state_.active_scene_path))
+    {
+        scene_metadata = *cached;
+    }
+    else
+    {
+        scene_metadata = LoadSceneMetadata(state_.active_scene_path);
+    }
     if (!scene_metadata.parsed)
     {
         state_.SetPlayError(scene_metadata.error_message.empty() ? "Failed to load active scene for Play" : scene_metadata.error_message);
@@ -801,6 +826,23 @@ bool EngineApplication::StartRuntimeSession()
         state_.SetPlayError(runtime_error.empty() ? "Failed to start runtime renderer session" : runtime_error);
         return false;
     }
+
+    // Hand the editor's already-parsed scene metadata + model assets to the
+    // runtime so the first runtime frame skips Assimp / scene-text parses.
+    runtime_renderer_.SeedSceneMetadata(state_.active_scene_path, scene_metadata);
+    std::size_t seeded_count = 0;
+    for (const auto& [model_path, entry] : workspace_panel_.GetCachedModelAssets())
+    {
+        if (entry.asset.loaded)
+        {
+            runtime_renderer_.SeedModelAsset(model_path, entry.write_time, entry.asset);
+            ++seeded_count;
+        }
+    }
+    SDL_Log(
+        "Play start: %.2f ms total, seeded scene + %zu models from editor cache",
+        ms_since(play_start_ticks),
+        seeded_count);
 
     SDL_SetWindowPosition(runtime_window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(runtime_window_);

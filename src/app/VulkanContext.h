@@ -94,6 +94,8 @@ private:
     bool PickPhysicalDevice();
     bool CreateDevice();
     bool CreateDescriptorPool();
+    bool CreatePipelineCache();
+    void SavePipelineCache();
     bool CreateSurface(SDL_Window* window);
     bool CreateSurface(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data);
     void SetupWindowData(SDL_Window* window);

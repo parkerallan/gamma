@@ -36,6 +36,21 @@ public:
     bool SaveOpenGraph(EngineState& state);
     bool ReloadOpenGraph(EngineState& state);
 
+    // Hand-off accessors for Play / build flows. The editor already parses
+    // scene metadata and all referenced models on a worker thread the first
+    // time the Scene tab is shown; exposing those caches lets the runtime
+    // skip a redundant Assimp + scene-text parse on play.
+    const SceneMetadata* TryGetCachedSceneMetadata(const std::filesystem::path& scene_path) const;
+    const std::unordered_map<std::filesystem::path, CachedModelAssetEntry>& GetCachedModelAssets() const
+    {
+        return model_asset_cache_;
+    }
+    // Block until any pending async scene preload finishes (bounded by the
+    // worker thread's parse time) AND consume the result into the cache so
+    // GetCachedModelAssets / TryGetCachedSceneMetadata see it. No-op when no
+    // load is pending.
+    void WaitForPendingViewportLoad(EngineState& state);
+
 private:
     struct AsyncViewportLoadResult
     {
@@ -58,6 +73,7 @@ private:
     std::filesystem::path pending_viewport_scene_path_;
     std::filesystem::file_time_type pending_viewport_scene_write_time_{};
     bool viewport_load_in_progress_ = false;
+    std::uint64_t pending_viewport_load_dispatch_ticks_ = 0;
 
     const CachedModelAssetEntry& GetModelAssetEntry(const std::filesystem::path& path);
     const SceneMetadata& GetSceneMetadata(const std::filesystem::path& path);

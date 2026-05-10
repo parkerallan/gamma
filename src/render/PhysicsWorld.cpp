@@ -330,7 +330,8 @@ void PhysicsWorld::Shutdown()
 void PhysicsWorld::BuildFromScene(
     const SceneMetadata& scene_metadata,
     const std::unordered_map<std::string, std::array<float, 16>>& world_matrices,
-    const std::filesystem::path& project_root)
+    const std::filesystem::path& project_root,
+    const ModelAssetResolver& model_resolver)
 {
     if (!initialized_)
     {
@@ -416,18 +417,36 @@ void PhysicsWorld::BuildFromScene(
                 continue;
             }
 
-            ModelAsset model_asset = LoadModelAsset(object.model_path);
-            if (!model_asset.loaded)
+            // Prefer a caller-supplied resolver (e.g. RuntimeRenderer's model cache)
+            // to avoid reparsing the same model with Assimp on every physics rebuild.
+            const std::filesystem::path rooted_model_path = project_root.empty()
+                ? std::filesystem::path(object.model_path)
+                : (project_root / object.model_path);
+
+            const ModelAsset* resolved_asset = nullptr;
+            ModelAsset owned_asset;
+            if (model_resolver)
             {
-                const std::filesystem::path rooted_model_path = project_root.empty()
-                    ? std::filesystem::path(object.model_path)
-                    : (project_root / object.model_path);
-                model_asset = LoadModelAsset(rooted_model_path);
+                resolved_asset = model_resolver(rooted_model_path);
+                if (resolved_asset == nullptr || !resolved_asset->loaded)
+                {
+                    resolved_asset = model_resolver(object.model_path);
+                }
             }
-            if (!model_asset.loaded)
+            if (resolved_asset == nullptr || !resolved_asset->loaded)
             {
-                continue;
+                owned_asset = LoadModelAsset(object.model_path);
+                if (!owned_asset.loaded)
+                {
+                    owned_asset = LoadModelAsset(rooted_model_path);
+                }
+                if (!owned_asset.loaded)
+                {
+                    continue;
+                }
+                resolved_asset = &owned_asset;
             }
+            const ModelAsset& model_asset = *resolved_asset;
 
             const float sx = std::abs(world_scale[0]);
             const float sy = std::abs(world_scale[1]);

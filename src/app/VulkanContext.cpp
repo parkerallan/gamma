@@ -1,10 +1,17 @@
 #include "app/VulkanContext.h"
 
+#include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_log.h>
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <vector>
 
 namespace
 {
@@ -99,6 +106,10 @@ bool VulkanContext::Initialize(SDL_Window* window)
         return false;
     }
 
+    // Pipeline cache is best-effort: failure here just means cold pipeline
+    // compiles on every run, so don't fail Initialize if it can't be made.
+    CreatePipelineCache();
+
     SetupWindowData(window);
     return main_window_data_.Surface != VK_NULL_HANDLE && main_window_data_.RenderPass != VK_NULL_HANDLE;
 }
@@ -116,6 +127,7 @@ void VulkanContext::Shutdown()
 
     if (pipeline_cache_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE)
     {
+        SavePipelineCache();
         vkDestroyPipelineCache(device_, pipeline_cache_, allocator_);
         pipeline_cache_ = VK_NULL_HANDLE;
     }
@@ -371,6 +383,126 @@ bool VulkanContext::CreateDescriptorPool()
     const VkResult result = vkCreateDescriptorPool(device_, &pool_info, allocator_, &descriptor_pool_);
     CheckVkResult(result);
     return result == VK_SUCCESS;
+}
+
+namespace
+{
+std::filesystem::path ResolvePipelineCachePath()
+{
+    char* pref = SDL_GetPrefPath("EngineSkeleton", "EngineSkeleton");
+    if (pref == nullptr)
+    {
+        return std::filesystem::path("vk_pipeline_cache.bin");
+    }
+    std::filesystem::path path = std::filesystem::path(pref) / "vk_pipeline_cache.bin";
+    SDL_free(pref);
+    return path;
+}
+
+bool PipelineCacheHeaderMatches(
+    const std::vector<std::uint8_t>& blob,
+    const VkPhysicalDeviceProperties& props)
+{
+    // VkPipelineCacheHeader (Vulkan spec): 16-byte header [length, version, vendor, device, uuid].
+    if (blob.size() < 32)
+    {
+        return false;
+    }
+    std::uint32_t header_length = 0;
+    std::uint32_t header_version = 0;
+    std::uint32_t vendor_id = 0;
+    std::uint32_t device_id = 0;
+    std::memcpy(&header_length, blob.data() + 0, sizeof(std::uint32_t));
+    std::memcpy(&header_version, blob.data() + 4, sizeof(std::uint32_t));
+    std::memcpy(&vendor_id, blob.data() + 8, sizeof(std::uint32_t));
+    std::memcpy(&device_id, blob.data() + 12, sizeof(std::uint32_t));
+    if (header_length < 32 || header_version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE)
+    {
+        return false;
+    }
+    if (vendor_id != props.vendorID || device_id != props.deviceID)
+    {
+        return false;
+    }
+    return std::memcmp(blob.data() + 16, props.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+}
+}
+
+bool VulkanContext::CreatePipelineCache()
+{
+    if (device_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    std::vector<std::uint8_t> initial_data;
+    {
+        const std::filesystem::path cache_path = ResolvePipelineCachePath();
+        std::ifstream input(cache_path, std::ios::binary);
+        if (input)
+        {
+            initial_data.assign(
+                std::istreambuf_iterator<char>(input),
+                std::istreambuf_iterator<char>());
+        }
+    }
+
+    // Reject blobs that don't match this device — passing a mismatched cache
+    // is allowed by the spec but wastes time and risks driver bugs.
+    if (!initial_data.empty() && physical_device_ != VK_NULL_HANDLE)
+    {
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(physical_device_, &props);
+        if (!PipelineCacheHeaderMatches(initial_data, props))
+        {
+            initial_data.clear();
+        }
+    }
+
+    VkPipelineCacheCreateInfo create_info = {};
+    create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    create_info.initialDataSize = initial_data.size();
+    create_info.pInitialData = initial_data.empty() ? nullptr : initial_data.data();
+
+    const VkResult result = vkCreatePipelineCache(device_, &create_info, allocator_, &pipeline_cache_);
+    if (result != VK_SUCCESS)
+    {
+        pipeline_cache_ = VK_NULL_HANDLE;
+        CheckVkResult(result);
+        return false;
+    }
+    return true;
+}
+
+void VulkanContext::SavePipelineCache()
+{
+    if (device_ == VK_NULL_HANDLE || pipeline_cache_ == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    std::size_t blob_size = 0;
+    if (vkGetPipelineCacheData(device_, pipeline_cache_, &blob_size, nullptr) != VK_SUCCESS || blob_size == 0)
+    {
+        return;
+    }
+
+    std::vector<std::uint8_t> blob(blob_size);
+    if (vkGetPipelineCacheData(device_, pipeline_cache_, &blob_size, blob.data()) != VK_SUCCESS)
+    {
+        return;
+    }
+    blob.resize(blob_size);
+
+    const std::filesystem::path cache_path = ResolvePipelineCachePath();
+    std::error_code ec;
+    std::filesystem::create_directories(cache_path.parent_path(), ec);
+    std::ofstream output(cache_path, std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        return;
+    }
+    output.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
 }
 
 bool VulkanContext::CreateSurface(SDL_Window* window)

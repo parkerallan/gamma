@@ -1736,6 +1736,7 @@ bool RayTracing::EnsurePipelineResources()
 
     if (pipeline_ == VK_NULL_HANDLE)
     {
+        const std::uint64_t pipeline_start_ticks = SDL_GetPerformanceCounter();
         VkShaderModule raygen_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt.rgen.spv"));
         VkShaderModule miss_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt.rmiss.spv"));
         VkShaderModule shadow_miss_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_shadow.rmiss.spv"));
@@ -1841,7 +1842,7 @@ bool RayTracing::EnsurePipelineResources()
         VkResult result = vulkan_context_->GetRayTracingDispatch().create_ray_tracing_pipelines(
             device,
             VK_NULL_HANDLE,
-            VK_NULL_HANDLE,
+            vulkan_context_->GetPipelineCache(),
             1,
             &pipeline_info,
             allocator,
@@ -1869,6 +1870,15 @@ bool RayTracing::EnsurePipelineResources()
         {
             status_message_ = "Failed to build viewport RT shader binding table";
             return false;
+        }
+
+        const std::uint64_t pipeline_end_ticks = SDL_GetPerformanceCounter();
+        const std::uint64_t freq = SDL_GetPerformanceFrequency();
+        if (freq > 0)
+        {
+            SDL_Log(
+                "RayTracing: built ray-tracing pipeline + SBT in %.2f ms (one-time, cached on disk by VkPipelineCache)",
+                static_cast<double>(pipeline_end_ticks - pipeline_start_ticks) * 1000.0 / static_cast<double>(freq));
         }
     }
 
@@ -1945,7 +1955,7 @@ bool RayTracing::EnsurePipelineResources()
         compute_info.stage.module = fxaa_shader;
         compute_info.stage.pName = "main";
 
-        VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compute_info, allocator, &fxaa_pipeline_);
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &compute_info, allocator, &fxaa_pipeline_);
         VulkanContext::CheckVkResult(result);
         vkDestroyShaderModule(device, fxaa_shader, allocator);
         if (result != VK_SUCCESS)

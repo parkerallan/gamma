@@ -13,6 +13,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include <SDL3/SDL_log.h>
+#include <SDL3/SDL_timer.h>
+
+#include <stb_image.h>
+
+#include <nlohmann/json.hpp>
+
 #include <stb_image.h>
 
 #include <algorithm>
@@ -1152,6 +1159,8 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
         return asset;
     }
 
+    const std::uint64_t parse_start_ticks = SDL_GetPerformanceCounter();
+
     Assimp::Importer importer;
     const unsigned int import_flags =
         aiProcess_Triangulate |
@@ -1445,5 +1454,18 @@ ModelAsset LoadModelAsset(const std::filesystem::path& path)
     AppendNodeMeshes(scene, scene->mRootNode, aiMatrix4x4(), asset);
 
     asset.loaded = true;
+
+    const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    if (freq > 0)
+    {
+        const double parse_ms = static_cast<double>(SDL_GetPerformanceCounter() - parse_start_ticks) * 1000.0 / static_cast<double>(freq);
+        SDL_Log(
+            "ModelAsset parse '%s': %.2f ms (%zu meshes, %zu materials)",
+            path.filename().string().c_str(),
+            parse_ms,
+            asset.meshes.size(),
+            asset.materials.size());
+    }
+
     return asset;
 }

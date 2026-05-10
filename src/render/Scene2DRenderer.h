@@ -27,13 +27,18 @@ public:
 
     // Composite all Text2D and Image2D attributes from scene_metadata onto
     // target_image. Paths in attributes are relative to project_root.
+    // If out_gpu_wait_ms is non-null, the time spent in vkWaitForFences after
+    // submitting the overlay command buffer is written to it. Callers can
+    // reattribute that wait (which can stall on previously queued GPU work
+    // such as ray tracing) away from the 2D subsystem timing.
     void CompositeOverlay(
         const SceneMetadata& scene_metadata,
         const std::filesystem::path& project_root,
         VkImage target_image,
         VkImageView target_view,
         std::uint32_t width,
-        std::uint32_t height);
+        std::uint32_t height,
+        float* out_gpu_wait_ms = nullptr);
 
     // Returns the effective rendered width/height for a Text2D attribute.
     // If lock_aspect_ratio is disabled, size reflects rasterized text bounds.

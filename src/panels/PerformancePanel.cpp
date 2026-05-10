@@ -192,12 +192,23 @@ void PerformancePanel::Render(EngineState& state, const RuntimeRenderer& runtime
         {"Scripts", &scripts_ms_history_, &show_scripts_, IM_COL32(150, 255, 160, 255), true},
         {"Render", &render_ms_history_, &show_render_, IM_COL32(255, 150, 120, 255), true},
         {"2D", &overlay_2d_ms_history_, &show_2d_, IM_COL32(205, 160, 255, 255), true},
-        {"Animation", &animation_ms_history_, &show_animation_, IM_COL32(255, 196, 92, 180), false},
+        {"Animation", &animation_ms_history_, &show_animation_, IM_COL32(255, 196, 92, 180), true},
         {"Audio", &audio_ms_history_, &show_audio_, IM_COL32(255, 120, 190, 180), false},
         {"Video", &video_ms_history_, &show_video_, IM_COL32(180, 180, 180, 180), false},
     }};
     const float subsystem_graph_max = (std::max)(FindVisibleHistoryMax(subsystem_series, 12) * 1.10f, 0.001f);
     DrawOverlayGraph("SubsystemTimingGraph", subsystem_series, subsystem_graph_max, "ms");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Frame CPU vs GPU (ms)");
+
+    const std::array<GraphSeries, 2> cpu_gpu_series = {{
+        {"CPU", &cpu_ms_history_, nullptr, IM_COL32(120, 214, 255, 255), true},
+        {"GPU", &gpu_ms_history_, nullptr, IM_COL32(255, 196, 92, 255), true},
+    }};
+    const float cpu_gpu_graph_max = (std::max)(FindVisibleHistoryMax(cpu_gpu_series, 12) * 1.10f, 0.001f);
+    DrawOverlayGraph("CpuGpuGraph", cpu_gpu_series, cpu_gpu_graph_max, "ms");
+    ImGui::Text("Latest: CPU %.3f ms | GPU %.3f ms", stats.cpu_time_ms, stats.gpu_time_ms);
 
     ImGui::Separator();
     ImGui::TextUnformatted("Subsystem Filters");
@@ -265,6 +276,8 @@ void PerformancePanel::PushSample(const RuntimeRenderer::RuntimePerformanceStats
     animation_accumulator_ += (std::max)(stats.animation_time_ms, 0.0f);
     audio_accumulator_ += (std::max)(stats.audio_time_ms, 0.0f);
     video_accumulator_ += (std::max)(stats.video_time_ms, 0.0f);
+    cpu_accumulator_ += (std::max)(stats.cpu_time_ms, 0.0f);
+    gpu_accumulator_ += (std::max)(stats.gpu_time_ms, 0.0f);
 
     if (sample_window_seconds_ < kSampleIntervalSeconds || sample_window_count_ == 0)
     {
@@ -280,6 +293,8 @@ void PerformancePanel::PushSample(const RuntimeRenderer::RuntimePerformanceStats
     AppendWithCapacity(animation_ms_history_, animation_accumulator_ * inv_count, kHistoryCapacity);
     AppendWithCapacity(audio_ms_history_, audio_accumulator_ * inv_count, kHistoryCapacity);
     AppendWithCapacity(video_ms_history_, video_accumulator_ * inv_count, kHistoryCapacity);
+    AppendWithCapacity(cpu_ms_history_, cpu_accumulator_ * inv_count, kHistoryCapacity);
+    AppendWithCapacity(gpu_ms_history_, gpu_accumulator_ * inv_count, kHistoryCapacity);
 
     sample_window_seconds_ = 0.0f;
     sample_window_count_ = 0;
@@ -291,6 +306,8 @@ void PerformancePanel::PushSample(const RuntimeRenderer::RuntimePerformanceStats
     animation_accumulator_ = 0.0f;
     audio_accumulator_ = 0.0f;
     video_accumulator_ = 0.0f;
+    cpu_accumulator_ = 0.0f;
+    gpu_accumulator_ = 0.0f;
 }
 
 void PerformancePanel::ClearHistory()
@@ -303,6 +320,8 @@ void PerformancePanel::ClearHistory()
     animation_ms_history_.clear();
     audio_ms_history_.clear();
     video_ms_history_.clear();
+    cpu_ms_history_.clear();
+    gpu_ms_history_.clear();
 
     sample_window_seconds_ = 0.0f;
     sample_window_count_ = 0;
@@ -314,4 +333,6 @@ void PerformancePanel::ClearHistory()
     animation_accumulator_ = 0.0f;
     audio_accumulator_ = 0.0f;
     video_accumulator_ = 0.0f;
+    cpu_accumulator_ = 0.0f;
+    gpu_accumulator_ = 0.0f;
 }

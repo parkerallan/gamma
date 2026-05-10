@@ -1531,6 +1531,174 @@ void TransitionImageLayout(
         &barrier);
 }
 
+// Batched immediate texture upload --------------------------------------
+//
+// CreateTextureFromAsset opens a command buffer, submits, and waits once per
+// call. Loading a single PBR mesh fires up to ~16 of those round-trips per
+// material, which dominates scene-load wall time. The helpers below let the
+// caller stage all GPU resources up front and then flush every transfer
+// through ONE ExecuteImmediateCommands call.
+
+struct PreparedTextureUpload
+{
+    SceneViewportRenderer::GpuBuffer staging_buffer{};
+    VkImage image = VK_NULL_HANDLE;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
+bool PrepareTextureUpload(
+    VulkanContext& context,
+    const ModelTextureAsset& texture_asset,
+    SceneViewportRenderer::GpuTexture& out_texture,
+    PreparedTextureUpload& out_pending)
+{
+    if (!texture_asset.valid ||
+        texture_asset.width <= 0 ||
+        texture_asset.height <= 0 ||
+        texture_asset.pixels.empty())
+    {
+        return false;
+    }
+
+    const VkDevice device = context.GetDevice();
+    const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
+    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) *
+        static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+
+    if (!CreateVulkanBuffer(
+            context,
+            upload_size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            out_pending.staging_buffer))
+    {
+        return false;
+    }
+
+    if (!UploadBufferData(device, out_pending.staging_buffer, texture_asset.pixels.data(), static_cast<std::size_t>(upload_size)))
+    {
+        vkFreeMemory(device, out_pending.staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, out_pending.staging_buffer.buffer, context.GetAllocator());
+        out_pending.staging_buffer = {};
+        return false;
+    }
+
+    if (!CreateVulkanImage(
+            physical_device,
+            device,
+            static_cast<std::uint32_t>(texture_asset.width),
+            static_cast<std::uint32_t>(texture_asset.height),
+            texture_format,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            out_texture.image,
+            out_texture.memory,
+            out_texture.view))
+    {
+        vkFreeMemory(device, out_pending.staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, out_pending.staging_buffer.buffer, context.GetAllocator());
+        out_pending.staging_buffer = {};
+        return false;
+    }
+
+    out_pending.image = out_texture.image;
+    out_pending.width = static_cast<std::uint32_t>(texture_asset.width);
+    out_pending.height = static_cast<std::uint32_t>(texture_asset.height);
+    return true;
+}
+
+void RecordPreparedTextureUpload(VkCommandBuffer command_buffer, const PreparedTextureUpload& pending)
+{
+    TransitionImageLayout(
+        command_buffer,
+        pending.image,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT);
+
+    VkBufferImageCopy copy_region = {};
+    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.imageSubresource.layerCount = 1;
+    copy_region.imageExtent.width = pending.width;
+    copy_region.imageExtent.height = pending.height;
+    copy_region.imageExtent.depth = 1;
+
+    vkCmdCopyBufferToImage(
+        command_buffer,
+        pending.staging_buffer.buffer,
+        pending.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copy_region);
+
+    TransitionImageLayout(
+        command_buffer,
+        pending.image,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT);
+}
+
+void ReleasePreparedTextureUploads(VulkanContext& context, std::vector<PreparedTextureUpload>& uploads)
+{
+    const VkDevice device = context.GetDevice();
+    const VkAllocationCallbacks* allocator = context.GetAllocator();
+    for (PreparedTextureUpload& pending : uploads)
+    {
+        if (pending.staging_buffer.memory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, pending.staging_buffer.memory, allocator);
+        }
+        if (pending.staging_buffer.buffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(device, pending.staging_buffer.buffer, allocator);
+        }
+        pending = {};
+    }
+    uploads.clear();
+}
+
+bool FlushPreparedTextureUploads(
+    VulkanContext& context,
+    VkCommandPool command_pool,
+    std::vector<PreparedTextureUpload>& uploads)
+{
+    if (uploads.empty())
+    {
+        return true;
+    }
+    if (command_pool == VK_NULL_HANDLE)
+    {
+        ReleasePreparedTextureUploads(context, uploads);
+        return false;
+    }
+
+    const bool ok = ExecuteImmediateCommands(
+        context.GetDevice(),
+        command_pool,
+        context.GetQueue(),
+        [&](VkCommandBuffer command_buffer)
+        {
+            for (const PreparedTextureUpload& pending : uploads)
+            {
+                RecordPreparedTextureUpload(command_buffer, pending);
+            }
+        });
+
+    ReleasePreparedTextureUploads(context, uploads);
+    return ok;
+}
+
 bool CreateTextureFromAsset(
     VulkanContext& context,
     VkCommandPool command_pool,
@@ -2283,6 +2451,8 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         return true;
     }
 
+    const std::uint64_t mesh_upload_start_ticks = SDL_GetPerformanceCounter();
+
     ReleaseMeshCacheEntry(cache_entry);
 
     std::vector<SceneGpuVertex> vertices;
@@ -2292,6 +2462,23 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
 
     cache_entry.material_textures.resize(resolved_model.asset->materials.size());
     cache_entry.materials.resize(resolved_model.asset->materials.size());
+
+    // Stage every material texture into a single immediate command buffer so a
+    // PBR mesh costs ONE GPU round-trip (was up to 16 per material).
+    std::vector<PreparedTextureUpload> pending_uploads;
+    pending_uploads.reserve(resolved_model.asset->materials.size() * 16);
+    auto stage_texture = [&](const ModelTextureAsset& asset, SceneViewportRenderer::GpuTexture& out_texture)
+    {
+        if (!asset.valid)
+        {
+            return;
+        }
+        PreparedTextureUpload pending;
+        if (PrepareTextureUpload(*vulkan_context_, asset, out_texture, pending))
+        {
+            pending_uploads.push_back(std::move(pending));
+        }
+    };
     for (std::size_t material_index = 0; material_index < resolved_model.asset->materials.size(); ++material_index)
     {
         const ModelMaterialAsset& material = resolved_model.asset->materials[material_index];
@@ -2320,134 +2507,22 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         cache_entry.materials[material_index].alpha_cutoff = material.alpha_cutoff;
         cache_entry.materials[material_index].alpha_mode = static_cast<std::uint32_t>(material.alpha_mode);
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
-        if (material.base_color_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.base_color_texture,
-                cache_entry.material_textures[material_index].base_color);
-        }
-        if (material.metallic_roughness_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.metallic_roughness_texture,
-                cache_entry.material_textures[material_index].metallic_roughness);
-        }
-        if (material.normal_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.normal_texture,
-                cache_entry.material_textures[material_index].normal);
-        }
-        if (material.occlusion_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.occlusion_texture,
-                cache_entry.material_textures[material_index].occlusion);
-        }
-        if (material.emissive_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.emissive_texture,
-                cache_entry.material_textures[material_index].emissive);
-        }
-        if (material.transmission_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.transmission_texture,
-                cache_entry.material_textures[material_index].transmission);
-        }
-        if (material.specular_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.specular_texture,
-                cache_entry.material_textures[material_index].specular);
-        }
-        if (material.specular_color_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.specular_color_texture,
-                cache_entry.material_textures[material_index].specular_color);
-        }
-        if (material.sheen_color_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.sheen_color_texture,
-                cache_entry.material_textures[material_index].sheen_color);
-        }
-        if (material.sheen_roughness_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.sheen_roughness_texture,
-                cache_entry.material_textures[material_index].sheen_roughness);
-        }
-        if (material.iridescence_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.iridescence_texture,
-                cache_entry.material_textures[material_index].iridescence);
-        }
-        if (material.iridescence_thickness_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.iridescence_thickness_texture,
-                cache_entry.material_textures[material_index].iridescence_thickness);
-        }
-        if (material.volume_thickness_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.volume_thickness_texture,
-                cache_entry.material_textures[material_index].volume_thickness);
-        }
-        if (material.clearcoat_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.clearcoat_texture,
-                cache_entry.material_textures[material_index].clearcoat);
-        }
-        if (material.clearcoat_roughness_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.clearcoat_roughness_texture,
-                cache_entry.material_textures[material_index].clearcoat_roughness);
-        }
-        if (material.clearcoat_normal_texture.valid)
-        {
-            CreateTextureFromAsset(
-                *vulkan_context_,
-                ray_tracing_.GetCommandPool(),
-                material.clearcoat_normal_texture,
-                cache_entry.material_textures[material_index].clearcoat_normal);
-        }
+        stage_texture(material.base_color_texture, cache_entry.material_textures[material_index].base_color);
+        stage_texture(material.metallic_roughness_texture, cache_entry.material_textures[material_index].metallic_roughness);
+        stage_texture(material.normal_texture, cache_entry.material_textures[material_index].normal);
+        stage_texture(material.occlusion_texture, cache_entry.material_textures[material_index].occlusion);
+        stage_texture(material.emissive_texture, cache_entry.material_textures[material_index].emissive);
+        stage_texture(material.transmission_texture, cache_entry.material_textures[material_index].transmission);
+        stage_texture(material.specular_texture, cache_entry.material_textures[material_index].specular);
+        stage_texture(material.specular_color_texture, cache_entry.material_textures[material_index].specular_color);
+        stage_texture(material.sheen_color_texture, cache_entry.material_textures[material_index].sheen_color);
+        stage_texture(material.sheen_roughness_texture, cache_entry.material_textures[material_index].sheen_roughness);
+        stage_texture(material.iridescence_texture, cache_entry.material_textures[material_index].iridescence);
+        stage_texture(material.iridescence_thickness_texture, cache_entry.material_textures[material_index].iridescence_thickness);
+        stage_texture(material.volume_thickness_texture, cache_entry.material_textures[material_index].volume_thickness);
+        stage_texture(material.clearcoat_texture, cache_entry.material_textures[material_index].clearcoat);
+        stage_texture(material.clearcoat_roughness_texture, cache_entry.material_textures[material_index].clearcoat_roughness);
+        stage_texture(material.clearcoat_normal_texture, cache_entry.material_textures[material_index].clearcoat_normal);
 
         cache_entry.materials[material_index].base_color_view = cache_entry.material_textures[material_index].base_color.view;
         cache_entry.materials[material_index].metallic_roughness_view = cache_entry.material_textures[material_index].metallic_roughness.view;
@@ -2466,6 +2541,9 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         cache_entry.materials[material_index].clearcoat_roughness_view = cache_entry.material_textures[material_index].clearcoat_roughness.view;
         cache_entry.materials[material_index].clearcoat_normal_view = cache_entry.material_textures[material_index].clearcoat_normal.view;
     }
+
+    // Single submit + single fence wait for ALL material texture uploads.
+    FlushPreparedTextureUploads(*vulkan_context_, ray_tracing_.GetCommandPool(), pending_uploads);
 
     for (const ModelMeshAsset& mesh : resolved_model.asset->meshes)
     {
@@ -2544,6 +2622,19 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
     cache_entry.vertex_count = static_cast<std::uint32_t>(vertices.size());
     cache_entry.index_count = static_cast<std::uint32_t>(indices.size());
     cache_entry.write_time = resolved_model.write_time;
+
+    const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    if (freq > 0)
+    {
+        const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);
+        SDL_Log(
+            "Viewport mesh upload '%s': %.2f ms (%zu materials, %u verts, %u indices)",
+            model_path.filename().string().c_str(),
+            upload_ms,
+            resolved_model.asset->materials.size(),
+            cache_entry.vertex_count,
+            cache_entry.index_count);
+    }
     return true;
 }
 

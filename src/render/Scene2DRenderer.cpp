@@ -887,7 +887,7 @@ bool Scene2DRenderer::EnsurePipeline()
     gp_ci.renderPass = render_pass_;
     gp_ci.subpass = 0;
 
-    result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp_ci, allocator, &pipeline_);
+    result = vkCreateGraphicsPipelines(device, vulkan_context_->GetPipelineCache(), 1, &gp_ci, allocator, &pipeline_);
     vkDestroyShaderModule(device, vert, allocator);
     vkDestroyShaderModule(device, frag, allocator);
 
@@ -1614,8 +1614,14 @@ void Scene2DRenderer::CompositeOverlay(
     VkImage target_image,
     VkImageView target_view,
     std::uint32_t width,
-    std::uint32_t height)
+    std::uint32_t height,
+    float* out_gpu_wait_ms)
 {
+    if (out_gpu_wait_ms != nullptr)
+    {
+        *out_gpu_wait_ms = 0.0f;
+    }
+
         const bool use_pak_streaming = project_root.empty() && g_asset_reader != nullptr;
 
     if (vulkan_context_ == nullptr || target_image == VK_NULL_HANDLE || target_view == VK_NULL_HANDLE)
@@ -1906,8 +1912,19 @@ void Scene2DRenderer::CompositeOverlay(
         VulkanContext::CheckVkResult(result);
         if (result == VK_SUCCESS)
         {
+            const std::uint64_t wait_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
             result = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
             VulkanContext::CheckVkResult(result);
+            if (out_gpu_wait_ms != nullptr)
+            {
+                const std::uint64_t wait_end_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+                const std::uint64_t freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+                if (freq > 0)
+                {
+                    const double elapsed_ms = static_cast<double>(wait_end_ticks - wait_start_ticks) * 1000.0 / static_cast<double>(freq);
+                    *out_gpu_wait_ms = static_cast<float>(elapsed_ms);
+                }
+            }
         }
         vkDestroyFence(device, fence, vulkan_context_->GetAllocator());
     }

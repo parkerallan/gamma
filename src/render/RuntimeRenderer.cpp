@@ -853,6 +853,174 @@ RuntimeRenderer::GpuTexture* SelectTextureSlot(RuntimeRenderer::GpuMaterialTextu
     }
 }
 
+// Batched immediate texture upload --------------------------------------
+//
+// CreateTextureFromAsset opens a command buffer, submits, and waits once per
+// call. Loading a single PBR mesh fires up to ~16 of those round-trips per
+// material, which dominates scene-load wall time. The helpers below let the
+// caller stage all GPU resources up front and then flush every transfer
+// through ONE ExecuteImmediateCommands call.
+
+struct PreparedTextureUpload
+{
+    RuntimeRenderer::GpuBuffer staging_buffer{};
+    VkImage image = VK_NULL_HANDLE;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
+bool PrepareTextureUpload(
+    VulkanContext& context,
+    const ModelTextureAsset& texture_asset,
+    RuntimeRenderer::GpuTexture& out_texture,
+    PreparedTextureUpload& out_pending)
+{
+    if (!texture_asset.valid ||
+        texture_asset.width <= 0 ||
+        texture_asset.height <= 0 ||
+        texture_asset.pixels.empty())
+    {
+        return false;
+    }
+
+    const VkDevice device = context.GetDevice();
+    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) *
+        static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+
+    if (!CreateVulkanBuffer(
+            context,
+            upload_size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            out_pending.staging_buffer))
+    {
+        return false;
+    }
+
+    if (!UploadBufferData(device, out_pending.staging_buffer, texture_asset.pixels.data(), static_cast<std::size_t>(upload_size)))
+    {
+        vkFreeMemory(device, out_pending.staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, out_pending.staging_buffer.buffer, context.GetAllocator());
+        out_pending.staging_buffer = {};
+        return false;
+    }
+
+    if (!CreateVulkanImage(
+            context.GetPhysicalDevice(),
+            device,
+            context.GetAllocator(),
+            static_cast<std::uint32_t>(texture_asset.width),
+            static_cast<std::uint32_t>(texture_asset.height),
+            texture_format,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            out_texture.image,
+            out_texture.memory,
+            out_texture.view))
+    {
+        vkFreeMemory(device, out_pending.staging_buffer.memory, context.GetAllocator());
+        vkDestroyBuffer(device, out_pending.staging_buffer.buffer, context.GetAllocator());
+        out_pending.staging_buffer = {};
+        return false;
+    }
+
+    out_pending.image = out_texture.image;
+    out_pending.width = static_cast<std::uint32_t>(texture_asset.width);
+    out_pending.height = static_cast<std::uint32_t>(texture_asset.height);
+    return true;
+}
+
+void RecordPreparedTextureUpload(VkCommandBuffer command_buffer, const PreparedTextureUpload& pending)
+{
+    TransitionImageLayout(
+        command_buffer,
+        pending.image,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT);
+
+    VkBufferImageCopy copy_region = {};
+    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.imageSubresource.layerCount = 1;
+    copy_region.imageExtent.width = pending.width;
+    copy_region.imageExtent.height = pending.height;
+    copy_region.imageExtent.depth = 1;
+
+    vkCmdCopyBufferToImage(
+        command_buffer,
+        pending.staging_buffer.buffer,
+        pending.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copy_region);
+
+    TransitionImageLayout(
+        command_buffer,
+        pending.image,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT);
+}
+
+void ReleasePreparedTextureUploads(VulkanContext& context, std::vector<PreparedTextureUpload>& uploads)
+{
+    const VkDevice device = context.GetDevice();
+    const VkAllocationCallbacks* allocator = context.GetAllocator();
+    for (PreparedTextureUpload& pending : uploads)
+    {
+        if (pending.staging_buffer.memory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, pending.staging_buffer.memory, allocator);
+        }
+        if (pending.staging_buffer.buffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(device, pending.staging_buffer.buffer, allocator);
+        }
+        pending = {};
+    }
+    uploads.clear();
+}
+
+bool FlushPreparedTextureUploads(
+    VulkanContext& context,
+    VkCommandPool command_pool,
+    std::vector<PreparedTextureUpload>& uploads)
+{
+    if (uploads.empty())
+    {
+        return true;
+    }
+    if (command_pool == VK_NULL_HANDLE)
+    {
+        ReleasePreparedTextureUploads(context, uploads);
+        return false;
+    }
+
+    const bool ok = ExecuteImmediateCommands(
+        context.GetDevice(),
+        command_pool,
+        context.GetQueue(),
+        [&](VkCommandBuffer command_buffer)
+        {
+            for (const PreparedTextureUpload& pending : uploads)
+            {
+                RecordPreparedTextureUpload(command_buffer, pending);
+            }
+        });
+
+    ReleasePreparedTextureUploads(context, uploads);
+    return ok;
+}
+
 bool CreateTextureFromAsset(
     VulkanContext& context,
     VkCommandPool command_pool,
@@ -1870,7 +2038,7 @@ bool RuntimeRenderer::EnsureSkinningPipeline()
         compute_info.stage.module = shader;
         compute_info.stage.pName = "main";
 
-        VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compute_info, allocator, &skinning_pipeline_);
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &compute_info, allocator, &skinning_pipeline_);
         VulkanContext::CheckVkResult(result);
         vkDestroyShaderModule(device, shader, allocator);
         if (result != VK_SUCCESS)
@@ -1962,7 +2130,10 @@ void RuntimeRenderer::Shutdown()
     script_prev_keys_down_.clear();
     script_frame_collision_events_.clear();
     animation_last_tick_ms_ = 0;
-    model_asset_cache_.clear();
+    // Intentionally NOT clearing model_asset_cache_ here: parsed CPU-side
+    // ModelAsset data is independent of the Vulkan context being torn down,
+    // and re-using it across Stop->Play cycles eliminates redundant Assimp
+    // imports (the dominant per-scene-load CPU cost).
     queued_objects_.clear();
     cached_scene_path_.clear();
     cached_scene_metadata_ = SceneMetadata{};
@@ -2033,7 +2204,51 @@ bool RuntimeRenderer::StartSession(
     animated_mesh_revisions_.clear();
     physics_world_built_ = false;
     performance_stats_ = RuntimePerformanceStats{};
+    first_frame_logged_ = false;
     return true;
+}
+
+void RuntimeRenderer::SeedSceneMetadata(const std::filesystem::path& scene_path, SceneMetadata metadata)
+{
+    if (scene_path.empty() || !metadata.parsed)
+    {
+        return;
+    }
+
+    // Only seed the cache for the session's current scene path; otherwise
+    // GetSceneMetadata() will reload anyway.
+    if (!scene_path_.empty() && scene_path != scene_path_)
+    {
+        return;
+    }
+
+    cached_scene_path_ = scene_path;
+    cached_scene_metadata_ = std::move(metadata);
+    has_cached_scene_metadata_ = true;
+
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(scene_path, error);
+    cached_scene_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+}
+
+void RuntimeRenderer::SeedModelAsset(
+    const std::filesystem::path& absolute_model_path,
+    std::filesystem::file_time_type write_time,
+    ModelAsset asset)
+{
+    if (absolute_model_path.empty() || !asset.loaded)
+    {
+        return;
+    }
+
+    CachedModelAssetEntry& cache_entry = model_asset_cache_[absolute_model_path];
+    if (cache_entry.asset.loaded && cache_entry.write_time == write_time)
+    {
+        // Already have a fresher-or-equivalent copy; don't replace.
+        return;
+    }
+    cache_entry.write_time = write_time;
+    cache_entry.asset = std::move(asset);
 }
 
 void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata)
@@ -2573,12 +2788,19 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         return true;
     }
 
+    const std::uint64_t mesh_upload_start_ticks = SDL_GetPerformanceCounter();
+
     ReleaseMeshCacheEntry(cache_entry);
 
     std::vector<SceneGpuVertex> vertices;
     std::vector<std::uint32_t> indices;
     cache_entry.material_textures.resize(model_asset_entry.asset.materials.size());
     cache_entry.materials.resize(model_asset_entry.asset.materials.size());
+
+    // Stage every material texture into a single immediate command buffer so a
+    // PBR mesh costs ONE GPU round-trip (was up to 16 per material).
+    std::vector<PreparedTextureUpload> pending_uploads;
+    pending_uploads.reserve(model_asset_entry.asset.materials.size() * 16);
 
     for (std::size_t material_index = 0; material_index < model_asset_entry.asset.materials.size(); ++material_index)
     {
@@ -2640,12 +2862,16 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
                 continue;
             }
 
-            SDL_PumpEvents();
-
             GpuTexture* texture_slot = SelectTextureSlot(cache_entry.material_textures[material_index], texture_index);
-            if (texture_slot != nullptr)
+            if (texture_slot == nullptr)
             {
-                CreateTextureFromAsset(*vulkan_context_, ray_tracing_.GetCommandPool(), *texture_assets[texture_index], *texture_slot);
+                continue;
+            }
+
+            PreparedTextureUpload pending;
+            if (PrepareTextureUpload(*vulkan_context_, *texture_assets[texture_index], *texture_slot, pending))
+            {
+                pending_uploads.push_back(std::move(pending));
             }
         }
 
@@ -2666,6 +2892,13 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         cache_entry.materials[material_index].clearcoat_roughness_view = cache_entry.material_textures[material_index].clearcoat_roughness.view;
         cache_entry.materials[material_index].clearcoat_normal_view = cache_entry.material_textures[material_index].clearcoat_normal.view;
     }
+
+    // Single submit + single fence wait for ALL material texture uploads.
+    FlushPreparedTextureUploads(*vulkan_context_, ray_tracing_.GetCommandPool(), pending_uploads);
+
+    // After the texture views are written into materials[].*_view above, but
+    // before that loop completes, those views were just-created (Prepare set
+    // them); the Flush above made the GPU image contents valid.
 
     std::size_t mesh_scan_count = 0;
     for (const ModelMeshAsset& mesh : model_asset_entry.asset.meshes)
@@ -2738,6 +2971,19 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
     cache_entry.vertex_count = static_cast<std::uint32_t>(vertices.size());
     cache_entry.index_count = static_cast<std::uint32_t>(indices.size());
     cache_entry.write_time = model_asset_entry.write_time;
+
+    const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    if (freq > 0)
+    {
+        const double upload_ms = static_cast<double>(SDL_GetPerformanceCounter() - mesh_upload_start_ticks) * 1000.0 / static_cast<double>(freq);
+        SDL_Log(
+            "Mesh upload '%s': %.2f ms (%zu materials, %u verts, %u indices)",
+            model_path.filename().string().c_str(),
+            upload_ms,
+            model_asset_entry.asset.materials.size(),
+            cache_entry.vertex_count,
+            cache_entry.index_count);
+    }
     return true;
 }
 
@@ -4539,8 +4785,13 @@ bool RuntimeRenderer::BuildQueuedScene(
     return true;
 }
 
-bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
+bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out_skinning_ms)
 {
+    if (out_skinning_ms != nullptr)
+    {
+        *out_skinning_ms = 0.0f;
+    }
+
     if (!ray_tracing_.IsAvailable())
     {
         return true;
@@ -4554,7 +4805,15 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message)
 
     for (const QueuedSceneObject& object : queued_objects_)
     {
-        if (!UpdateAnimatedMeshForObject(object))
+        const std::uint64_t skinning_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+        const bool skinning_ok = UpdateAnimatedMeshForObject(object);
+        if (out_skinning_ms != nullptr)
+        {
+            *out_skinning_ms += TicksToMilliseconds(
+                skinning_start_ticks,
+                static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+        }
+        if (!skinning_ok)
         {
             if (error_message != nullptr)
             {
@@ -4700,7 +4959,15 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
                 world_matrices[object.name] = pose_it->second.world_matrix;
             }
         }
-        physics_world_.BuildFromScene(scene_metadata, world_matrices, project_root_);
+        physics_world_.BuildFromScene(
+            scene_metadata,
+            world_matrices,
+            project_root_,
+            [this](const std::filesystem::path& path) -> const ModelAsset*
+            {
+                const CachedModelAssetEntry& entry = GetModelAssetEntry(path);
+                return entry.asset.loaded ? &entry.asset : nullptr;
+            });
         physics_world_built_ = true;
     }
 
@@ -4748,10 +5015,13 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         animation_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
 
-    if (!SyncRayTracingScene(error_message))
+    float sync_skinning_ms = 0.0f;
+
+    if (!SyncRayTracingScene(error_message, &sync_skinning_ms))
     {
         return false;
     }
+    performance_stats_.animation_time_ms += sync_skinning_ms;
 
     ray_tracing_.SetSkyboxTexture(skybox_renderer_.ResolveSkyboxView(scene_metadata, project_root_));
     ray_tracing_.SetSkyboxRotation(skybox_renderer_.ResolveSkyboxRotationDegrees(scene_metadata));
@@ -4778,24 +5048,41 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
 
     const std::uint64_t overlay_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+    float overlay_gpu_wait_ms = 0.0f;
     scene_2d_renderer_.CompositeOverlay(
         scene_metadata,
         project_root_,
         ray_tracing_.GetOutputImage(),
         ray_tracing_.GetOutputImageView(),
         ray_tracing_.GetOutputWidth(),
-        ray_tracing_.GetOutputHeight());
+        ray_tracing_.GetOutputHeight(),
+        &overlay_gpu_wait_ms);
 
-    performance_stats_.overlay_2d_time_ms = TicksToMilliseconds(
+    const float overlay_total_ms = TicksToMilliseconds(
         overlay_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+    // The overlay submit shares a queue with ray tracing, so vkWaitForFences
+    // can stall on previously queued RT work. Reattribute that wait to the
+    // render subsystem so the 2D series reflects only CPU-side overlay work.
+    performance_stats_.overlay_2d_time_ms = (std::max)(overlay_total_ms - overlay_gpu_wait_ms, 0.0f);
+    performance_stats_.render_time_ms += overlay_gpu_wait_ms;
+    performance_stats_.gpu_time_ms = overlay_gpu_wait_ms;
     performance_stats_.frame_time_ms = TicksToMilliseconds(
         frame_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+    performance_stats_.cpu_time_ms = (std::max)(performance_stats_.frame_time_ms - performance_stats_.gpu_time_ms, 0.0f);
     performance_stats_.fps = performance_stats_.frame_time_ms > 0.0001f
         ? 1000.0f / performance_stats_.frame_time_ms
         : 0.0f;
     performance_stats_.valid = true;
+
+    if (!first_frame_logged_)
+    {
+        first_frame_logged_ = true;
+        SDL_Log(
+            "Runtime first frame: %.2f ms (RT pipeline + mesh/texture upload + first TLAS build)",
+            performance_stats_.frame_time_ms);
+    }
 
     return true;
 }

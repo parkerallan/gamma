@@ -21,7 +21,7 @@ private:
     bool show_scripts_ = true;
     bool show_render_ = true;
     bool show_2d_ = true;
-    bool show_animation_ = false;
+    bool show_animation_ = true;
     bool show_audio_ = false;
     bool show_video_ = false;
 
@@ -33,6 +33,8 @@ private:
     std::vector<float> animation_ms_history_;
     std::vector<float> audio_ms_history_;
     std::vector<float> video_ms_history_;
+    std::vector<float> cpu_ms_history_;
+    std::vector<float> gpu_ms_history_;
 
     float sample_window_seconds_ = 0.0f;
     std::size_t sample_window_count_ = 0;
@@ -44,4 +46,6 @@ private:
     float animation_accumulator_ = 0.0f;
     float audio_accumulator_ = 0.0f;
     float video_accumulator_ = 0.0f;
+    float cpu_accumulator_ = 0.0f;
+    float gpu_accumulator_ = 0.0f;
 };

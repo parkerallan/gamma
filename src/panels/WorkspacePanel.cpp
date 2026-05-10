@@ -77,6 +77,8 @@ bool WorkspacePanel::BeginAsyncViewportLoad(
     pending_viewport_scene_path_ = scene_path;
     pending_viewport_scene_write_time_ = scene_write_time;
     viewport_load_in_progress_ = true;
+    pending_viewport_load_dispatch_ticks_ = SDL_GetPerformanceCounter();
+    SDL_Log("Viewport preload: dispatched async load for '%s'", scene_path.filename().string().c_str());
     pending_viewport_load_ = std::async(std::launch::async, [scene_path, project_root = state.project_root, scene_write_time]()
     {
         AsyncViewportLoadResult result;
@@ -100,15 +102,37 @@ bool WorkspacePanel::BeginAsyncViewportLoad(
             unique_model_paths.insert((project_root / object.model_path).lexically_normal());
         }
 
-        result.model_cache.reserve(unique_model_paths.size());
+        // Fan out: parse every unique model on its own thread. The editor
+        // reads from the regular filesystem (no shared pak handle), so
+        // Assimp parses are independent and CPU-bound — perfect for
+        // parallelism. With 4 models on a multi-core machine the wall time
+        // collapses to roughly the slowest single model.
+        struct ParsedModel
+        {
+            std::filesystem::path path;
+            CachedModelAssetEntry entry;
+        };
+        std::vector<std::future<ParsedModel>> jobs;
+        jobs.reserve(unique_model_paths.size());
         for (const std::filesystem::path& model_path : unique_model_paths)
         {
-            std::error_code error;
-            const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(model_path, error);
-            CachedModelAssetEntry entry;
-            entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
-            entry.asset = LoadModelAsset(model_path);
-            result.model_cache.emplace(model_path, std::move(entry));
+            jobs.push_back(std::async(std::launch::async, [model_path]() -> ParsedModel
+            {
+                ParsedModel parsed;
+                parsed.path = model_path;
+                std::error_code error;
+                const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(model_path, error);
+                parsed.entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
+                parsed.entry.asset = LoadModelAsset(model_path);
+                return parsed;
+            }));
+        }
+
+        result.model_cache.reserve(jobs.size());
+        for (auto& job : jobs)
+        {
+            ParsedModel parsed = job.get();
+            result.model_cache.emplace(std::move(parsed.path), std::move(parsed.entry));
         }
 
         return result;
@@ -166,6 +190,18 @@ bool WorkspacePanel::TryConsumeAsyncViewportLoad(
     cached_scene_metadata_ = std::move(result.scene_metadata);
     has_cached_scene_metadata_ = true;
     model_asset_cache_ = std::move(result.model_cache);
+
+    const std::uint64_t freq = SDL_GetPerformanceFrequency();
+    if (freq > 0 && pending_viewport_load_dispatch_ticks_ != 0)
+    {
+        const double total_ms = static_cast<double>(SDL_GetPerformanceCounter() - pending_viewport_load_dispatch_ticks_) * 1000.0 / static_cast<double>(freq);
+        SDL_Log(
+            "Viewport preload: scene '%s' + %zu model(s) ready after %.2f ms (consumed by main thread)",
+            cached_scene_path_.filename().string().c_str(),
+            model_asset_cache_.size(),
+            total_ms);
+    }
+    pending_viewport_load_dispatch_ticks_ = 0;
     return true;
 }
 
@@ -174,11 +210,59 @@ const ModelAsset& WorkspacePanel::GetModelAsset(const std::filesystem::path& pat
     return GetModelAssetEntry(path).asset;
 }
 
+const SceneMetadata* WorkspacePanel::TryGetCachedSceneMetadata(const std::filesystem::path& scene_path) const
+{
+    if (!has_cached_scene_metadata_ || cached_scene_path_ != scene_path || !cached_scene_metadata_.parsed)
+    {
+        return nullptr;
+    }
+    return &cached_scene_metadata_;
+}
+
+void WorkspacePanel::WaitForPendingViewportLoad(EngineState& state)
+{
+    if (!viewport_load_in_progress_ || !pending_viewport_load_.valid())
+    {
+        return;
+    }
+
+    // Snapshot the pending key BEFORE TryConsumeAsyncViewportLoad clears
+    // pending_viewport_scene_path_ — the consume helper compares its incoming
+    // params against the future's result, but it also resets pending_*
+    // before that comparison, so passing them by reference would compare
+    // against an emptied value.
+    const std::filesystem::path snapshot_path = pending_viewport_scene_path_;
+    const std::filesystem::file_time_type snapshot_time = pending_viewport_scene_write_time_;
+
+    pending_viewport_load_.wait();
+    TryConsumeAsyncViewportLoad(state, snapshot_path, snapshot_time);
+}
+
 void WorkspacePanel::Render(EngineState& state)
 {
     if (!state.show_workspace_panel)
     {
         return;
+    }
+
+    // Kick off async scene + model preload as soon as the workspace panel is
+    // visible, before any tab is rendered. Previously this only fired inside
+    // RenderSceneViewport, which delayed the worker thread by however long
+    // the rest of the editor's first-frame UI work took.
+    if (state.HasActiveScene() && !viewport_load_in_progress_)
+    {
+        const bool already_cached =
+            has_cached_scene_metadata_ &&
+            cached_scene_path_ == state.active_scene_path;
+        if (!already_cached)
+        {
+            std::error_code ec;
+            const auto wt = std::filesystem::last_write_time(state.active_scene_path, ec);
+            BeginAsyncViewportLoad(
+                state,
+                state.active_scene_path,
+                ec ? std::filesystem::file_time_type::min() : wt);
+        }
     }
 
     if (!ImGui::Begin("Workspace", &state.show_workspace_panel))
