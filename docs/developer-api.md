@@ -7,6 +7,7 @@ This document will list every Lua function exposed by the runtime, this will be 
 - `Lua` (`v5.4.7`): Scripting runtime used by all `Engine`, `Input`, `World`, `Time`, and `Physics` Lua calls.
 - `SDL3` (`release-3.4.4`): Provides key/mouse input polling, frame timing (`Time.DeltaTime` / `Time.TotalTime`), and runtime log output.
 - `Jolt Physics` (`v5.3.0`): Powers rigidbody simulation, raycasts, velocity/force APIs, and collision events exposed through `World` and `Physics`.
+- `miniaudio` (`v0.11.21`): Backs the `Audio` runtime API and the `Audio` SceneObject attribute (3D spatialization, distance attenuation, doppler).
 
 ### Notes
 
@@ -101,6 +102,13 @@ Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width
 
 #### `Engine.SkyboxAttr`
 Methods: `ImagePath(name[, path])`, `Rotation(name[, value])`
+
+#### `Engine.AudioAttr`
+Methods: `ClipPath(name[, path])`, `PlayMode(name[, value])`, `Volume(name[, value])`, `Loop(name[, enabled])`, `Spatialize3D(name[, enabled])`, `Pitch(name[, value])`, `MinDistance(name[, value])`, `MaxDistance(name[, value])`, `DopplerFactor(name[, value])`
+
+`PlayMode` uses the strings `"On"` and `"Off"`. Setting it to `"On"` starts playback (looping clips loop, one-shots play once); `"Off"` stops playback.
+
+`Volume` is `0.0` (silent) to `1.0` (full) and is mapped through a perceptual cube-law curve so the slider/value feels uniform.
 
 #### `Engine.Animator`
 Methods (attribute accessors): `ControllerPath(name[, path])`, `InitialState(name[, stateName])`, `PlaybackSpeed(name[, value])`, `AutoPlay(name[, enabled])`, `SetDefaultState(name, stateName)`, `GetDefaultState(name)`
@@ -397,6 +405,58 @@ Quick summary: Applies force to an object for this step.
 ```lua
 Physics.AddForce("Player", 10.0, 0.0, 0.0)
 ```
+
+### `Audio`
+
+#### `Audio.Play(name)`
+Quick summary: Switches an object's `Audio` attribute to `On`, starting playback. Returns `true` on success.
+
+```lua
+Audio.Play("Speaker")
+```
+
+#### `Audio.Stop(name)`
+Quick summary: Switches an object's `Audio` attribute to `Off`, stopping playback. Returns `true` on success.
+
+```lua
+Audio.Stop("Speaker")
+```
+
+#### `Audio.IsPlaying(name)`
+Quick summary: Returns `true` while the object's `Audio` attribute is currently producing sound.
+
+```lua
+if Audio.IsPlaying("Speaker") then
+    Engine.Log("Still playing")
+end
+```
+
+#### `Audio.SetVolume(name, value)`
+Quick summary: Sets runtime volume in the `0.0`–`1.0` range. Returns `true` on success.
+
+```lua
+Audio.SetVolume("Speaker", 0.5)
+```
+
+#### `Audio.SetPitch(name, value)`
+Quick summary: Sets runtime pitch multiplier. Returns `true` on success.
+
+```lua
+Audio.SetPitch("Speaker", 1.25)
+```
+
+#### `Audio.SetLoop(name, enabled)`
+Quick summary: Toggles looping at runtime. Returns `true` on success.
+
+```lua
+Audio.SetLoop("Speaker", true)
+```
+
+Notes:
+- All `Audio.*` calls target the first `Audio` attribute on the named object and return `false` if the object has no `Audio` attribute.
+- Audio is only active while a scene is playing.
+- Clip format support: `.wav`, `.ogg`, `.mp3`.
+- 3D spatialization (when enabled on the attribute) uses the active camera as the listener with inverse distance attenuation between `MinDistance` and `MaxDistance` plus doppler shift scaled by `DopplerFactor`.
 
 ## Callback Notes
 

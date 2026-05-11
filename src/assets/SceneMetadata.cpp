@@ -545,7 +545,16 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeImage2DLockAspectRatio:") ||
     StartsWith(line, "AttributeImage2DPriority:") ||
     StartsWith(line, "AttributeSkyboxImagePath:") ||
-    StartsWith(line, "AttributeSkyboxRotation:");
+    StartsWith(line, "AttributeSkyboxRotation:") ||
+    StartsWith(line, "AttributeAudioClipPath:") ||
+    StartsWith(line, "AttributeAudioPlayMode:") ||
+    StartsWith(line, "AttributeAudioVolume:") ||
+    StartsWith(line, "AttributeAudioPitch:") ||
+    StartsWith(line, "AttributeAudioLoop:") ||
+    StartsWith(line, "AttributeAudioSpatialize:") ||
+    StartsWith(line, "AttributeAudioMinDistance:") ||
+    StartsWith(line, "AttributeAudioMaxDistance:") ||
+    StartsWith(line, "AttributeAudioDopplerFactor:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -909,6 +918,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Image 2D";
     case SceneObjectAttributeKind::Skybox:
         return "Skybox";
+    case SceneObjectAttributeKind::Audio:
+        return "Audio";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -941,6 +952,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Image2D";
     case SceneObjectAttributeKind::Skybox:
         return "Skybox";
+    case SceneObjectAttributeKind::Audio:
+        return "Audio";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -993,6 +1006,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Skybox")
     {
         return SceneObjectAttributeKind::Skybox;
+    }
+    if (trimmed == "Audio")
+    {
+        return SceneObjectAttributeKind::Audio;
     }
 
     return SceneObjectAttributeKind::None;
@@ -1623,6 +1640,50 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeSkyboxRotation:") && current_attribute != nullptr)
         {
             ParseScalar(ExtractValue(trimmed, "AttributeSkyboxRotation:"), current_attribute->skybox.rotation_degrees);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioClipPath:") && current_attribute != nullptr)
+        {
+            current_attribute->audio.clip_path = ExtractValue(trimmed, "AttributeAudioClipPath:");
+        }
+        else if (StartsWith(trimmed, "AttributeAudioPlayMode:") && current_attribute != nullptr)
+        {
+            const std::string mode = TrimCopy(ExtractValue(trimmed, "AttributeAudioPlayMode:"));
+            if (mode == "On" || mode == "Autoplay")
+            {
+                current_attribute->audio.play_mode = SceneObjectAudioPlayMode::On;
+            }
+            else
+            {
+                current_attribute->audio.play_mode = SceneObjectAudioPlayMode::Off;
+            }
+        }
+        else if (StartsWith(trimmed, "AttributeAudioVolume:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeAudioVolume:"), current_attribute->audio.volume);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioPitch:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeAudioPitch:"), current_attribute->audio.pitch);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioLoop:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeAudioLoop:"), current_attribute->audio.loop);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioSpatialize:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeAudioSpatialize:"), current_attribute->audio.spatialize_3d);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioMinDistance:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeAudioMinDistance:"), current_attribute->audio.min_distance);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioMaxDistance:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeAudioMaxDistance:"), current_attribute->audio.max_distance);
+        }
+        else if (StartsWith(trimmed, "AttributeAudioDopplerFactor:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeAudioDopplerFactor:"), current_attribute->audio.doppler_factor);
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -2420,6 +2481,52 @@ bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees)
 {
     return SetSceneObjectAttributeScalar("AttributeSkyboxRotation", scene_path, object_name, attribute_index, rotation_degrees);
+}
+
+bool SetSceneObjectAttributeAudioClipPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& clip_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeAudioClipPath", scene_path, object_name, attribute_index, clip_path);
+}
+
+bool SetSceneObjectAttributeAudioPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectAudioPlayMode play_mode)
+{
+    std::string value = play_mode == SceneObjectAudioPlayMode::On ? "On" : "Off";
+    return SetSceneObjectAttributeStringValue("AttributeAudioPlayMode", scene_path, object_name, attribute_index, value);
+}
+
+bool SetSceneObjectAttributeAudioVolume(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float volume)
+{
+    return SetSceneObjectAttributeScalar("AttributeAudioVolume", scene_path, object_name, attribute_index, volume);
+}
+
+bool SetSceneObjectAttributeAudioPitch(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float pitch)
+{
+    return SetSceneObjectAttributeScalar("AttributeAudioPitch", scene_path, object_name, attribute_index, pitch);
+}
+
+bool SetSceneObjectAttributeAudioLoop(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool loop)
+{
+    return SetSceneObjectAttributeBoolean("AttributeAudioLoop", scene_path, object_name, attribute_index, loop);
+}
+
+bool SetSceneObjectAttributeAudioSpatialize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool spatialize_3d)
+{
+    return SetSceneObjectAttributeBoolean("AttributeAudioSpatialize", scene_path, object_name, attribute_index, spatialize_3d);
+}
+
+bool SetSceneObjectAttributeAudioMinDistance(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float min_distance)
+{
+    return SetSceneObjectAttributeScalar("AttributeAudioMinDistance", scene_path, object_name, attribute_index, min_distance);
+}
+
+bool SetSceneObjectAttributeAudioMaxDistance(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float max_distance)
+{
+    return SetSceneObjectAttributeScalar("AttributeAudioMaxDistance", scene_path, object_name, attribute_index, max_distance);
+}
+
+bool SetSceneObjectAttributeAudioDopplerFactor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float doppler_factor)
+{
+    return SetSceneObjectAttributeScalar("AttributeAudioDopplerFactor", scene_path, object_name, attribute_index, doppler_factor);
 }
 
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height)

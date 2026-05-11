@@ -243,6 +243,35 @@ target_include_directories(lua_runtime PUBLIC
 )
 
 FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.21
+    GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(miniaudio)
+if(NOT miniaudio_POPULATED)
+    FetchContent_Populate(miniaudio)
+endif()
+
+# Build miniaudio's single-header implementation as a C static library.
+add_library(miniaudio STATIC
+    ${CMAKE_SOURCE_DIR}/src/audio/miniaudio_impl.c
+)
+target_include_directories(miniaudio PUBLIC ${miniaudio_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(miniaudio PRIVATE /W0)
+else()
+    target_compile_options(miniaudio PRIVATE -w)
+endif()
+if(WIN32)
+    target_link_libraries(miniaudio PUBLIC ole32)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(miniaudio PUBLIC dl pthread m)
+elseif(APPLE)
+    target_link_libraries(miniaudio PUBLIC "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox")
+endif()
+
+FetchContent_Declare(
     joltphysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
     GIT_TAG v5.3.0
@@ -387,6 +416,7 @@ add_executable(engine
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp
+    src/audio/AudioEngine.cpp
     src/vfs/AssetVFS.cpp
     src/components/CreationMenu.cpp
     src/components/EditorComponent.cpp
@@ -436,6 +466,7 @@ target_link_libraries(engine PRIVATE
     tinyexr
     lua_runtime
     joltphysics
+    miniaudio
     nlohmann_json::nlohmann_json
 )
 

@@ -118,6 +118,7 @@ add_executable(game
     src/assets/ModelAsset.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp
+    src/audio/AudioEngine.cpp
     src/vfs/PakArchive.cpp
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
@@ -149,6 +150,7 @@ target_link_libraries(game PRIVATE
     tinyexr
     lua_runtime
     joltphysics
+    miniaudio
     nlohmann_json::nlohmann_json
     Vulkan::Vulkan
 )

@@ -24,6 +24,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Text2D,
     SceneObjectAttributeKind::Image2D,
     SceneObjectAttributeKind::Skybox,
+    SceneObjectAttributeKind::Audio,
 };
 
 constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
@@ -983,6 +984,122 @@ bool RenderAttributeSection(
                 rotation_drag_object_name.clear();
                 rotation_drag_attribute_index = 0;
                 rotation_drag_value = 0.0f;
+            }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Audio:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_clip_label = attribute.audio.clip_path.empty()
+                ? std::string("Drop Audio Clip (.wav/.ogg/.mp3)")
+                : std::filesystem::path(attribute.audio.clip_path).filename().string();
+            ImGui::Button(current_clip_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+                {
+                    const char* payload_text = static_cast<const char*>(payload->Data);
+                    const std::size_t payload_size = payload->DataSize > 0
+                        ? static_cast<std::size_t>(payload->DataSize - 1)
+                        : 0;
+                    const std::filesystem::path dropped_path(std::string(payload_text, payload_size));
+                    if (HasAnyExtension(dropped_path, {".wav", ".ogg", ".mp3"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "audio clip path", [&]()
+                        {
+                            return SetSceneObjectAttributeAudioClipPath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            // Play mode radio buttons — On plays when active (autoplays at scene start), Off is silent.
+            ImGui::TextUnformatted("Play Mode");
+            const SceneObjectAudioPlayMode current_mode = attribute.audio.play_mode;
+            auto play_mode_radio = [&](const char* label, SceneObjectAudioPlayMode mode)
+            {
+                if (ImGui::RadioButton(label, current_mode == mode))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "audio play mode", [&]()
+                    {
+                        return SetSceneObjectAttributeAudioPlayMode(state.selected_item_path, object.name, attribute_index, mode);
+                    }) || changed;
+                }
+            };
+            play_mode_radio("On", SceneObjectAudioPlayMode::On);
+            ImGui::SameLine();
+            play_mode_radio("Off", SceneObjectAudioPlayMode::Off);
+
+            float volume = attribute.audio.volume;
+            if (ImGui::DragFloat("Volume", &volume, 0.02f, 0.0f, 20.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "audio volume", [&]()
+                {
+                    return SetSceneObjectAttributeAudioVolume(state.selected_item_path, object.name, attribute_index, std::clamp(volume, 0.0f, 20.0f));
+                }) || changed;
+            }
+
+            bool loop = attribute.audio.loop;
+            if (ImGui::Checkbox("Loop", &loop))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "audio loop", [&]()
+                {
+                    return SetSceneObjectAttributeAudioLoop(state.selected_item_path, object.name, attribute_index, loop);
+                }) || changed;
+            }
+
+            bool spatialize_3d = attribute.audio.spatialize_3d;
+            if (ImGui::Checkbox("3D Spatialize", &spatialize_3d))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "audio 3d spatialize", [&]()
+                {
+                    return SetSceneObjectAttributeAudioSpatialize(state.selected_item_path, object.name, attribute_index, spatialize_3d);
+                }) || changed;
+            }
+
+            float pitch = attribute.audio.pitch;
+            if (ImGui::DragFloat("Pitch", &pitch, 0.01f, 0.1f, 4.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "audio pitch", [&]()
+                {
+                    return SetSceneObjectAttributeAudioPitch(state.selected_item_path, object.name, attribute_index, std::clamp(pitch, 0.1f, 4.0f));
+                }) || changed;
+            }
+
+            if (attribute.audio.spatialize_3d)
+            {
+                float min_distance = attribute.audio.min_distance;
+                if (ImGui::DragFloat("Min Distance", &min_distance, 0.05f, 0.01f, 10000.0f, "%.2f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "audio min distance", [&]()
+                    {
+                        return SetSceneObjectAttributeAudioMinDistance(state.selected_item_path, object.name, attribute_index, (std::max)(0.01f, min_distance));
+                    }) || changed;
+                }
+
+                float max_distance = attribute.audio.max_distance;
+                if (ImGui::DragFloat("Max Distance", &max_distance, 0.1f, 0.02f, 100000.0f, "%.2f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "audio max distance", [&]()
+                    {
+                        return SetSceneObjectAttributeAudioMaxDistance(state.selected_item_path, object.name, attribute_index, (std::max)(0.02f, max_distance));
+                    }) || changed;
+                }
+
+                float doppler_factor = attribute.audio.doppler_factor;
+                if (ImGui::DragFloat("Doppler Factor", &doppler_factor, 0.01f, 0.0f, 10.0f, "%.2f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "audio doppler factor", [&]()
+                    {
+                        return SetSceneObjectAttributeAudioDopplerFactor(state.selected_item_path, object.name, attribute_index, std::clamp(doppler_factor, 0.0f, 10.0f));
+                    }) || changed;
+                }
             }
 
             break;

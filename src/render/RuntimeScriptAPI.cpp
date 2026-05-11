@@ -946,6 +946,48 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         lua_pushstring(lua_state, attribute->animator.initial_state.c_str());
         return 1;
     }
+    case ScriptAttributeAccessorId::AudioClipPath:
+        return access_string(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.clip_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.audio.clip_path = value; });
+    case ScriptAttributeAccessorId::AudioPlayMode:
+        return access_string(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) -> std::string {
+                return attribute.audio.play_mode == SceneObjectAudioPlayMode::On ? "On" : "Off";
+            },
+            [](SceneObjectAttribute& attribute, const std::string& value) {
+                attribute.audio.play_mode = (value == "On" || value == "on" || value == "Autoplay")
+                    ? SceneObjectAudioPlayMode::On
+                    : SceneObjectAudioPlayMode::Off;
+            });
+    case ScriptAttributeAccessorId::AudioVolume:
+        return access_float(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.volume; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.audio.volume = std::clamp(value, 0.0f, 20.0f); });
+    case ScriptAttributeAccessorId::AudioLoop:
+        return access_bool(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.loop; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.audio.loop = value; });
+    case ScriptAttributeAccessorId::AudioSpatialize3D:
+        return access_bool(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.spatialize_3d; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.audio.spatialize_3d = value; });
+    case ScriptAttributeAccessorId::AudioPitch:
+        return access_float(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.pitch; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.audio.pitch = std::clamp(value, 0.1f, 4.0f); });
+    case ScriptAttributeAccessorId::AudioMinDistance:
+        return access_float(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.min_distance; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.audio.min_distance = (std::max)(0.01f, value); });
+    case ScriptAttributeAccessorId::AudioMaxDistance:
+        return access_float(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.max_distance; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.audio.max_distance = (std::max)(0.02f, value); });
+    case ScriptAttributeAccessorId::AudioDopplerFactor:
+        return access_float(SceneObjectAttributeKind::Audio,
+            [](const SceneObjectAttribute& attribute) { return attribute.audio.doppler_factor; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.audio.doppler_factor = (std::max)(0.0f, value); });
     default:
         return luaL_error(lua_state, "Unknown attribute accessor");
     }
@@ -1547,3 +1589,121 @@ int RuntimeRenderer::LuaWorldClearTimer(lua_State* lua_state)
     lua_pushboolean(lua_state, 0);
     return 1;
 }
+
+// (Audio API implementations follow in this file.)
+
+int RuntimeRenderer::LuaAudioPlay(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Audio);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->audio.play_mode = SceneObjectAudioPlayMode::On;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaAudioStop(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Audio);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->audio.play_mode = SceneObjectAudioPlayMode::Off;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaAudioIsPlaying(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const std::string key = std::string(object_name) + "#0";
+    const auto it = renderer->active_audio_sources_.find(key);
+    const bool playing = (it != renderer->active_audio_sources_.end())
+        && (it->second.handle != AudioEngine::kInvalidHandle)
+        && renderer->audio_engine_.IsPlaying(it->second.handle);
+    lua_pushboolean(lua_state, playing ? 1 : 0);
+    return 1;
+}
+
+int RuntimeRenderer::LuaAudioSetVolume(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const float volume = static_cast<float>(luaL_checknumber(lua_state, 2));
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Audio);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->audio.volume = volume;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaAudioSetPitch(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const float pitch = static_cast<float>(luaL_checknumber(lua_state, 2));
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Audio);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->audio.pitch = pitch;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaAudioSetLoop(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const bool loop = lua_toboolean(lua_state, 2) != 0;
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Audio);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->audio.loop = loop;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+

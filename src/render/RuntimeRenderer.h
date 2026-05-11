@@ -4,6 +4,7 @@
 #include "assets/AnimatorControllerAsset.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
+#include "audio/AudioEngine.h"
 #include "render/Lighting.h"
 #include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
@@ -246,6 +247,7 @@ private:
     bool UpdateScriptsForFrame(std::string* error_message);
     bool UpdateScriptTimers(float delta_time, std::string* error_message);
     void UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata);
+    void UpdateAudioSourcesForFrame(const SceneMetadata& scene_metadata, const std::array<float, 16>& camera_world_matrix);
     bool UpdateAnimatedMeshForObject(const QueuedSceneObject& object);
     void ClearScriptTimers();
     void RemoveScriptTimersForInstance(const std::string& instance_key);
@@ -335,6 +337,15 @@ private:
         AnimatorGetState,
         AnimatorSetDefaultState,
         AnimatorGetDefaultState,
+        AudioClipPath,
+        AudioPlayMode,
+        AudioVolume,
+        AudioLoop,
+        AudioSpatialize3D,
+        AudioPitch,
+        AudioMinDistance,
+        AudioMaxDistance,
+        AudioDopplerFactor,
     };
     void RefreshActiveScriptCameraSelection();
     void HandleScriptAttributeMutation(SceneObjectAttributeKind kind, ScriptAttributeAccessorId accessor_id);
@@ -371,6 +382,12 @@ private:
     static int LuaPhysicsGetVelocity(lua_State* lua_state);
     static int LuaPhysicsAddImpulse(lua_State* lua_state);
     static int LuaPhysicsAddForce(lua_State* lua_state);
+    static int LuaAudioPlay(lua_State* lua_state);
+    static int LuaAudioStop(lua_State* lua_state);
+    static int LuaAudioIsPlaying(lua_State* lua_state);
+    static int LuaAudioSetVolume(lua_State* lua_state);
+    static int LuaAudioSetPitch(lua_State* lua_state);
+    static int LuaAudioSetLoop(lua_State* lua_state);
     bool BuildQueuedScene(
         const SceneMetadata& scene_metadata,
         const SceneObjectMetadata& active_camera_object,
@@ -409,6 +426,18 @@ private:
     std::unordered_map<std::filesystem::path, CachedScriptSourceEntry> script_cache_;
     PhysicsWorld physics_world_{};
     bool physics_world_built_ = false;
+    AudioEngine audio_engine_{};
+    bool audio_engine_ready_ = false;
+
+    struct ActiveAudioSource
+    {
+        AudioEngine::SoundHandle handle = AudioEngine::kInvalidHandle;
+        SceneObjectAudioPlayMode last_play_mode = SceneObjectAudioPlayMode::Off;
+        std::string clip_path;
+    };
+    // Keyed by "<object_name>#<attribute_index>".
+    std::unordered_map<std::string, ActiveAudioSource> active_audio_sources_;
+
     lua_State* script_lua_state_ = nullptr;
     std::unordered_map<std::string, RuntimeScriptInstance> script_instances_;
     std::unordered_map<std::string, std::vector<ScriptEventSubscription>> script_event_subscriptions_;

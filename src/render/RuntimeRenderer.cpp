@@ -1860,6 +1860,12 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
     scene_2d_renderer_.Initialize(context);
     skybox_renderer_.Initialize(context);
 
+    audio_engine_ready_ = audio_engine_.Initialize();
+    if (!audio_engine_ready_)
+    {
+        SDL_Log("AudioEngine initialization failed; audio attributes will be silent");
+    }
+
     return true;
 }
 
@@ -2143,6 +2149,9 @@ void RuntimeRenderer::Shutdown()
     active_camera_object_name_.clear();
     active_camera_attribute_index_ = 0;
     performance_stats_ = RuntimePerformanceStats{};
+    audio_engine_.Shutdown();
+    audio_engine_ready_ = false;
+    active_audio_sources_.clear();
     vulkan_context_ = nullptr;
 }
 
@@ -2178,6 +2187,8 @@ bool RuntimeRenderer::StartSession(
     cached_scene_metadata_ = SceneMetadata{};
     has_cached_scene_metadata_ = false;
     queued_objects_.clear();
+    audio_engine_.StopAll();
+    active_audio_sources_.clear();
     DestroyAllScriptInstances();
     ClearScriptEventSubscriptions();
     ClearScriptTimers();
@@ -3162,6 +3173,15 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
         {"Animator", "SetState", ScriptAttributeAccessorId::AnimatorSetState},
         {"Animator", "SetDefaultState", ScriptAttributeAccessorId::AnimatorSetDefaultState},
         {"Animator", "GetDefaultState", ScriptAttributeAccessorId::AnimatorGetDefaultState},
+        {"AudioAttr", "ClipPath", ScriptAttributeAccessorId::AudioClipPath},
+        {"AudioAttr", "PlayMode", ScriptAttributeAccessorId::AudioPlayMode},
+        {"AudioAttr", "Volume", ScriptAttributeAccessorId::AudioVolume},
+        {"AudioAttr", "Loop", ScriptAttributeAccessorId::AudioLoop},
+        {"AudioAttr", "Spatialize3D", ScriptAttributeAccessorId::AudioSpatialize3D},
+        {"AudioAttr", "Pitch", ScriptAttributeAccessorId::AudioPitch},
+        {"AudioAttr", "MinDistance", ScriptAttributeAccessorId::AudioMinDistance},
+        {"AudioAttr", "MaxDistance", ScriptAttributeAccessorId::AudioMaxDistance},
+        {"AudioAttr", "DopplerFactor", ScriptAttributeAccessorId::AudioDopplerFactor},
     };
 
     const auto bind_attribute_accessor = [&](const char* table_name, const char* method_name, ScriptAttributeAccessorId accessor_id)
@@ -3281,6 +3301,28 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaPhysicsAddForce, 1);
     lua_setfield(script_lua_state_, -2, "AddForce");
     lua_setglobal(script_lua_state_, "Physics");
+
+    // Audio table — runtime-only API to drive Audio attribute playback.
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioPlay, 1);
+    lua_setfield(script_lua_state_, -2, "Play");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioStop, 1);
+    lua_setfield(script_lua_state_, -2, "Stop");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioIsPlaying, 1);
+    lua_setfield(script_lua_state_, -2, "IsPlaying");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioSetVolume, 1);
+    lua_setfield(script_lua_state_, -2, "SetVolume");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioSetPitch, 1);
+    lua_setfield(script_lua_state_, -2, "SetPitch");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioSetLoop, 1);
+    lua_setfield(script_lua_state_, -2, "SetLoop");
+    lua_setglobal(script_lua_state_, "Audio");
 
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
     script_last_tick_ms_ = now_ms;
@@ -5015,6 +5057,19 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         animation_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
 
+    // Audio sources: drive listener from active camera and update each
+    // Audio attribute's playback state.
+    const std::uint64_t audio_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+    {
+        // Active camera world matrix is the inverse of the view matrix we use
+        // for rendering; columns [12..14] = world position, column[8..10] = -forward.
+        std::array<float, 16> camera_world_matrix = view_inverse;
+        UpdateAudioSourcesForFrame(scene_metadata, camera_world_matrix);
+    }
+    performance_stats_.audio_time_ms = TicksToMilliseconds(
+        audio_start_ticks,
+        static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+
     float sync_skinning_ms = 0.0f;
 
     if (!SyncRayTracingScene(error_message, &sync_skinning_ms))
@@ -5600,4 +5655,146 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
     }
 
     return uploaded;
+}
+
+namespace
+{
+std::string BuildAudioSourceKey(const std::string& object_name, std::size_t attribute_index)
+{
+    return object_name + "#" + std::to_string(attribute_index);
+}
+
+std::array<float, 3> ResolveAudioSourceWorldPosition(
+    const std::string& object_name,
+    const SceneResolvedObjectPoseMap& resolved_poses)
+{
+    const auto pose_it = resolved_poses.find(object_name);
+    if (pose_it == resolved_poses.end())
+    {
+        return {0.0f, 0.0f, 0.0f};
+    }
+    const std::array<float, 16>& matrix = pose_it->second.world_matrix;
+    return {matrix[12], matrix[13], matrix[14]};
+}
+}
+
+void RuntimeRenderer::UpdateAudioSourcesForFrame(
+    const SceneMetadata& scene_metadata,
+    const std::array<float, 16>& camera_world_matrix)
+{
+    if (!audio_engine_ready_)
+    {
+        return;
+    }
+
+    // Listener follows the active camera. view_inverse is the camera world
+    // matrix in column-major layout — column 2 (indices 8..10) is the camera's
+    // -forward axis in a right-handed view convention, column 1 (4..6) is up.
+    const std::array<float, 3> listener_pos = {camera_world_matrix[12], camera_world_matrix[13], camera_world_matrix[14]};
+    const std::array<float, 3> listener_forward = {-camera_world_matrix[8], -camera_world_matrix[9], -camera_world_matrix[10]};
+    const std::array<float, 3> listener_up = {camera_world_matrix[4], camera_world_matrix[5], camera_world_matrix[6]};
+    audio_engine_.SetListener(listener_pos, listener_forward, listener_up);
+
+    const SceneResolvedObjectPoseMap resolved_poses = ResolveSceneObjectPoses(scene_metadata);
+
+    // Walk every Audio attribute; resolve world position, push to engine,
+    // honour play-mode transitions.
+    std::unordered_set<std::string> seen_keys;
+    seen_keys.reserve(active_audio_sources_.size() + scene_metadata.objects.size());
+
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Audio)
+            {
+                continue;
+            }
+
+            const SceneObjectAudioAttributes& audio_attr = attribute.audio;
+            const std::string key = BuildAudioSourceKey(object.name, attribute_index);
+            seen_keys.insert(key);
+
+            ActiveAudioSource& source = active_audio_sources_[key];
+            const std::array<float, 3> world_position = ResolveAudioSourceWorldPosition(object.name, resolved_poses);
+
+            AudioEngine::PlayParams params;
+            // Resolve relative clip paths against the project root so the
+            // game-build asset layout works without absolute paths in scenes.
+            if (!audio_attr.clip_path.empty())
+            {
+                const std::filesystem::path stored(audio_attr.clip_path);
+                params.clip_path = stored.is_absolute()
+                    ? stored.generic_string()
+                    : (project_root_ / stored).generic_string();
+            }
+            params.volume = audio_attr.volume;
+            params.pitch = audio_attr.pitch;
+            params.loop = audio_attr.loop;
+            params.spatialize_3d = audio_attr.spatialize_3d;
+            params.min_distance = audio_attr.min_distance;
+            params.max_distance = audio_attr.max_distance;
+            params.doppler_factor = audio_attr.doppler_factor;
+            params.world_position = world_position;
+
+            const SceneObjectAudioPlayMode mode = audio_attr.play_mode;
+            const bool clip_changed = audio_attr.clip_path != source.clip_path;
+            const bool mode_changed = mode != source.last_play_mode;
+
+            if (mode == SceneObjectAudioPlayMode::Off || audio_attr.clip_path.empty())
+            {
+                if (source.handle != AudioEngine::kInvalidHandle)
+                {
+                    audio_engine_.StopSound(source.handle);
+                    source.handle = AudioEngine::kInvalidHandle;
+                }
+            }
+            else if (clip_changed && source.handle != AudioEngine::kInvalidHandle)
+            {
+                // Clip path was reassigned mid-playback — restart with new clip.
+                audio_engine_.StopSound(source.handle);
+                source.handle = AudioEngine::kInvalidHandle;
+            }
+
+            // On: start playback when transitioning into On (or when the clip
+            // is freshly assigned), and ensure looping clips keep playing.
+            const bool should_start = (mode == SceneObjectAudioPlayMode::On)
+                && source.handle == AudioEngine::kInvalidHandle
+                && (mode_changed || clip_changed || audio_attr.loop);
+            if (should_start)
+            {
+                source.handle = audio_engine_.PlaySound(params);
+                source.clip_path = audio_attr.clip_path;
+            }
+            else if (source.handle != AudioEngine::kInvalidHandle)
+            {
+                if (!audio_engine_.UpdateSound(source.handle, params))
+                {
+                    // Sound finished naturally (one-shot reached end).
+                    source.handle = AudioEngine::kInvalidHandle;
+                }
+            }
+
+            source.last_play_mode = mode;
+            source.clip_path = audio_attr.clip_path;
+        }
+    }
+
+    // Stop any audio sources whose owning attribute no longer exists.
+    for (auto it = active_audio_sources_.begin(); it != active_audio_sources_.end();)
+    {
+        if (seen_keys.find(it->first) == seen_keys.end())
+        {
+            if (it->second.handle != AudioEngine::kInvalidHandle)
+            {
+                audio_engine_.StopSound(it->second.handle);
+            }
+            it = active_audio_sources_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }

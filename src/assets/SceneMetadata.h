@@ -32,6 +32,13 @@ enum class SceneObjectAttributeKind
     Text2D,
     Image2D,
     Skybox,
+    Audio,
+};
+
+enum class SceneObjectAudioPlayMode
+{
+    Off,
+    On,
 };
 
 struct SceneObjectEnvironmentLightAttributes
@@ -136,6 +143,19 @@ struct SceneObjectSkyboxAttributes
     float rotation_degrees = 0.0f;
 };
 
+struct SceneObjectAudioAttributes
+{
+    std::string clip_path;
+    SceneObjectAudioPlayMode play_mode = SceneObjectAudioPlayMode::Off;
+    float volume = 1.0f;
+    float pitch = 1.0f;
+    bool loop = false;
+    bool spatialize_3d = true;
+    float min_distance = 1.0f;
+    float max_distance = 50.0f;
+    float doppler_factor = 1.0f;
+};
+
 struct SceneObjectAttribute
 {
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
@@ -150,6 +170,7 @@ struct SceneObjectAttribute
     SceneObjectText2DAttributes text_2d{};
     SceneObjectImage2DAttributes image_2d{};
     SceneObjectSkyboxAttributes skybox{};
+    SceneObjectAudioAttributes audio{};
 };
 
 struct SceneObjectMetadata
@@ -281,6 +302,15 @@ bool SetSceneObjectAttributeImage2DPriority(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
 bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees);
+bool SetSceneObjectAttributeAudioClipPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& clip_path);
+bool SetSceneObjectAttributeAudioPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectAudioPlayMode play_mode);
+bool SetSceneObjectAttributeAudioVolume(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float volume);
+bool SetSceneObjectAttributeAudioPitch(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float pitch);
+bool SetSceneObjectAttributeAudioLoop(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool loop);
+bool SetSceneObjectAttributeAudioSpatialize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool spatialize_3d);
+bool SetSceneObjectAttributeAudioMinDistance(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float min_distance);
+bool SetSceneObjectAttributeAudioMaxDistance(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float max_distance);
+bool SetSceneObjectAttributeAudioDopplerFactor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float doppler_factor);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
