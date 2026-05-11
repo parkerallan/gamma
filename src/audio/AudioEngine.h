@@ -12,9 +12,11 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 struct ma_engine;
 struct ma_sound;
+struct ma_decoder;
 
 class AudioEngine
 {
@@ -25,6 +27,10 @@ public:
     struct PlayParams
     {
         std::string clip_path;       // absolute path on disk, .wav/.ogg/.mp3
+        // Optional in-memory clip data (used for packed game builds where the
+        // file lives inside assets.pak and is not on disk). When non-empty,
+        // this is used and clip_path is ignored for the actual decode.
+        std::vector<std::uint8_t> clip_bytes;
         float volume = 1.0f;
         float pitch = 1.0f;
         bool loop = false;
@@ -71,6 +77,8 @@ private:
     struct PlayingSound
     {
         std::unique_ptr<ma_sound> sound;
+        std::unique_ptr<ma_decoder> decoder;
+        std::vector<std::uint8_t> clip_bytes;
         std::string clip_path;
         bool spatialize_3d = true;
     };

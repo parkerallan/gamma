@@ -5720,14 +5720,28 @@ void RuntimeRenderer::UpdateAudioSourcesForFrame(
             const std::array<float, 3> world_position = ResolveAudioSourceWorldPosition(object.name, resolved_poses);
 
             AudioEngine::PlayParams params;
-            // Resolve relative clip paths against the project root so the
-            // game-build asset layout works without absolute paths in scenes.
+            // Resolve clip data: prefer the global asset reader (packed game
+            // .pak) so built games can stream audio without a sidecar; fall
+            // back to the project root on disk for editor playback.
             if (!audio_attr.clip_path.empty())
             {
-                const std::filesystem::path stored(audio_attr.clip_path);
-                params.clip_path = stored.is_absolute()
-                    ? stored.generic_string()
-                    : (project_root_ / stored).generic_string();
+                std::vector<std::uint8_t> bytes;
+                if (g_asset_reader)
+                {
+                    bytes = g_asset_reader->ReadFile(audio_attr.clip_path);
+                }
+                if (!bytes.empty())
+                {
+                    params.clip_bytes = std::move(bytes);
+                    params.clip_path = audio_attr.clip_path;
+                }
+                else
+                {
+                    const std::filesystem::path stored(audio_attr.clip_path);
+                    params.clip_path = stored.is_absolute()
+                        ? stored.generic_string()
+                        : (project_root_ / stored).generic_string();
+                }
             }
             params.volume = audio_attr.volume;
             params.pitch = audio_attr.pitch;

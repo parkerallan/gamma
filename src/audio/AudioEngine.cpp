@@ -96,7 +96,11 @@ void AudioEngine::SetListener(
 
 AudioEngine::SoundHandle AudioEngine::PlaySound(const PlayParams& params)
 {
-    if (engine_ == nullptr || params.clip_path.empty())
+    if (engine_ == nullptr)
+    {
+        return kInvalidHandle;
+    }
+    if (params.clip_path.empty() && params.clip_bytes.empty())
     {
         return kInvalidHandle;
     }
@@ -106,19 +110,58 @@ AudioEngine::SoundHandle AudioEngine::PlaySound(const PlayParams& params)
     playing.clip_path = params.clip_path;
     playing.spatialize_3d = params.spatialize_3d;
 
-    // MA_SOUND_FLAG_DECODE pre-decodes into memory which is appropriate for
-    // typical SFX-sized clips. For large music files miniaudio supports
-    // streaming by omitting that flag; we keep things simple for v1.
-    const ma_result result = ma_sound_init_from_file(
-        engine_,
-        params.clip_path.c_str(),
-        MA_SOUND_FLAG_DECODE,
-        nullptr,
-        nullptr,
-        playing.sound.get());
-    if (result != MA_SUCCESS)
+    ma_result result = MA_SUCCESS;
+    if (!params.clip_bytes.empty())
     {
-        return kInvalidHandle;
+        // Packed game path: own a stable copy of the bytes for the decoder's
+        // lifetime, then init a decoder over memory and a sound over the
+        // decoder.
+        playing.clip_bytes = params.clip_bytes;
+        playing.decoder = std::make_unique<ma_decoder>();
+        ma_decoder_config decoder_config = ma_decoder_config_init_default();
+        result = ma_decoder_init_memory(
+            playing.clip_bytes.data(),
+            playing.clip_bytes.size(),
+            &decoder_config,
+            playing.decoder.get());
+        if (result != MA_SUCCESS)
+        {
+            SDL_Log("ma_decoder_init_memory failed for %s: %d (%s)",
+                params.clip_path.c_str(),
+                static_cast<int>(result),
+                ma_result_description(result));
+            return kInvalidHandle;
+        }
+        result = ma_sound_init_from_data_source(
+            engine_,
+            playing.decoder.get(),
+            0,
+            nullptr,
+            playing.sound.get());
+        if (result != MA_SUCCESS)
+        {
+            ma_decoder_uninit(playing.decoder.get());
+            SDL_Log("ma_sound_init_from_data_source failed for %s: %d (%s)",
+                params.clip_path.c_str(),
+                static_cast<int>(result),
+                ma_result_description(result));
+            return kInvalidHandle;
+        }
+    }
+    else
+    {
+        // Editor path: decode from disk.
+        result = ma_sound_init_from_file(
+            engine_,
+            params.clip_path.c_str(),
+            MA_SOUND_FLAG_DECODE,
+            nullptr,
+            nullptr,
+            playing.sound.get());
+        if (result != MA_SUCCESS)
+        {
+            return kInvalidHandle;
+        }
     }
 
     ma_sound_set_volume(playing.sound.get(), PerceptualVolume(params.volume));
@@ -149,6 +192,10 @@ AudioEngine::SoundHandle AudioEngine::PlaySound(const PlayParams& params)
     if (ma_sound_start(playing.sound.get()) != MA_SUCCESS)
     {
         ma_sound_uninit(playing.sound.get());
+        if (playing.decoder)
+        {
+            ma_decoder_uninit(playing.decoder.get());
+        }
         return kInvalidHandle;
     }
 
@@ -181,6 +228,10 @@ bool AudioEngine::UpdateSound(SoundHandle handle, const PlayParams& params)
     if (ma_sound_at_end(playing.sound.get()) && !ma_sound_is_looping(playing.sound.get()))
     {
         ma_sound_uninit(playing.sound.get());
+        if (playing.decoder)
+        {
+            ma_decoder_uninit(playing.decoder.get());
+        }
         playing_.erase(it);
         return false;
     }
@@ -225,6 +276,10 @@ void AudioEngine::StopSound(SoundHandle handle)
 
     ma_sound_stop(it->second.sound.get());
     ma_sound_uninit(it->second.sound.get());
+    if (it->second.decoder)
+    {
+        ma_decoder_uninit(it->second.decoder.get());
+    }
     playing_.erase(it);
 }
 
@@ -252,6 +307,10 @@ void AudioEngine::StopAll()
     {
         ma_sound_stop(playing.sound.get());
         ma_sound_uninit(playing.sound.get());
+        if (playing.decoder)
+        {
+            ma_decoder_uninit(playing.decoder.get());
+        }
     }
     playing_.clear();
 }
