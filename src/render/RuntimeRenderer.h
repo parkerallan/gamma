@@ -57,6 +57,14 @@ public:
     void SeedModelAsset(const std::filesystem::path& absolute_model_path,
                         std::filesystem::file_time_type write_time,
                         ModelAsset asset);
+    // Hand pre-read video file bytes (keyed by the scene-relative
+    // video_path) to the video subsystem so the first Update() on the
+    // main thread skips a synchronous pak read.
+    void SeedVideoBytes(const std::string& video_path, std::vector<std::uint8_t> bytes);
+    // Hand pre-read audio clip bytes (keyed by clip_path) to the audio
+    // engine so PlaySound at runtime avoids any disk I/O.
+    void SeedAudioClipBytes(const std::string& clip_path, std::vector<std::uint8_t> bytes);
+    AudioEngine& GetAudioEngine() { return audio_engine_; }
 
     VkImage GetOutputImage() const { return ray_tracing_.GetOutputImage(); }
     VkImageLayout GetOutputLayout() const { return ray_tracing_.GetOutputLayout(); }

@@ -22,8 +22,8 @@ private:
     bool show_render_ = true;
     bool show_2d_ = true;
     bool show_animation_ = true;
-    bool show_audio_ = false;
-    bool show_video_ = false;
+    bool show_audio_ = true;
+    bool show_video_ = true;
 
     std::vector<float> fps_history_;
     std::vector<float> physics_ms_history_;

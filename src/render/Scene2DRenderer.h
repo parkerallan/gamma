@@ -33,6 +33,26 @@ public:
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         int width = 0;
         int height = 0;
+        // Persistent streaming-upload resources, double-buffered. Each slot
+        // owns its own staging buffer + command buffer + fence so the next
+        // upload can run while the previous one is still in flight on the
+        // GPU. With a single slot, every upload waited on the previous
+        // upload's fence which itself sat behind the swapchain present
+        // queue — that 1-2 ms wait was attributed to the video subsystem
+        // on upload frames and to the render subsystem on non-upload
+        // frames, producing the bimodal subsystem-graph oscillation that
+        // was visible in small runtime windows.
+        struct UploadSlot
+        {
+            VkBuffer staging_buffer = VK_NULL_HANDLE;
+            VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+            VkDeviceSize staging_size = 0;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+            bool in_flight = false;
+        };
+        UploadSlot upload_slots[2]{};
+        int next_upload_slot = 0;
     };
 
     ~Scene2DRenderer();
@@ -176,6 +196,17 @@ private:
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
+
+    // Persistent overlay submit resources (1 frame in flight). The previous
+    // implementation allocated a fresh command buffer + fence per frame and
+    // did vkWaitForFences synchronously after submit, which forced the CPU
+    // to wait for the entire RT + overlay GPU pipeline every frame (~2 ms
+    // in small windows). We now wait at the START of the next overlay, by
+    // which point the GPU has almost always finished — the wait is a no-op
+    // and the CPU runs one frame ahead.
+    VkCommandBuffer overlay_cmd_ = VK_NULL_HANDLE;
+    VkFence overlay_fence_ = VK_NULL_HANDLE;
+    bool overlay_in_flight_ = false;
 
     // Per-frame vertex/index buffers for batched quad drawing
     VkBuffer vertex_buffer_ = VK_NULL_HANDLE;

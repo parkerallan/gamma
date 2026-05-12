@@ -539,6 +539,22 @@ void Scene2DRenderer::Shutdown()
         vkDestroySampler(device, sampler_, allocator);
         sampler_ = VK_NULL_HANDLE;
     }
+    // Persistent overlay submit resources.
+    if (overlay_fence_ != VK_NULL_HANDLE)
+    {
+        if (overlay_in_flight_)
+        {
+            vkWaitForFences(device, 1, &overlay_fence_, VK_TRUE, UINT64_MAX);
+            overlay_in_flight_ = false;
+        }
+        vkDestroyFence(device, overlay_fence_, allocator);
+        overlay_fence_ = VK_NULL_HANDLE;
+    }
+    if (overlay_cmd_ != VK_NULL_HANDLE && command_pool_ != VK_NULL_HANDLE)
+    {
+        vkFreeCommandBuffers(device, command_pool_, 1, &overlay_cmd_);
+        overlay_cmd_ = VK_NULL_HANDLE;
+    }
     if (command_pool_ != VK_NULL_HANDLE)
     {
         vkDestroyCommandPool(device, command_pool_, allocator);
@@ -696,6 +712,32 @@ void Scene2DRenderer::ReleaseGpuTexture(GpuTexture& tex)
     }
     const VkDevice device = vulkan_context_->GetDevice();
     const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    // Wait for any in-flight streaming upload before tearing down the
+    // staging resources it referenced.
+    for (GpuTexture::UploadSlot& slot : tex.upload_slots)
+    {
+        if (slot.fence != VK_NULL_HANDLE && slot.in_flight)
+        {
+            vkWaitForFences(device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+        }
+        if (slot.fence != VK_NULL_HANDLE)
+        {
+            vkDestroyFence(device, slot.fence, allocator);
+        }
+        if (slot.cmd != VK_NULL_HANDLE && command_pool_ != VK_NULL_HANDLE)
+        {
+            vkFreeCommandBuffers(device, command_pool_, 1, &slot.cmd);
+        }
+        if (slot.staging_buffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(device, slot.staging_buffer, allocator);
+        }
+        if (slot.staging_memory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, slot.staging_memory, allocator);
+        }
+    }
 
     if (tex.descriptor_set != VK_NULL_HANDLE && descriptor_pool_ != VK_NULL_HANDLE)
     {
@@ -1259,56 +1301,96 @@ bool Scene2DRenderer::UpdateTexture(
     }
 
     const VkDeviceSize upload_size = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4u;
-    VkBuffer staging_buffer = VK_NULL_HANDLE;
-    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-    if (!CreateGpuBuffer(
-            vulkan_context_->GetPhysicalDevice(),
-            device,
-            allocator,
-            upload_size,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            staging_buffer,
-            staging_memory))
+
+    // Pick the next staging slot. Two slots in rotation means we only ever
+    // wait on a slot whose previous submit is at least one whole upload
+    // older — at 30 fps source video and 60+ Hz game rate that fence is
+    // always already signaled, so the wait is a no-op (microseconds).
+    GpuTexture::UploadSlot& slot = texture.upload_slots[texture.next_upload_slot];
+    texture.next_upload_slot = (texture.next_upload_slot + 1) % 2;
+
+    if (slot.fence != VK_NULL_HANDLE && slot.in_flight)
     {
-        return false;
+        vkWaitForFences(device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &slot.fence);
+        slot.in_flight = false;
+    }
+
+    // Lazily allocate / grow the persistent staging buffer for this slot.
+    if (slot.staging_buffer == VK_NULL_HANDLE || slot.staging_size < upload_size)
+    {
+        if (slot.staging_buffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(device, slot.staging_buffer, allocator);
+            slot.staging_buffer = VK_NULL_HANDLE;
+        }
+        if (slot.staging_memory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(device, slot.staging_memory, allocator);
+            slot.staging_memory = VK_NULL_HANDLE;
+        }
+        if (!CreateGpuBuffer(
+                vulkan_context_->GetPhysicalDevice(),
+                device,
+                allocator,
+                upload_size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                slot.staging_buffer,
+                slot.staging_memory))
+        {
+            return false;
+        }
+        slot.staging_size = upload_size;
     }
 
     void* mapped = nullptr;
-    VkResult result = vkMapMemory(device, staging_memory, 0, upload_size, 0, &mapped);
+    VkResult result = vkMapMemory(device, slot.staging_memory, 0, upload_size, 0, &mapped);
     VulkanContext::CheckVkResult(result);
     if (result != VK_SUCCESS || mapped == nullptr)
     {
-        vkFreeMemory(device, staging_memory, allocator);
-        vkDestroyBuffer(device, staging_buffer, allocator);
         return false;
     }
-
     std::memcpy(mapped, upload_pixels, static_cast<std::size_t>(upload_size));
-    vkUnmapMemory(device, staging_memory);
+    vkUnmapMemory(device, slot.staging_memory);
 
-    VkCommandBufferAllocateInfo cmd_ai = {};
-    cmd_ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_ai.commandPool = command_pool_;
-    cmd_ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_ai.commandBufferCount = 1;
-
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    result = vkAllocateCommandBuffers(device, &cmd_ai, &cmd);
-    VulkanContext::CheckVkResult(result);
-    if (result != VK_SUCCESS)
+    // Lazily allocate the persistent command buffer + fence for this slot.
+    if (slot.cmd == VK_NULL_HANDLE)
     {
-        vkFreeMemory(device, staging_memory, allocator);
-        vkDestroyBuffer(device, staging_buffer, allocator);
-        return false;
+        VkCommandBufferAllocateInfo cmd_ai = {};
+        cmd_ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_ai.commandPool = command_pool_;
+        cmd_ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_ai.commandBufferCount = 1;
+        result = vkAllocateCommandBuffers(device, &cmd_ai, &slot.cmd);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            slot.cmd = VK_NULL_HANDLE;
+            return false;
+        }
     }
+    if (slot.fence == VK_NULL_HANDLE)
+    {
+        VkFenceCreateInfo fence_info = {};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(device, &fence_info, allocator, &slot.fence);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            slot.fence = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+
+    vkResetCommandBuffer(slot.cmd, 0);
 
     VkCommandBufferBeginInfo begin_info = {};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &begin_info);
+    vkBeginCommandBuffer(slot.cmd, &begin_info);
 
-    TransitionImage(cmd, texture.image,
+    TransitionImage(slot.cmd, texture.image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -1319,45 +1401,34 @@ bool Scene2DRenderer::UpdateTexture(
     copy.imageExtent.width = static_cast<std::uint32_t>(width);
     copy.imageExtent.height = static_cast<std::uint32_t>(height);
     copy.imageExtent.depth = 1;
-    vkCmdCopyBufferToImage(cmd, staging_buffer, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    vkCmdCopyBufferToImage(slot.cmd, slot.staging_buffer, texture.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-    TransitionImage(cmd, texture.image,
+    TransitionImage(slot.cmd, texture.image,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-    vkEndCommandBuffer(cmd);
-
-    VkFenceCreateInfo fence_info = {};
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    result = vkCreateFence(device, &fence_info, allocator, &fence);
-    VulkanContext::CheckVkResult(result);
-    if (result != VK_SUCCESS)
-    {
-        vkFreeCommandBuffers(device, command_pool_, 1, &cmd);
-        vkFreeMemory(device, staging_memory, allocator);
-        vkDestroyBuffer(device, staging_buffer, allocator);
-        return false;
-    }
+    vkEndCommandBuffer(slot.cmd);
 
     VkSubmitInfo submit = {};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    result = vkQueueSubmit(vulkan_context_->GetQueue(), 1, &submit, fence);
+    submit.pCommandBuffers = &slot.cmd;
+    result = vkQueueSubmit(vulkan_context_->GetQueue(), 1, &submit, slot.fence);
     VulkanContext::CheckVkResult(result);
-    if (result == VK_SUCCESS)
+    if (result != VK_SUCCESS)
     {
-        result = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-        VulkanContext::CheckVkResult(result);
+        return false;
     }
+    slot.in_flight = true;
 
-    vkDestroyFence(device, fence, allocator);
-    vkFreeCommandBuffers(device, command_pool_, 1, &cmd);
-    vkFreeMemory(device, staging_memory, allocator);
-    vkDestroyBuffer(device, staging_buffer, allocator);
-    return result == VK_SUCCESS;
+    // No vkWaitForFences here: the upload runs on the same queue as the
+    // subsequent overlay submit, so queue ordering guarantees the layout
+    // transition to SHADER_READ_ONLY completes before the overlay reads
+    // the texture. The fence is only used to gate the *next* upload that
+    // lands on this same slot so we can safely reuse its staging buffer.
+    return true;
 }
 
 Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesystem::path& path, bool use_pak_streaming)
@@ -1698,21 +1769,66 @@ void Scene2DRenderer::CompositeOverlay(
     }
 
     const VkDevice device = vulkan_context_->GetDevice();
+    VkResult result = VK_SUCCESS;
 
-    // Record and submit overlay commands
-    VkCommandBufferAllocateInfo cmd_ai = {};
-    cmd_ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_ai.commandPool = command_pool_;
-    cmd_ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_ai.commandBufferCount = 1;
-
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VkResult result = vkAllocateCommandBuffers(device, &cmd_ai, &cmd);
-    VulkanContext::CheckVkResult(result);
-    if (result != VK_SUCCESS)
+    // --- 1-frame-in-flight pacing ---
+    // Wait for the *previous* overlay submit (if any) to complete before we
+    // recycle its persistent command buffer. By the time we get here on
+    // frame N+1, the GPU has typically finished frame N's overlay long
+    // ago, so this wait is a near-zero no-op. The CPU now runs one frame
+    // ahead of the GPU instead of stalling on a synchronous fence wait
+    // after every submit (which previously dominated the perf graphs in
+    // small runtime windows).
+    if (overlay_fence_ != VK_NULL_HANDLE && overlay_in_flight_)
     {
-        return;
+        const std::uint64_t wait_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+        result = vkWaitForFences(device, 1, &overlay_fence_, VK_TRUE, UINT64_MAX);
+        VulkanContext::CheckVkResult(result);
+        if (out_gpu_wait_ms != nullptr)
+        {
+            const std::uint64_t wait_end_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+            const std::uint64_t freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+            if (freq > 0)
+            {
+                const double elapsed_ms = static_cast<double>(wait_end_ticks - wait_start_ticks) * 1000.0 / static_cast<double>(freq);
+                *out_gpu_wait_ms = static_cast<float>(elapsed_ms);
+            }
+        }
+        vkResetFences(device, 1, &overlay_fence_);
+        overlay_in_flight_ = false;
     }
+
+    // Lazily allocate the persistent command buffer + fence.
+    if (overlay_cmd_ == VK_NULL_HANDLE)
+    {
+        VkCommandBufferAllocateInfo overlay_cmd_ai = {};
+        overlay_cmd_ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        overlay_cmd_ai.commandPool = command_pool_;
+        overlay_cmd_ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        overlay_cmd_ai.commandBufferCount = 1;
+        result = vkAllocateCommandBuffers(device, &overlay_cmd_ai, &overlay_cmd_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            overlay_cmd_ = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    if (overlay_fence_ == VK_NULL_HANDLE)
+    {
+        VkFenceCreateInfo of_ci = {};
+        of_ci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(device, &of_ci, vulkan_context_->GetAllocator(), &overlay_fence_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            overlay_fence_ = VK_NULL_HANDLE;
+            return;
+        }
+    }
+
+    VkCommandBuffer cmd = overlay_cmd_;
+    vkResetCommandBuffer(cmd, 0);
 
     VkCommandBufferBeginInfo begin_info = {};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1996,36 +2112,19 @@ void Scene2DRenderer::CompositeOverlay(
 
     vkEndCommandBuffer(cmd);
 
-    VkFenceCreateInfo fence_info = {};
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    result = vkCreateFence(device, &fence_info, vulkan_context_->GetAllocator(), &fence);
+    // Submit without a synchronous wait. The fence is checked at the start
+    // of the *next* CompositeOverlay call (1 frame in flight). Reads of
+    // the overlay output happen later on the same queue (the editor's
+    // image-copy or the runtime's present), so queue ordering guarantees
+    // visibility without a CPU wait here.
+    VkSubmitInfo submit = {};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    result = vkQueueSubmit(vulkan_context_->GetQueue(), 1, &submit, overlay_fence_);
     VulkanContext::CheckVkResult(result);
     if (result == VK_SUCCESS)
     {
-        VkSubmitInfo submit = {};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cmd;
-        result = vkQueueSubmit(vulkan_context_->GetQueue(), 1, &submit, fence);
-        VulkanContext::CheckVkResult(result);
-        if (result == VK_SUCCESS)
-        {
-            const std::uint64_t wait_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
-            result = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-            VulkanContext::CheckVkResult(result);
-            if (out_gpu_wait_ms != nullptr)
-            {
-                const std::uint64_t wait_end_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
-                const std::uint64_t freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
-                if (freq > 0)
-                {
-                    const double elapsed_ms = static_cast<double>(wait_end_ticks - wait_start_ticks) * 1000.0 / static_cast<double>(freq);
-                    *out_gpu_wait_ms = static_cast<float>(elapsed_ms);
-                }
-            }
-        }
-        vkDestroyFence(device, fence, vulkan_context_->GetAllocator());
+        overlay_in_flight_ = true;
     }
-    vkFreeCommandBuffers(device, command_pool_, 1, &cmd);
 }

@@ -45,6 +45,18 @@ public:
     {
         return model_asset_cache_;
     }
+    // Bytes for audio clips / video files referenced by the cached scene
+    // that the async preloader has already pulled from disk. Used by the
+    // editor->runtime hand-off so PlaySound and the first video Update()
+    // don't have to read from disk on the main thread.
+    const std::unordered_map<std::string, std::vector<std::uint8_t>>& GetCachedAudioClipBytes() const
+    {
+        return audio_clip_bytes_cache_;
+    }
+    const std::unordered_map<std::string, std::vector<std::uint8_t>>& GetCachedVideoBytes() const
+    {
+        return video_bytes_cache_;
+    }
     // Block until any pending async scene preload finishes (bounded by the
     // worker thread's parse time) AND consume the result into the cache so
     // GetCachedModelAssets / TryGetCachedSceneMetadata see it. No-op when no
@@ -58,6 +70,11 @@ private:
         std::filesystem::file_time_type scene_write_time{};
         SceneMetadata scene_metadata{};
         std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_cache;
+        // Keyed by the path as stored in the scene attribute (relative,
+        // matches the runtime lookup keys). Empty entries mean the file
+        // couldn't be read; consumers should fall back to disk.
+        std::unordered_map<std::string, std::vector<std::uint8_t>> audio_clip_bytes;
+        std::unordered_map<std::string, std::vector<std::uint8_t>> video_bytes;
     };
 
     NodeGraphComponent node_graph_component_;
@@ -69,6 +86,8 @@ private:
     SceneMetadata cached_scene_metadata_{};
     bool has_cached_scene_metadata_ = false;
     std::unordered_map<std::filesystem::path, CachedModelAssetEntry> model_asset_cache_;
+    std::unordered_map<std::string, std::vector<std::uint8_t>> audio_clip_bytes_cache_;
+    std::unordered_map<std::string, std::vector<std::uint8_t>> video_bytes_cache_;
     std::future<AsyncViewportLoadResult> pending_viewport_load_;
     std::filesystem::path pending_viewport_scene_path_;
     std::filesystem::file_time_type pending_viewport_scene_write_time_{};

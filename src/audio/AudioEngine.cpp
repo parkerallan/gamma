@@ -6,6 +6,9 @@
 
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <utility>
 
 namespace
 {
@@ -110,58 +113,49 @@ AudioEngine::SoundHandle AudioEngine::PlaySound(const PlayParams& params)
     playing.clip_path = params.clip_path;
     playing.spatialize_3d = params.spatialize_3d;
 
-    ma_result result = MA_SUCCESS;
-    if (!params.clip_bytes.empty())
+    // Resolve clip bytes through the shared cache. We always go through the
+    // memory-decoder path now: ma_decoder_init_memory does no upfront PCM
+    // decode (frames are produced on the audio thread on demand), so
+    // first-play latency drops from "decode the whole file" to "open the
+    // demuxer" — typically <1 ms even for multi-minute OGG / MP3.
+    std::vector<std::uint8_t> inline_copy = params.clip_bytes;
+    playing.clip_bytes = GetOrLoadClipBytes(params.clip_path, &inline_copy);
+    if (!playing.clip_bytes || playing.clip_bytes->empty())
     {
-        // Packed game path: own a stable copy of the bytes for the decoder's
-        // lifetime, then init a decoder over memory and a sound over the
-        // decoder.
-        playing.clip_bytes = params.clip_bytes;
-        playing.decoder = std::make_unique<ma_decoder>();
-        ma_decoder_config decoder_config = ma_decoder_config_init_default();
-        result = ma_decoder_init_memory(
-            playing.clip_bytes.data(),
-            playing.clip_bytes.size(),
-            &decoder_config,
-            playing.decoder.get());
-        if (result != MA_SUCCESS)
-        {
-            SDL_Log("ma_decoder_init_memory failed for %s: %d (%s)",
-                params.clip_path.c_str(),
-                static_cast<int>(result),
-                ma_result_description(result));
-            return kInvalidHandle;
-        }
-        result = ma_sound_init_from_data_source(
-            engine_,
-            playing.decoder.get(),
-            0,
-            nullptr,
-            playing.sound.get());
-        if (result != MA_SUCCESS)
-        {
-            ma_decoder_uninit(playing.decoder.get());
-            SDL_Log("ma_sound_init_from_data_source failed for %s: %d (%s)",
-                params.clip_path.c_str(),
-                static_cast<int>(result),
-                ma_result_description(result));
-            return kInvalidHandle;
-        }
+        SDL_Log("AudioEngine::PlaySound: no bytes available for '%s'", params.clip_path.c_str());
+        return kInvalidHandle;
     }
-    else
+
+    ma_result result = MA_SUCCESS;
+    playing.decoder = std::make_unique<ma_decoder>();
+    ma_decoder_config decoder_config = ma_decoder_config_init_default();
+    result = ma_decoder_init_memory(
+        playing.clip_bytes->data(),
+        playing.clip_bytes->size(),
+        &decoder_config,
+        playing.decoder.get());
+    if (result != MA_SUCCESS)
     {
-        // Editor path: decode from disk.
-        result = ma_sound_init_from_file(
-            engine_,
+        SDL_Log("ma_decoder_init_memory failed for %s: %d (%s)",
             params.clip_path.c_str(),
-            MA_SOUND_FLAG_DECODE,
-            nullptr,
-            nullptr,
-            playing.sound.get());
-        if (result != MA_SUCCESS)
-        {
-            return kInvalidHandle;
-        }
+            static_cast<int>(result),
+            ma_result_description(result));
+        return kInvalidHandle;
+    }
+    result = ma_sound_init_from_data_source(
+        engine_,
+        playing.decoder.get(),
+        0,
+        nullptr,
+        playing.sound.get());
+    if (result != MA_SUCCESS)
+    {
+        ma_decoder_uninit(playing.decoder.get());
+        SDL_Log("ma_sound_init_from_data_source failed for %s: %d (%s)",
+            params.clip_path.c_str(),
+            static_cast<int>(result),
+            ma_result_description(result));
+        return kInvalidHandle;
     }
 
     ma_sound_set_volume(playing.sound.get(), PerceptualVolume(params.volume));
@@ -313,4 +307,69 @@ void AudioEngine::StopAll()
         }
     }
     playing_.clear();
+}
+
+void AudioEngine::PreloadClipBytes(const std::string& clip_path, std::vector<std::uint8_t> bytes)
+{
+    if (clip_path.empty() || bytes.empty())
+    {
+        return;
+    }
+    auto shared = std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes));
+    std::lock_guard<std::mutex> lk(clip_cache_mtx_);
+    clip_cache_[clip_path] = std::move(shared);
+}
+
+std::shared_ptr<const std::vector<std::uint8_t>> AudioEngine::GetOrLoadClipBytes(
+    const std::string& clip_path,
+    std::vector<std::uint8_t>* inline_bytes)
+{
+    // Inline bytes provided by the caller (e.g. RuntimeRenderer already read
+    // from the pak): cache them and return.
+    if (inline_bytes != nullptr && !inline_bytes->empty())
+    {
+        auto shared = std::make_shared<const std::vector<std::uint8_t>>(std::move(*inline_bytes));
+        if (!clip_path.empty())
+        {
+            std::lock_guard<std::mutex> lk(clip_cache_mtx_);
+            clip_cache_[clip_path] = shared;
+        }
+        return shared;
+    }
+
+    if (clip_path.empty())
+    {
+        return nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(clip_cache_mtx_);
+        const auto it = clip_cache_.find(clip_path);
+        if (it != clip_cache_.end())
+        {
+            return it->second;
+        }
+    }
+
+    // Cache miss: read from disk (editor path). The async scene preloader
+    // populates the cache during scene-load on a worker thread so we very
+    // rarely hit this synchronous read at PlaySound time.
+    std::ifstream file(clip_path, std::ios::binary);
+    if (!file)
+    {
+        return nullptr;
+    }
+    std::vector<std::uint8_t> bytes(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>());
+    if (bytes.empty())
+    {
+        return nullptr;
+    }
+    auto shared = std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes));
+    {
+        std::lock_guard<std::mutex> lk(clip_cache_mtx_);
+        clip_cache_[clip_path] = shared;
+    }
+    return shared;
 }

@@ -193,8 +193,8 @@ void PerformancePanel::Render(EngineState& state, const RuntimeRenderer& runtime
         {"Render", &render_ms_history_, &show_render_, IM_COL32(255, 150, 120, 255), true},
         {"2D", &overlay_2d_ms_history_, &show_2d_, IM_COL32(205, 160, 255, 255), true},
         {"Animation", &animation_ms_history_, &show_animation_, IM_COL32(255, 196, 92, 180), true},
-        {"Audio", &audio_ms_history_, &show_audio_, IM_COL32(255, 120, 190, 180), false},
-        {"Video", &video_ms_history_, &show_video_, IM_COL32(180, 180, 180, 180), false},
+        {"Audio", &audio_ms_history_, &show_audio_, IM_COL32(255, 120, 190, 180), true},
+        {"Video", &video_ms_history_, &show_video_, IM_COL32(180, 180, 180, 180), true},
     }};
     const float subsystem_graph_max = (std::max)(FindVisibleHistoryMax(subsystem_series, 12) * 1.10f, 0.001f);
     DrawOverlayGraph("SubsystemTimingGraph", subsystem_series, subsystem_graph_max, "ms");

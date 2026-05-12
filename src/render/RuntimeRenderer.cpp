@@ -2269,6 +2269,16 @@ void RuntimeRenderer::SeedModelAsset(
     cache_entry.asset = std::move(asset);
 }
 
+void RuntimeRenderer::SeedVideoBytes(const std::string& video_path, std::vector<std::uint8_t> bytes)
+{
+    video_playback_manager_.PreloadVideoBytes(video_path, std::move(bytes));
+}
+
+void RuntimeRenderer::SeedAudioClipBytes(const std::string& clip_path, std::vector<std::uint8_t> bytes)
+{
+    audio_engine_.PreloadClipBytes(clip_path, std::move(bytes));
+}
+
 void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata)
 {
     // Use the high-resolution monotonic counter for animation delta time.
@@ -5141,6 +5151,7 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
 
     const std::uint64_t overlay_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     float overlay_gpu_wait_ms = 0.0f;
+    float video_update_ms = 0.0f;
     {
         const std::uint64_t now_perf_ticks = overlay_start_ticks;
         const std::uint64_t perf_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
@@ -5152,8 +5163,13 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
                 static_cast<double>(perf_freq));
         }
         video_last_perf_ticks_ = now_perf_ticks;
+        const std::uint64_t video_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         video_playback_manager_.Update(video_dt, scene_metadata, project_root_);
+        video_update_ms = TicksToMilliseconds(
+            video_start_ticks,
+            static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
     }
+    performance_stats_.video_time_ms = video_update_ms;
     scene_2d_renderer_.CompositeOverlay(
         scene_metadata,
         project_root_,
@@ -5169,9 +5185,13 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     // The overlay submit shares a queue with ray tracing, so vkWaitForFences
     // can stall on previously queued RT work. Reattribute that wait to the
     // render subsystem so the 2D series reflects only CPU-side overlay work.
-    performance_stats_.overlay_2d_time_ms = (std::max)(overlay_total_ms - overlay_gpu_wait_ms, 0.0f);
+    performance_stats_.overlay_2d_time_ms = (std::max)(overlay_total_ms - overlay_gpu_wait_ms - video_update_ms, 0.0f);
     performance_stats_.render_time_ms += overlay_gpu_wait_ms;
-    performance_stats_.gpu_time_ms = overlay_gpu_wait_ms;
+    // Real GPU time, sampled via vkCmdWriteTimestamp around the RT command
+    // buffer (the dominant GPU work per frame). The previous value here was
+    // just the duration of the synchronous vkWaitForFences after the overlay
+    // submit -- a CPU stall measurement, not actual GPU work.
+    performance_stats_.gpu_time_ms = ray_tracing_.GetLastGpuTimeMs();
     performance_stats_.frame_time_ms = TicksToMilliseconds(
         frame_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));

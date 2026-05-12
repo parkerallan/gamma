@@ -959,10 +959,30 @@ bool EngineApplication::StartRuntimeSession()
             ++seeded_count;
         }
     }
+    std::size_t seeded_audio = 0;
+    for (const auto& [clip_path, bytes] : workspace_panel_.GetCachedAudioClipBytes())
+    {
+        if (!bytes.empty())
+        {
+            runtime_renderer_.SeedAudioClipBytes(clip_path, bytes);
+            ++seeded_audio;
+        }
+    }
+    std::size_t seeded_video = 0;
+    for (const auto& [video_path, bytes] : workspace_panel_.GetCachedVideoBytes())
+    {
+        if (!bytes.empty())
+        {
+            runtime_renderer_.SeedVideoBytes(video_path, bytes);
+            ++seeded_video;
+        }
+    }
     SDL_Log(
-        "Play start: %.2f ms total, seeded scene + %zu models from editor cache",
+        "Play start: %.2f ms total, seeded scene + %zu models + %zu audio clip(s) + %zu video(s) from editor cache",
         ms_since(play_start_ticks),
-        seeded_count);
+        seeded_count,
+        seeded_audio,
+        seeded_video);
 
     SDL_SetWindowPosition(runtime_window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(runtime_window_);

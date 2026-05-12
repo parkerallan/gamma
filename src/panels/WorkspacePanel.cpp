@@ -4,6 +4,8 @@
 #include "components/EditorComponent.h"
 
 #include <chrono>
+#include <fstream>
+#include <iterator>
 #include <unordered_set>
 
 WorkspacePanel::WorkspacePanel() = default;
@@ -92,14 +94,28 @@ bool WorkspacePanel::BeginAsyncViewportLoad(
 
         std::unordered_set<std::filesystem::path> unique_model_paths;
         unique_model_paths.reserve(result.scene_metadata.objects.size());
+        // Audio/video collection: keyed by the path string used at lookup time
+        // (audio: absolute project-relative on-disk; video: scene-relative as
+        // VideoPlaybackManager keys its preload cache).
+        std::unordered_set<std::string> unique_audio_paths;
+        std::unordered_set<std::string> unique_video_paths;
         for (const SceneObjectMetadata& object : result.scene_metadata.objects)
         {
-            if (object.model_path.empty())
+            if (!object.model_path.empty())
             {
-                continue;
+                unique_model_paths.insert((project_root / object.model_path).lexically_normal());
             }
-
-            unique_model_paths.insert((project_root / object.model_path).lexically_normal());
+            for (const SceneObjectAttribute& attr : object.attributes)
+            {
+                if (!attr.audio.clip_path.empty())
+                {
+                    unique_audio_paths.insert(attr.audio.clip_path);
+                }
+                if (!attr.video_2d.video_path.empty())
+                {
+                    unique_video_paths.insert(attr.video_2d.video_path);
+                }
+            }
         }
 
         // Fan out: parse every unique model on its own thread. The editor
@@ -133,6 +149,67 @@ bool WorkspacePanel::BeginAsyncViewportLoad(
         {
             ParsedModel parsed = job.get();
             result.model_cache.emplace(std::move(parsed.path), std::move(parsed.entry));
+        }
+
+        // Audio/video bytes: cheap blob reads, fanned out in parallel. The
+        // editor reads from the regular filesystem (no shared pak handle).
+        auto read_bytes_async = [](const std::filesystem::path& abs_path) {
+            return std::async(std::launch::async, [abs_path]() -> std::vector<std::uint8_t> {
+                std::ifstream file(abs_path, std::ios::binary);
+                if (!file)
+                {
+                    return {};
+                }
+                return std::vector<std::uint8_t>(
+                    (std::istreambuf_iterator<char>(file)),
+                    std::istreambuf_iterator<char>());
+            });
+        };
+
+        struct AudioJob { std::string key; std::future<std::vector<std::uint8_t>> fut; };
+        std::vector<AudioJob> audio_jobs;
+        audio_jobs.reserve(unique_audio_paths.size());
+        for (const std::string& clip_path : unique_audio_paths)
+        {
+            const std::filesystem::path stored(clip_path);
+            const std::filesystem::path abs_path = stored.is_absolute()
+                ? stored
+                : (project_root / stored);
+            // Cache key must match what RuntimeRenderer passes to PlaySound
+            // for the editor->runtime hand-off (absolute on-disk path).
+            std::string key = abs_path.generic_string();
+            audio_jobs.push_back({std::move(key), read_bytes_async(abs_path)});
+        }
+        for (auto& job : audio_jobs)
+        {
+            std::vector<std::uint8_t> bytes = job.fut.get();
+            if (!bytes.empty())
+            {
+                result.audio_clip_bytes.emplace(std::move(job.key), std::move(bytes));
+            }
+        }
+
+        struct VideoJob { std::string key; std::future<std::vector<std::uint8_t>> fut; };
+        std::vector<VideoJob> video_jobs;
+        video_jobs.reserve(unique_video_paths.size());
+        for (const std::string& video_path : unique_video_paths)
+        {
+            const std::filesystem::path stored(video_path);
+            const std::filesystem::path abs_path = stored.is_absolute()
+                ? stored
+                : (project_root / stored);
+            // VideoPlaybackManager keys its preload cache by the raw
+            // scene-relative video_path (matches the lookup site in
+            // Update()), so preserve that here.
+            video_jobs.push_back({video_path, read_bytes_async(abs_path)});
+        }
+        for (auto& job : video_jobs)
+        {
+            std::vector<std::uint8_t> bytes = job.fut.get();
+            if (!bytes.empty())
+            {
+                result.video_bytes.emplace(std::move(job.key), std::move(bytes));
+            }
         }
 
         return result;
@@ -190,6 +267,8 @@ bool WorkspacePanel::TryConsumeAsyncViewportLoad(
     cached_scene_metadata_ = std::move(result.scene_metadata);
     has_cached_scene_metadata_ = true;
     model_asset_cache_ = std::move(result.model_cache);
+    audio_clip_bytes_cache_ = std::move(result.audio_clip_bytes);
+    video_bytes_cache_ = std::move(result.video_bytes);
 
     const std::uint64_t freq = SDL_GetPerformanceFrequency();
     if (freq > 0 && pending_viewport_load_dispatch_ticks_ != 0)

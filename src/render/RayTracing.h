@@ -165,6 +165,9 @@ public:
     VkCommandPool GetCommandPool() const { return command_pool_; }
     VkCommandBuffer GetCommandBuffer() const { return command_buffer_; }
     VkFence GetRenderFence() const { return render_fence_; }
+    // Wall-clock GPU time for the most recently completed RT submit (ms).
+    // Returns 0 until at least one frame has been submitted and read back.
+    float GetLastGpuTimeMs() const { return last_gpu_time_ms_; }
     VkImage GetOutputImage() const { return output_image_; }
     VkImageView GetOutputImageView() const { return output_view_; }
     std::uint32_t GetOutputWidth() const { return output_width_; }
@@ -275,6 +278,15 @@ private:
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
     VkFence render_fence_ = VK_NULL_HANDLE;
+    // GPU timestamp queries written around each RT command buffer (top of
+    // pipe at the start, bottom of pipe at the end). Read on the *next*
+    // frame after we know render_fence_ has been signaled. Provides a real
+    // GPU-work measurement instead of the previous "duration of a CPU stall
+    // on vkWaitForFences" misnomer.
+    VkQueryPool timestamp_pool_ = VK_NULL_HANDLE;
+    bool timestamp_pending_ = false;
+    float last_gpu_time_ms_ = 0.0f;
+    double timestamp_period_ns_ = 0.0;
     VkImageLayout output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint32_t output_width_ = 0;

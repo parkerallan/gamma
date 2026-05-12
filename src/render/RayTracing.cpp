@@ -789,6 +789,36 @@ bool RayTracing::Initialize(VulkanContext* context)
         }
     }
 
+    if (timestamp_pool_ == VK_NULL_HANDLE)
+    {
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(vulkan_context_->GetPhysicalDevice(), &props);
+        timestamp_period_ns_ = static_cast<double>(props.limits.timestampPeriod);
+        // Only enable if the device supports timestamp queries on the
+        // graphics/compute queue (timestampPeriod > 0 + valid bits non-zero).
+        if (props.limits.timestampPeriod > 0.0f)
+        {
+            VkQueryPoolCreateInfo qp_info = {};
+            qp_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            qp_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qp_info.queryCount = 2;
+            const VkResult qp_res = vkCreateQueryPool(device, &qp_info, allocator, &timestamp_pool_);
+            VulkanContext::CheckVkResult(qp_res);
+            if (qp_res != VK_SUCCESS)
+            {
+                timestamp_pool_ = VK_NULL_HANDLE;
+            }
+            else
+            {
+                // Pool starts in an undefined state; reset it before first use.
+                // (vkResetQueryPool requires VK_EXT_host_query_reset 1.2; we
+                // do a CPU-side reset on first cmd buffer instead via
+                // vkCmdResetQueryPool, which is core. Just mark not pending.)
+                timestamp_pending_ = false;
+            }
+        }
+    }
+
     if (output_sampler_ == VK_NULL_HANDLE)
     {
         VkSamplerCreateInfo sampler_info = {};
@@ -1418,6 +1448,12 @@ void RayTracing::DestroyFrameResources()
             vkDestroyFence(device, render_fence_, allocator);
             render_fence_ = VK_NULL_HANDLE;
         }
+        if (timestamp_pool_ != VK_NULL_HANDLE)
+        {
+            vkDestroyQueryPool(device, timestamp_pool_, allocator);
+            timestamp_pool_ = VK_NULL_HANDLE;
+        }
+        timestamp_pending_ = false;
         if (command_pool_ != VK_NULL_HANDLE)
         {
             vkDestroyCommandPool(device, command_pool_, allocator);
@@ -1436,6 +1472,8 @@ void RayTracing::DestroyFrameResources()
         command_pool_ = VK_NULL_HANDLE;
         command_buffer_ = VK_NULL_HANDLE;
         output_sampler_ = VK_NULL_HANDLE;
+        timestamp_pool_ = VK_NULL_HANDLE;
+        timestamp_pending_ = false;
     }
 }
 
@@ -2217,6 +2255,28 @@ bool RayTracing::RenderFrame(
         return false;
     }
 
+    // Read back the previous frame's GPU timestamps now that the fence is
+    // signaled (the GPU has finished writing them). Skipped on the very
+    // first frame and any frame where a prior submit was aborted.
+    if (timestamp_pending_ && timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        std::uint64_t ts[2] = {0, 0};
+        const VkResult ts_res = vkGetQueryPoolResults(
+            device,
+            timestamp_pool_,
+            0, 2,
+            sizeof(ts),
+            ts,
+            sizeof(std::uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        if (ts_res == VK_SUCCESS && ts[1] >= ts[0])
+        {
+            const double diff_ticks = static_cast<double>(ts[1] - ts[0]);
+            last_gpu_time_ms_ = static_cast<float>(diff_ticks * timestamp_period_ns_ / 1.0e6);
+        }
+        timestamp_pending_ = false;
+    }
+
     result = vkResetCommandPool(device, command_pool_, 0);
     VulkanContext::CheckVkResult(result);
     if (result != VK_SUCCESS)
@@ -2643,6 +2703,16 @@ bool RayTracing::RenderFrame(
         return false;
     }
 
+    // GPU timing: reset query pool and write a TOP_OF_PIPE timestamp at the
+    // very start. A matching BOTTOM_OF_PIPE timestamp is written at the end
+    // of finalize_and_submit. The resulting elapsed ticks are read back at
+    // the beginning of the next frame.
+    if (timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        vkCmdResetQueryPool(command_buffer_, timestamp_pool_, 0, 2);
+        vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_pool_, 0);
+    }
+
     auto finalize_and_submit = [&]() -> bool
     {
         TransitionImageLayout(
@@ -2656,6 +2726,11 @@ bool RayTracing::RenderFrame(
             VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT);
         output_layout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        if (timestamp_pool_ != VK_NULL_HANDLE)
+        {
+            vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_pool_, 1);
+        }
 
         VkResult end_result = vkEndCommandBuffer(command_buffer_);
         VulkanContext::CheckVkResult(end_result);
@@ -2673,6 +2748,11 @@ bool RayTracing::RenderFrame(
         if (end_result != VK_SUCCESS)
         {
             return false;
+        }
+
+        if (timestamp_pool_ != VK_NULL_HANDLE)
+        {
+            timestamp_pending_ = true;
         }
 
         return true;

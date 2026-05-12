@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -78,17 +79,33 @@ public:
     // Returns nullptr if not initialized.
     ma_engine* GetEngine() const { return engine_; }
 
+    // Cache raw clip bytes keyed by path so subsequent PlaySound calls for
+    // the same path skip disk / pak I/O. Safe to call from any thread; used
+    // by the async scene preloader. Bytes are decoded lazily by miniaudio on
+    // playback — there is no upfront PCM decode, which is what made
+    // first-PlaySound slow under the old MA_SOUND_FLAG_DECODE path.
+    void PreloadClipBytes(const std::string& clip_path, std::vector<std::uint8_t> bytes);
+
 private:
     struct PlayingSound
     {
         std::unique_ptr<ma_sound> sound;
         std::unique_ptr<ma_decoder> decoder;
-        std::vector<std::uint8_t> clip_bytes;
+        std::shared_ptr<const std::vector<std::uint8_t>> clip_bytes;
         std::string clip_path;
         bool spatialize_3d = true;
     };
 
+    // Lookup or insert a shared byte buffer for the given clip path. Reads
+    // from disk on the editor path or returns the cached entry from a prior
+    // Preload / PlaySound call. Returns null if no bytes could be obtained.
+    std::shared_ptr<const std::vector<std::uint8_t>> GetOrLoadClipBytes(
+        const std::string& clip_path,
+        std::vector<std::uint8_t>* inline_bytes);
+
     ma_engine* engine_ = nullptr;
     std::unordered_map<SoundHandle, PlayingSound> playing_;
     SoundHandle next_handle_ = 1;
+    std::mutex clip_cache_mtx_;
+    std::unordered_map<std::string, std::shared_ptr<const std::vector<std::uint8_t>>> clip_cache_;
 };

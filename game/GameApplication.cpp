@@ -272,29 +272,49 @@ bool GameApplication::Init(int argc, char* argv[])
     };
 
     std::vector<std::filesystem::path> model_paths;
+    std::vector<std::string> audio_paths;
+    std::vector<std::string> video_paths;
     {
-        std::unordered_set<std::string> seen;
+        std::unordered_set<std::string> seen_models;
+        std::unordered_set<std::string> seen_audio;
+        std::unordered_set<std::string> seen_video;
         model_paths.reserve(preloaded_scene.objects.size());
         for (const SceneObjectMetadata& object : preloaded_scene.objects)
         {
-            if (object.model_path.empty())
+            if (!object.model_path.empty() && seen_models.insert(object.model_path).second)
             {
-                continue;
+                model_paths.emplace_back(object.model_path);
             }
-            if (!seen.insert(object.model_path).second)
+            for (const SceneObjectAttribute& attr : object.attributes)
             {
-                continue;
+                if (!attr.audio.clip_path.empty() && seen_audio.insert(attr.audio.clip_path).second)
+                {
+                    audio_paths.push_back(attr.audio.clip_path);
+                }
+                if (!attr.video_2d.video_path.empty() && seen_video.insert(attr.video_2d.video_path).second)
+                {
+                    video_paths.push_back(attr.video_2d.video_path);
+                }
             }
-            model_paths.emplace_back(object.model_path);
         }
     }
 
-    std::future<std::vector<PreloadedModel>> models_future = std::async(
+    // All asset I/O runs on a single background thread because g_asset_reader
+    // owns a non-thread-safe shared pak handle. While the main thread sets up
+    // SDL/Vulkan/ImGui this worker fans out model parsing + raw byte reads
+    // for audio clips and video files.
+    struct PreloadedAssets
+    {
+        std::vector<PreloadedModel> models;
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> audio_bytes;
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> video_bytes;
+    };
+    std::future<PreloadedAssets> assets_future = std::async(
         std::launch::async,
-        [model_paths]() -> std::vector<PreloadedModel>
+        [model_paths, audio_paths, video_paths]() -> PreloadedAssets
         {
-            std::vector<PreloadedModel> out;
-            out.reserve(model_paths.size());
+            PreloadedAssets out;
+            out.models.reserve(model_paths.size());
             for (const std::filesystem::path& model_path : model_paths)
             {
                 PreloadedModel result;
@@ -303,12 +323,38 @@ bool GameApplication::Init(int argc, char* argv[])
                 const auto wt = std::filesystem::last_write_time(model_path, ec);
                 result.write_time = ec ? std::filesystem::file_time_type::min() : wt;
                 result.asset = LoadModelAsset(model_path);
-                out.push_back(std::move(result));
+                out.models.push_back(std::move(result));
+            }
+            out.audio_bytes.reserve(audio_paths.size());
+            for (const std::string& clip_path : audio_paths)
+            {
+                std::vector<std::uint8_t> bytes;
+                if (g_asset_reader)
+                {
+                    bytes = g_asset_reader->ReadFile(clip_path);
+                }
+                if (!bytes.empty())
+                {
+                    out.audio_bytes.emplace_back(clip_path, std::move(bytes));
+                }
+            }
+            out.video_bytes.reserve(video_paths.size());
+            for (const std::string& video_path : video_paths)
+            {
+                std::vector<std::uint8_t> bytes;
+                if (g_asset_reader)
+                {
+                    bytes = g_asset_reader->ReadFile(video_path);
+                }
+                if (!bytes.empty())
+                {
+                    out.video_bytes.emplace_back(video_path, std::move(bytes));
+                }
             }
             return out;
         });
-    SDL_Log("Game init: dispatched %zu model preload(s) on background thread",
-            model_paths.size());
+    SDL_Log("Game init: dispatched preload of %zu model(s) + %zu audio + %zu video on background thread",
+            model_paths.size(), audio_paths.size(), video_paths.size());
 
     const SDL_WindowFlags window_flags =
         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
@@ -378,9 +424,9 @@ bool GameApplication::Init(int argc, char* argv[])
     // Hand the seeded scene + preloaded models to the renderer so the first
     // RenderFrame skips Assimp parsing and metadata I/O entirely.
     renderer_.SeedSceneMetadata(scene_path, scene_metadata);
-    std::vector<PreloadedModel> preloaded_models = models_future.get();
+    PreloadedAssets preloaded = assets_future.get();
     std::size_t seeded_models = 0;
-    for (PreloadedModel& model : preloaded_models)
+    for (PreloadedModel& model : preloaded.models)
     {
         if (!model.asset.loaded)
         {
@@ -389,8 +435,17 @@ bool GameApplication::Init(int argc, char* argv[])
         renderer_.SeedModelAsset(model.path, model.write_time, std::move(model.asset));
         ++seeded_models;
     }
-    stage("Wait+seed preloaded models", stage_mark);
-    SDL_Log("Game init: seeded %zu preloaded model(s) into runtime cache", seeded_models);
+    for (auto& [clip_path, bytes] : preloaded.audio_bytes)
+    {
+        renderer_.SeedAudioClipBytes(clip_path, std::move(bytes));
+    }
+    for (auto& [video_path, bytes] : preloaded.video_bytes)
+    {
+        renderer_.SeedVideoBytes(video_path, std::move(bytes));
+    }
+    stage("Wait+seed preloaded assets", stage_mark);
+    SDL_Log("Game init: seeded %zu model(s) + %zu audio + %zu video into runtime cache",
+            seeded_models, preloaded.audio_bytes.size(), preloaded.video_bytes.size());
 
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window_);

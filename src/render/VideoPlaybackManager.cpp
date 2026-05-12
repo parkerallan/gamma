@@ -133,8 +133,31 @@ void VideoPlaybackManager::Shutdown()
     audio_engine_ = nullptr;
 }
 
+void VideoPlaybackManager::PreloadVideoBytes(const std::string& video_path, std::vector<std::uint8_t> bytes)
+{
+    if (video_path.empty() || bytes.empty())
+    {
+        return;
+    }
+    preloaded_video_bytes_[video_path] = std::move(bytes);
+}
+
 void VideoPlaybackManager::ReleaseStream(VideoStream& stream)
 {
+    // Stop the worker before tearing down any FFmpeg state it might be
+    // touching. After join() the main thread is the sole owner again.
+    StopWorker(stream);
+
+    for (auto& slot : stream.ready_slots)
+    {
+        slot.pixels.clear();
+        slot.pixels.shrink_to_fit();
+        slot.pts = -1.0;
+        slot.valid = false;
+    }
+    stream.display_pixels.clear();
+    stream.display_pixels.shrink_to_fit();
+
     if (stream.audio_sound != nullptr)
     {
         ma_sound_uninit(stream.audio_sound);
@@ -216,9 +239,9 @@ void VideoPlaybackManager::ReleaseStream(VideoStream& stream)
     stream.rgba_scratch.clear();
     stream.first_frame_uploaded = false;
     stream.finished_once = false;
-    stream.reached_eof = false;
+    stream.worker_reached_eof.store(false);
     stream.playback_time = 0.0;
-    stream.next_frame_pts = -1.0;
+    stream.worker_next_frame_pts = -1.0;
     stream.video_stream_index = -1;
     stream.width = 0;
     stream.height = 0;
@@ -430,8 +453,11 @@ bool VideoPlaybackManager::OpenStream(VideoStream& stream, const std::filesystem
             path_utf8.c_str(), stream.width, stream.height, codec->name,
             stream.hw_device_ctx ? "hw" : "sw");
 
-    // Best-effort audio setup. Failures are non-fatal — video still plays.
-    OpenAudio(stream);
+    // From this point on the worker thread is the sole owner of
+    // format_ctx / codec_ctx / decoded frames / sws_ctx / packet.
+    // Audio setup (OpenAudio + DecodeAllAudio) is deferred to the worker's
+    // first iteration so we don't block scene start with a full PCM decode.
+    StartWorker(stream);
     return true;
 }
 
@@ -659,25 +685,225 @@ bool VideoPlaybackManager::DecodeAllAudio(VideoStream& stream)
 
 void VideoPlaybackManager::RewindStream(VideoStream& stream)
 {
-    if (stream.format_ctx == nullptr || stream.video_stream_index < 0)
+    // Signal the worker to perform the seek+flush on its own thread. The
+    // worker is the sole owner of format_ctx/codec_ctx once the stream is
+    // open, so we never touch them from the main thread here.
+    if (stream.worker_thread.joinable())
     {
-        return;
+        {
+            std::lock_guard<std::mutex> lk(stream.worker_mtx);
+            // Invalidate any frames the worker may have queued from the
+            // previous playback position so the post-rewind picker doesn't
+            // display a stale first frame.
+            for (auto& slot : stream.ready_slots)
+            {
+                slot.valid = false;
+                slot.pts = -1.0;
+            }
+            stream.worker_should_rewind.store(true);
+            stream.worker_reached_eof.store(false);
+            stream.worker_allow_decode.store(true);
+        }
+        stream.worker_cv.notify_all();
     }
-    av_seek_frame(stream.format_ctx, stream.video_stream_index, 0, AVSEEK_FLAG_BACKWARD);
-    if (stream.codec_ctx != nullptr)
+    else
     {
-        avcodec_flush_buffers(stream.codec_ctx);
+        // Pre-start path (e.g. immediately after OpenStream before worker
+        // launches): do the seek directly. Safe because no other thread
+        // touches the contexts yet.
+        if (stream.format_ctx != nullptr && stream.video_stream_index >= 0)
+        {
+            av_seek_frame(stream.format_ctx, stream.video_stream_index, 0, AVSEEK_FLAG_BACKWARD);
+            if (stream.codec_ctx != nullptr)
+            {
+                avcodec_flush_buffers(stream.codec_ctx);
+            }
+        }
     }
-    stream.reached_eof = false;
+
+    stream.worker_next_frame_pts = -1.0;
     stream.finished_once = false;
     stream.playback_time = 0.0;
-    stream.next_frame_pts = -1.0;
 
     if (stream.audio_sound != nullptr && stream.audio_buffer_ref != nullptr)
     {
         ma_sound_seek_to_pcm_frame(stream.audio_sound, 0);
     }
     stream.audio_started = false;
+}
+
+void VideoPlaybackManager::StartWorker(VideoStream& stream)
+{
+    stream.worker_should_stop.store(false);
+    stream.worker_should_rewind.store(false);
+    stream.worker_reached_eof.store(false);
+    stream.worker_allow_decode.store(true);
+    stream.worker_display_time.store(0.0);
+    stream.worker_thread = std::thread([this, &stream]() { WorkerLoop(stream); });
+}
+
+void VideoPlaybackManager::StopWorker(VideoStream& stream)
+{
+    if (!stream.worker_thread.joinable())
+    {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(stream.worker_mtx);
+        stream.worker_should_stop.store(true);
+    }
+    stream.worker_cv.notify_all();
+    stream.worker_thread.join();
+}
+
+void VideoPlaybackManager::WorkerLoop(VideoStream& stream)
+{
+    // Audio open is heavy (full PCM decode + swr setup). Defer it until
+    // *after* we've staged the first video frame so the runtime can show
+    // a picture immediately instead of holding on a black scene for the
+    // duration of the audio decode (~0.5-1.5s for typical clips).
+    bool audio_opened = false;
+
+    while (!stream.worker_should_stop.load())
+    {
+        // Handle rewind command before doing any decode work so we don't
+        // race a seek against a partial frame.
+        if (stream.worker_should_rewind.exchange(false))
+        {
+            if (stream.format_ctx != nullptr && stream.video_stream_index >= 0)
+            {
+                av_seek_frame(stream.format_ctx, stream.video_stream_index, 0, AVSEEK_FLAG_BACKWARD);
+            }
+            if (stream.codec_ctx != nullptr)
+            {
+                avcodec_flush_buffers(stream.codec_ctx);
+            }
+            stream.worker_next_frame_pts = -1.0;
+            stream.worker_reached_eof.store(false);
+        }
+
+        // Wait if we're paused, at EOF (waiting for main to either rewind or
+        // accept finished_once), or the ready ring is full.
+        {
+            std::unique_lock<std::mutex> lk(stream.worker_mtx);
+            stream.worker_cv.wait(lk, [&]() {
+                if (stream.worker_should_stop.load()) return true;
+                if (stream.worker_should_rewind.load()) return true;
+                if (!stream.worker_allow_decode.load()) return false;
+                if (stream.worker_reached_eof.load()) return false;
+                // Decode if any slot is free.
+                for (const auto& slot : stream.ready_slots)
+                {
+                    if (!slot.valid) return true;
+                }
+                return false;
+            });
+            if (stream.worker_should_stop.load())
+            {
+                break;
+            }
+            if (stream.worker_should_rewind.load())
+            {
+                continue;
+            }
+        }
+
+        if (!WorkerDecodeAndStage(stream))
+        {
+            // Either EOF was reached (flag already set) or a hard error. In
+            // both cases the next loop iteration will block on the cv until
+            // main signals (rewind / stop / new allow_decode).
+            continue;
+        }
+
+        // First successful stage: audio can now be opened in the background
+        // while playback proceeds. Until audio_started is true the display
+        // clock advances purely off delta_time so video does not stall.
+        if (!audio_opened)
+        {
+            OpenAudio(stream);
+            audio_opened = true;
+        }
+    }
+}
+
+bool VideoPlaybackManager::WorkerDecodeAndStage(VideoStream& stream)
+{
+    if (!DecodeNextFrame(stream))
+    {
+        return false;
+    }
+
+    // Pick the frame to upload: hw-decoded streams transfer to sw_frame.
+    AVFrame* src_frame = (stream.hw_pix_fmt >= 0) ? stream.sw_frame : stream.decoded_frame;
+
+    // Lazy-create / recreate sws_ctx when the source pixel format changes.
+    if (stream.sws_ctx == nullptr || stream.sws_src_format != src_frame->format)
+    {
+        if (stream.sws_ctx != nullptr)
+        {
+            sws_freeContext(stream.sws_ctx);
+            stream.sws_ctx = nullptr;
+        }
+        stream.sws_src_format = src_frame->format;
+        stream.sws_ctx = sws_getContext(
+            stream.width, stream.height, static_cast<AVPixelFormat>(src_frame->format),
+            stream.width, stream.height, AV_PIX_FMT_RGBA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (stream.sws_ctx == nullptr)
+        {
+            SDL_Log("VideoPlaybackManager: sws_getContext failed for fmt=%d", src_frame->format);
+            return false;
+        }
+    }
+
+    sws_scale(
+        stream.sws_ctx,
+        src_frame->data, src_frame->linesize,
+        0, stream.height,
+        stream.rgba_frame->data, stream.rgba_frame->linesize);
+
+    const std::size_t pixel_bytes = static_cast<std::size_t>(stream.width) *
+                                    static_cast<std::size_t>(stream.height) * 4u;
+    const double pts = stream.worker_next_frame_pts;
+
+    // Hand the frame to the consumer. Find a free slot; if all are full and
+    // we somehow got here, replace the oldest (shouldn't happen because the
+    // cv predicate guards against it, but be defensive).
+    {
+        std::unique_lock<std::mutex> lk(stream.worker_mtx);
+        int target_idx = -1;
+        for (std::size_t i = 0; i < stream.ready_slots.size(); ++i)
+        {
+            if (!stream.ready_slots[i].valid)
+            {
+                target_idx = static_cast<int>(i);
+                break;
+            }
+        }
+        if (target_idx < 0)
+        {
+            // Replace oldest.
+            for (std::size_t i = 0; i < stream.ready_slots.size(); ++i)
+            {
+                if (target_idx < 0 || stream.ready_slots[i].pts < stream.ready_slots[target_idx].pts)
+                {
+                    target_idx = static_cast<int>(i);
+                }
+            }
+        }
+
+        auto& slot = stream.ready_slots[target_idx];
+        if (slot.pixels.size() != pixel_bytes)
+        {
+            slot.pixels.resize(pixel_bytes);
+        }
+        std::memcpy(slot.pixels.data(), stream.rgba_scratch.data(), pixel_bytes);
+        slot.pts = pts;
+        slot.valid = true;
+    }
+    stream.worker_cv.notify_all();
+    return true;
 }
 
 bool VideoPlaybackManager::DecodeNextFrame(VideoStream& stream)
@@ -714,8 +940,8 @@ bool VideoPlaybackManager::DecodeNextFrame(VideoStream& stream)
             const int64_t pts = (meta->best_effort_timestamp != AV_NOPTS_VALUE)
                 ? meta->best_effort_timestamp
                 : meta->pts;
-            stream.next_frame_pts = (pts == AV_NOPTS_VALUE)
-                ? (stream.next_frame_pts < 0.0 ? 0.0 : stream.next_frame_pts)
+            stream.worker_next_frame_pts = (pts == AV_NOPTS_VALUE)
+                ? (stream.worker_next_frame_pts < 0.0 ? 0.0 : stream.worker_next_frame_pts)
                 : static_cast<double>(pts) * stream.time_base_seconds;
             return true;
         }
@@ -726,7 +952,7 @@ bool VideoPlaybackManager::DecodeNextFrame(VideoStream& stream)
         }
         if (err == AVERROR_EOF)
         {
-            stream.reached_eof = true;
+            stream.worker_reached_eof.store(true);
             return false;
         }
 
@@ -736,7 +962,7 @@ bool VideoPlaybackManager::DecodeNextFrame(VideoStream& stream)
         {
             // Flush decoder.
             avcodec_send_packet(stream.codec_ctx, nullptr);
-            stream.reached_eof = true;
+            stream.worker_reached_eof.store(true);
             continue;
         }
         if (read_err < 0)
@@ -768,19 +994,20 @@ void VideoPlaybackManager::DecodeAndUpload(VideoStream& stream, float delta_time
     bool playing = (attr.play_mode != SceneObjectVideoPlayMode::Off) &&
                    !(attr.play_mode == SceneObjectVideoPlayMode::PlayOnce && stream.finished_once);
 
-    if (!need_first_frame && !playing)
+    // Drive the worker: it only decodes when we still need a first frame or
+    // playback is active. Paused (and first-frame already on screen) means
+    // the ring stays full and the worker waits.
+    const bool prev_allow = stream.worker_allow_decode.exchange(need_first_frame || playing);
+    if (!prev_allow && (need_first_frame || playing))
     {
-        return;
+        stream.worker_cv.notify_all();
     }
 
+    // Advance display clock.
     if (playing)
     {
         if (stream.audio_started && stream.audio_sound != nullptr && stream.pcm_sample_rate > 0)
         {
-            // Slave video clock to audio cursor (audio is the master). The
-            // cursor is the data-source read position, which is ahead of
-            // actual speaker output by the device buffer; subtract that so
-            // we display the frame that matches what the user is hearing.
             ma_uint64 cursor_frames = 0;
             if (ma_sound_get_cursor_in_pcm_frames(stream.audio_sound, &cursor_frames) == MA_SUCCESS)
             {
@@ -789,10 +1016,6 @@ void VideoPlaybackManager::DecodeAndUpload(VideoStream& stream, float delta_time
                 {
                     if (ma_device* dev = ma_engine_get_device(audio_engine_->GetEngine()))
                     {
-                        // Full output buffer latency, not one period — most
-                        // backends (incl. WASAPI shared) maintain 2-3 periods
-                        // of buffering, so subtracting one period under-counts
-                        // the gap and leaves audio audibly behind video.
                         latency_frames = static_cast<ma_uint64>(dev->playback.internalPeriodSizeInFrames) *
                                          static_cast<ma_uint64>(dev->playback.internalPeriods);
                     }
@@ -815,109 +1038,113 @@ void VideoPlaybackManager::DecodeAndUpload(VideoStream& stream, float delta_time
         }
         else
         {
-            // No audio yet (still waiting on first frame, or no audio track).
-            // Use dt; the clamp prevents huge jumps when the tab unfocuses.
             stream.playback_time += std::min<double>(delta_time, 0.1);
         }
     }
 
-    bool produced_new_frame = false;
-    bool snapped_first_frame = false;
+    // Publish display time so the worker can avoid running far ahead.
+    stream.worker_display_time.store(stream.playback_time);
 
-    // Decode-and-display loop: if our playback clock has caught up past the
-    // current frame's PTS (or we still need a first frame), advance to the
-    // next available frame. Hard cap iterations so a misbehaving stream or a
-    // huge dt can't lock the main thread.
-    constexpr int kMaxFramesPerUpdate = 4;
-    int frames_this_update = 0;
-    while (frames_this_update < kMaxFramesPerUpdate)
+    // Pick the newest ready frame whose PTS we've reached. For the very first
+    // frame we accept the smallest PTS we see regardless of clock (and snap
+    // the display clock to it afterwards).
+    bool produced_new_frame = false;
+    double picked_pts = -1.0;
     {
-        bool need_more;
+        std::lock_guard<std::mutex> lk(stream.worker_mtx);
+        int best_idx = -1;
         if (need_first_frame)
         {
-            need_more = true;
-        }
-        else if (!playing)
-        {
-            need_more = false;
+            // Smallest valid PTS.
+            for (std::size_t i = 0; i < stream.ready_slots.size(); ++i)
+            {
+                const auto& slot = stream.ready_slots[i];
+                if (!slot.valid)
+                {
+                    continue;
+                }
+                if (best_idx < 0 || slot.pts < stream.ready_slots[best_idx].pts)
+                {
+                    best_idx = static_cast<int>(i);
+                }
+            }
         }
         else
         {
-            // Strict greater-than so a snap-equal condition does not loop.
-            need_more = (stream.next_frame_pts < 0.0) ||
-                        (stream.playback_time > stream.next_frame_pts);
-        }
-
-        if (!need_more)
-        {
-            break;
-        }
-
-        if (!DecodeNextFrame(stream))
-        {
-            if (stream.reached_eof)
+            // Newest frame whose PTS is at or before the playback clock.
+            for (std::size_t i = 0; i < stream.ready_slots.size(); ++i)
             {
-                if (attr.play_mode == SceneObjectVideoPlayMode::Loop)
+                const auto& slot = stream.ready_slots[i];
+                if (!slot.valid || slot.pts > stream.playback_time)
                 {
-                    RewindStream(stream);
                     continue;
                 }
-                stream.finished_once = true;
+                if (best_idx < 0 || slot.pts > stream.ready_slots[best_idx].pts)
+                {
+                    best_idx = static_cast<int>(i);
+                }
             }
-            break;
         }
 
-        produced_new_frame = true;
-        ++frames_this_update;
-
-        if (need_first_frame)
+        if (best_idx >= 0)
         {
-            // Snap clock to first frame's PTS so the next iteration does not
-            // immediately want another frame.
-            stream.playback_time = stream.next_frame_pts;
-            need_first_frame = false;
-            snapped_first_frame = true;
+            auto& slot = stream.ready_slots[best_idx];
+            // Move pixels out of the ring to release the lock quickly.
+            stream.display_pixels = std::move(slot.pixels);
+            picked_pts = slot.pts;
+            slot.valid = false;
+            slot.pts = -1.0;
+            // Drop any older still-valid slots — they're stale.
+            for (auto& other : stream.ready_slots)
+            {
+                if (other.valid && other.pts < picked_pts)
+                {
+                    other.valid = false;
+                    other.pts = -1.0;
+                }
+            }
+            produced_new_frame = true;
         }
     }
-    (void)snapped_first_frame;
+
+    if (produced_new_frame)
+    {
+        // Free slot(s) opened up — let the worker resume decoding.
+        stream.worker_cv.notify_all();
+    }
+
+    // Handle loop / play-once transition based on the worker's EOF flag.
+    if (stream.worker_reached_eof.load() && !produced_new_frame)
+    {
+        if (attr.play_mode == SceneObjectVideoPlayMode::Loop)
+        {
+            RewindStream(stream);
+        }
+        else if (playing)
+        {
+            stream.finished_once = true;
+        }
+    }
 
     if (!produced_new_frame)
     {
         return;
     }
 
-    // Pick the frame to display: hw-decoded streams transfer to sw_frame.
-    AVFrame* src_frame = (stream.hw_pix_fmt >= 0) ? stream.sw_frame : stream.decoded_frame;
-
-    // Lazy-create / recreate sws_ctx when the source pixel format changes.
-    if (stream.sws_ctx == nullptr || stream.sws_src_format != src_frame->format)
+    if (need_first_frame)
     {
-        if (stream.sws_ctx != nullptr)
-        {
-            sws_freeContext(stream.sws_ctx);
-            stream.sws_ctx = nullptr;
-        }
-        stream.sws_src_format = src_frame->format;
-        stream.sws_ctx = sws_getContext(
-            stream.width, stream.height, static_cast<AVPixelFormat>(src_frame->format),
-            stream.width, stream.height, AV_PIX_FMT_RGBA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (stream.sws_ctx == nullptr)
-        {
-            SDL_Log("VideoPlaybackManager: sws_getContext failed for fmt=%d", src_frame->format);
-            return;
-        }
+        // Snap clock to the first frame's PTS so audio sync starts cleanly.
+        stream.playback_time = picked_pts;
+        stream.worker_display_time.store(stream.playback_time);
     }
 
-    // Convert the most recent decoded frame to RGBA.
-    sws_scale(
-        stream.sws_ctx,
-        src_frame->data, src_frame->linesize,
-        0, stream.height,
-        stream.rgba_frame->data, stream.rgba_frame->linesize);
+    if (stream.display_pixels.empty())
+    {
+        return;
+    }
 
     if (scene_2d_renderer_->CreateOrUpdateExternalTexture(
-            stream.rgba_scratch.data(), stream.width, stream.height, stream.frame_texture))
+            stream.display_pixels.data(), stream.width, stream.height, stream.frame_texture))
     {
         if (!stream.first_frame_uploaded)
         {
@@ -1000,9 +1227,23 @@ void VideoPlaybackManager::Update(
             {
                 auto stream = std::make_unique<VideoStream>();
                 stream->source_path = current_source;
+
+                // Steal preloaded bytes (set by PreloadVideoBytes during
+                // scene preload) so we never block the main thread on a
+                // pak/disk read here.
+                if (auto pre_it = preloaded_video_bytes_.find(vid.video_path);
+                    pre_it != preloaded_video_bytes_.end() && !pre_it->second.empty())
+                {
+                    stream->file_bytes = std::move(pre_it->second);
+                    preloaded_video_bytes_.erase(pre_it);
+                }
+
                 if (from_pak)
                 {
-                    stream->file_bytes = ReadAssetFileAsBytes(resolve_path.generic_string());
+                    if (stream->file_bytes.empty())
+                    {
+                        stream->file_bytes = ReadAssetFileAsBytes(resolve_path.generic_string());
+                    }
                     if (stream->file_bytes.empty())
                     {
                         SDL_Log("VideoPlaybackManager: pak file '%s' missing or empty",
@@ -1011,7 +1252,7 @@ void VideoPlaybackManager::Update(
                         continue;
                     }
                 }
-                if (!OpenStream(*stream, resolve_path, from_pak))
+                if (!OpenStream(*stream, resolve_path, from_pak || !stream->file_bytes.empty()))
                 {
                     ReleaseStream(*stream);
                     continue;
