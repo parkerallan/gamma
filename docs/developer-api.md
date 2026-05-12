@@ -8,6 +8,7 @@ This document will list every Lua function exposed by the runtime, this will be 
 - `SDL3` (`release-3.4.4`): Provides key/mouse input polling, frame timing (`Time.DeltaTime` / `Time.TotalTime`), and runtime log output.
 - `Jolt Physics` (`v5.3.0`): Powers rigidbody simulation, raycasts, velocity/force APIs, and collision events exposed through `World` and `Physics`.
 - `miniaudio` (`v0.11.21`): Backs the `Audio` runtime API and the `Audio` SceneObject attribute (3D spatialization, distance attenuation, doppler).
+- `ffmpeg` (`latest`): Used in video system, audio used in videos still goes through audio engine using miniaudio.
 
 ### Notes
 
@@ -99,6 +100,11 @@ Methods: `FontPath(name[, path])`, `Text(name[, text])`, `Position(name[, x, y])
 
 #### `Engine.Image2DAttr`
 Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
+
+#### `Engine.Video2DAttr`
+Methods: `VideoPath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `StretchToScreen(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`, `PlayMode(name[, value])`, `Volume(name[, value])`, `Muted(name[, enabled])`
+
+`PlayMode` uses the strings `"Loop"`, `"PlayOnce"`, and `"Off"`. Setting it to `"Off"` stops playback and releases the decoder; switching to `"Loop"` or `"PlayOnce"` (re)starts the stream. `StretchToScreen` overrides `Position`/`Size` and renders the video full-viewport. Audio plays only when `PlayMode` is `"Loop"` or `"PlayOnce"`.
 
 #### `Engine.SkyboxAttr`
 Methods: `ImagePath(name[, path])`, `Rotation(name[, value])`
@@ -457,6 +463,50 @@ Notes:
 - Audio is only active while a scene is playing.
 - Clip format support: `.wav`, `.ogg`, `.mp3`.
 - 3D spatialization (when enabled on the attribute) uses the active camera as the listener with inverse distance attenuation between `MinDistance` and `MaxDistance` plus doppler shift scaled by `DopplerFactor`.
+
+### `Video`
+
+#### `Video.Play(name)`
+Quick summary: Starts playback on an object's `Video2D` attribute. If the attribute is `Off`, it is switched to `Loop`. Returns `true` on success.
+
+```lua
+Video.Play("Cinematic")
+```
+
+#### `Video.Stop(name)`
+Quick summary: Switches an object's `Video2D` attribute to `Off`, stopping playback and releasing the decoder. Returns `true` on success.
+
+```lua
+Video.Stop("Cinematic")
+```
+
+#### `Video.IsPlaying(name)`
+Quick summary: Returns `true` while the object's `Video2D` attribute `PlayMode` is `"Loop"` or `"PlayOnce"`.
+
+```lua
+if Video.IsPlaying("Cinematic") then
+    Engine.Log("Video active")
+end
+```
+
+#### `Video.SetVolume(name, value)`
+Quick summary: Sets runtime audio-track volume (`0.0`–`1.0`). Returns `true` on success.
+
+```lua
+Video.SetVolume("Cinematic", 0.5)
+```
+
+#### `Video.SetMuted(name, enabled)`
+Quick summary: Mutes or unmutes the video's audio track at runtime. Returns `true` on success.
+
+```lua
+Video.SetMuted("Cinematic", true)
+```
+
+Notes:
+- All `Video.*` calls target the first `Video2D` attribute on the named object and return `false` if the object has no `Video2D` attribute.
+- Container/codec support: `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.mpg`, `.mpeg`, `.m4v` via FFmpeg (with optional D3D11VA/DXVA2 hardware decode).
+- Audio plays only while `PlayMode` is `"Loop"` or `"PlayOnce"`. `Muted` and `Volume` apply on top of `PlayMode`.
 
 ## Callback Notes
 

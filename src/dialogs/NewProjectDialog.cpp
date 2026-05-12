@@ -184,6 +184,8 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
         project_root / "Assets" / "Models",
         project_root / "Assets" / "Images",
         project_root / "Assets" / "Fonts",
+        project_root / "Assets" / "Videos",
+        project_root / "Assets" / "Audio",
         project_root / "Assets" / "Effects",
         project_root / "Assets" / "Animators",
         project_root / "Scripts",

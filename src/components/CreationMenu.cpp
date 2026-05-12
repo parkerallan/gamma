@@ -568,6 +568,34 @@ std::filesystem::path ShowNativeImageImportDialog()
     };
     return ShowNativeImportDialog(L"Import Image", filters, std::size(filters));
 }
+
+std::filesystem::path ShowNativeVideoImportDialog()
+{
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"Videos", L"*.mp4;*.mov;*.mkv;*.webm;*.avi;*.mpg;*.mpeg;*.m4v"},
+        {L"MP4", L"*.mp4;*.m4v"},
+        {L"QuickTime", L"*.mov"},
+        {L"Matroska", L"*.mkv"},
+        {L"WebM", L"*.webm"},
+        {L"AVI", L"*.avi"},
+        {L"MPEG", L"*.mpg;*.mpeg"},
+        {L"All Files", L"*.*"},
+    };
+    return ShowNativeImportDialog(L"Import Video", filters, std::size(filters));
+}
+
+std::filesystem::path ShowNativeAudioImportDialog()
+{
+    const COMDLG_FILTERSPEC filters[] = {
+        {L"Audio", L"*.wav;*.ogg;*.mp3;*.flac"},
+        {L"WAV", L"*.wav"},
+        {L"Ogg Vorbis", L"*.ogg"},
+        {L"MP3", L"*.mp3"},
+        {L"FLAC", L"*.flac"},
+        {L"All Files", L"*.*"},
+    };
+    return ShowNativeImportDialog(L"Import Audio", filters, std::size(filters));
+}
 #endif
 }
 
@@ -630,6 +658,16 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
         if (ImGui::MenuItem("Import Image..."))
         {
             changed = ImportImage(state, directory_path) || changed;
+        }
+
+        if (ImGui::MenuItem("Import Video..."))
+        {
+            changed = ImportVideo(state, directory_path) || changed;
+        }
+
+        if (ImGui::MenuItem("Import Audio..."))
+        {
+            changed = ImportAudio(state, directory_path) || changed;
         }
 
         const std::filesystem::path target_scene_path = ResolveSceneTarget(state);
@@ -1007,6 +1045,126 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
     return true;
 #else
     state.AddLog("Image import is only implemented on Windows");
+    return false;
+#endif
+}
+
+bool CreationMenu::ImportVideo(EngineState& state, const std::filesystem::path& directory_path)
+{
+    if (!state.HasOpenProject())
+    {
+        state.AddLog("Cannot import Video: no project is loaded");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Videos";
+    const std::filesystem::path videos_directory = state.project_root / "Assets" / "Videos";
+    if (!directory_path.empty() && IsPathWithin(videos_directory, directory_path))
+    {
+        destination_directory = directory_path;
+    }
+
+    std::error_code directory_error;
+    std::filesystem::create_directories(destination_directory, directory_error);
+    if (directory_error)
+    {
+        state.AddLog("Failed to prepare Video directory: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    const std::filesystem::path source_path = ShowNativeVideoImportDialog();
+    if (source_path.empty())
+    {
+        return false;
+    }
+
+    if (!HasExtension(source_path, {".mp4", ".mov", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".m4v"}))
+    {
+        state.AddLog("Cannot import Video: unsupported Video format");
+        return false;
+    }
+
+    const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
+    if (destination_path.empty())
+    {
+        state.AddLog("Cannot import Video: failed to choose a destination name");
+        return false;
+    }
+
+    std::error_code copy_error;
+    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
+    if (copy_error)
+    {
+        state.AddLog("Failed to import Video into: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    state.SetSelectedItem(destination_path);
+    state.AddLog("Imported Video: " + state.GetDisplayPath(destination_path));
+    return true;
+#else
+    state.AddLog("Video import is only implemented on Windows");
+    return false;
+#endif
+}
+
+bool CreationMenu::ImportAudio(EngineState& state, const std::filesystem::path& directory_path)
+{
+    if (!state.HasOpenProject())
+    {
+        state.AddLog("Cannot import Audio: no project is loaded");
+        return false;
+    }
+
+#ifdef _WIN32
+    std::filesystem::path destination_directory = state.project_root / "Assets" / "Audio";
+    const std::filesystem::path audio_directory = state.project_root / "Assets" / "Audio";
+    if (!directory_path.empty() && IsPathWithin(audio_directory, directory_path))
+    {
+        destination_directory = directory_path;
+    }
+
+    std::error_code directory_error;
+    std::filesystem::create_directories(destination_directory, directory_error);
+    if (directory_error)
+    {
+        state.AddLog("Failed to prepare Audio directory: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    const std::filesystem::path source_path = ShowNativeAudioImportDialog();
+    if (source_path.empty())
+    {
+        return false;
+    }
+
+    if (!HasExtension(source_path, {".wav", ".ogg", ".mp3", ".flac"}))
+    {
+        state.AddLog("Cannot import Audio: unsupported Audio format");
+        return false;
+    }
+
+    const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
+    if (destination_path.empty())
+    {
+        state.AddLog("Cannot import Audio: failed to choose a destination name");
+        return false;
+    }
+
+    std::error_code copy_error;
+    std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
+    if (copy_error)
+    {
+        state.AddLog("Failed to import Audio into: " + state.GetDisplayPath(destination_directory));
+        return false;
+    }
+
+    state.SetSelectedItem(destination_path);
+    state.AddLog("Imported Audio: " + state.GetDisplayPath(destination_path));
+    return true;
+#else
+    state.AddLog("Audio import is only implemented on Windows");
     return false;
 #endif
 }

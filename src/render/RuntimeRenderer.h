@@ -347,6 +347,17 @@ private:
         AudioMinDistance,
         AudioMaxDistance,
         AudioDopplerFactor,
+        Video2DVideoPath,
+        Video2DPosition,
+        Video2DSize,
+        Video2DLockAspectRatio,
+        Video2DStretchToScreen,
+        Video2DTint,
+        Video2DAlpha,
+        Video2DPriority,
+        Video2DPlayMode,
+        Video2DVolume,
+        Video2DMuted,
     };
     void RefreshActiveScriptCameraSelection();
     void HandleScriptAttributeMutation(SceneObjectAttributeKind kind, ScriptAttributeAccessorId accessor_id);
@@ -389,6 +400,11 @@ private:
     static int LuaAudioSetVolume(lua_State* lua_state);
     static int LuaAudioSetPitch(lua_State* lua_state);
     static int LuaAudioSetLoop(lua_State* lua_state);
+    static int LuaVideoPlay(lua_State* lua_state);
+    static int LuaVideoStop(lua_State* lua_state);
+    static int LuaVideoIsPlaying(lua_State* lua_state);
+    static int LuaVideoSetVolume(lua_State* lua_state);
+    static int LuaVideoSetMuted(lua_State* lua_state);
     bool BuildQueuedScene(
         const SceneMetadata& scene_metadata,
         const SceneObjectMetadata& active_camera_object,

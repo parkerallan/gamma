@@ -1,4 +1,4 @@
-# Engine
+# Gamma
 
 Raytracing Game Engine
 
@@ -6,6 +6,9 @@ Raytracing Game Engine
 - SDL3: `release-3.4.4`
 - Dear ImGui: `v1.92.6-docking`
 - ImNodeFlow: `5c93f4822869223cc1abe5ce5fe51e6bee1f5925`
+- Jolt Physics: `v5.3.0`
+- miniaudio: `v0.11.21`
+- ffmpeg: latest prebuilt
 
 ## Build The Engine (Windows)
 

@@ -37,6 +37,8 @@ private:
     bool ImportModel(EngineState& state, const std::filesystem::path& directory_path);
     bool ImportFont(EngineState& state, const std::filesystem::path& directory_path);
     bool ImportImage(EngineState& state, const std::filesystem::path& directory_path);
+    bool ImportVideo(EngineState& state, const std::filesystem::path& directory_path);
+    bool ImportAudio(EngineState& state, const std::filesystem::path& directory_path);
     void OpenCreateDialog(const std::filesystem::path& directory_path, CreateTarget create_target, std::filesystem::path target_scene_path = {});
     void Reset();
 };

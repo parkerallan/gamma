@@ -3166,6 +3166,17 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
         {"Image2DAttr", "Tint", ScriptAttributeAccessorId::Image2DTint},
         {"Image2DAttr", "Alpha", ScriptAttributeAccessorId::Image2DAlpha},
         {"Image2DAttr", "Priority", ScriptAttributeAccessorId::Image2DPriority},
+        {"Video2DAttr", "VideoPath", ScriptAttributeAccessorId::Video2DVideoPath},
+        {"Video2DAttr", "Position", ScriptAttributeAccessorId::Video2DPosition},
+        {"Video2DAttr", "Size", ScriptAttributeAccessorId::Video2DSize},
+        {"Video2DAttr", "LockAspectRatio", ScriptAttributeAccessorId::Video2DLockAspectRatio},
+        {"Video2DAttr", "StretchToScreen", ScriptAttributeAccessorId::Video2DStretchToScreen},
+        {"Video2DAttr", "Tint", ScriptAttributeAccessorId::Video2DTint},
+        {"Video2DAttr", "Alpha", ScriptAttributeAccessorId::Video2DAlpha},
+        {"Video2DAttr", "Priority", ScriptAttributeAccessorId::Video2DPriority},
+        {"Video2DAttr", "PlayMode", ScriptAttributeAccessorId::Video2DPlayMode},
+        {"Video2DAttr", "Volume", ScriptAttributeAccessorId::Video2DVolume},
+        {"Video2DAttr", "Muted", ScriptAttributeAccessorId::Video2DMuted},
         {"SkyboxAttr", "ImagePath", ScriptAttributeAccessorId::SkyboxImagePath},
         {"SkyboxAttr", "Rotation", ScriptAttributeAccessorId::SkyboxRotation},
         {"Animator", "ControllerPath", ScriptAttributeAccessorId::AnimatorControllerPath},
@@ -3330,6 +3341,25 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaAudioSetLoop, 1);
     lua_setfield(script_lua_state_, -2, "SetLoop");
     lua_setglobal(script_lua_state_, "Audio");
+
+    // Video table — runtime-only API to drive Video2D attribute playback.
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaVideoPlay, 1);
+    lua_setfield(script_lua_state_, -2, "Play");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaVideoStop, 1);
+    lua_setfield(script_lua_state_, -2, "Stop");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaVideoIsPlaying, 1);
+    lua_setfield(script_lua_state_, -2, "IsPlaying");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaVideoSetVolume, 1);
+    lua_setfield(script_lua_state_, -2, "SetVolume");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaVideoSetMuted, 1);
+    lua_setfield(script_lua_state_, -2, "SetMuted");
+    lua_setglobal(script_lua_state_, "Video");
 
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
     script_last_tick_ms_ = now_ms;

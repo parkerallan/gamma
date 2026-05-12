@@ -988,6 +988,78 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_float(SceneObjectAttributeKind::Audio,
             [](const SceneObjectAttribute& attribute) { return attribute.audio.doppler_factor; },
             [](SceneObjectAttribute& attribute, float value) { attribute.audio.doppler_factor = (std::max)(0.0f, value); });
+    case ScriptAttributeAccessorId::Video2DVideoPath:
+        return access_string(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.video_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.video_2d.video_path = value; });
+    case ScriptAttributeAccessorId::Video2DPosition:
+        return access_vec2(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.video_2d.x, attribute.video_2d.y}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.video_2d.x = x;
+                attribute.video_2d.y = y;
+            });
+    case ScriptAttributeAccessorId::Video2DSize:
+        return access_vec2(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.video_2d.width, attribute.video_2d.height}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.video_2d.width = (std::max)(1.0f, x);
+                attribute.video_2d.height = (std::max)(1.0f, y);
+            });
+    case ScriptAttributeAccessorId::Video2DLockAspectRatio:
+        return access_bool(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.lock_aspect_ratio; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.video_2d.lock_aspect_ratio = value; });
+    case ScriptAttributeAccessorId::Video2DStretchToScreen:
+        return access_bool(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.stretch_to_screen; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.video_2d.stretch_to_screen = value; });
+    case ScriptAttributeAccessorId::Video2DTint:
+        return access_vec3(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.tint; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.video_2d.tint = {x, y, z}; });
+    case ScriptAttributeAccessorId::Video2DAlpha:
+        return access_float(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.alpha; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.video_2d.alpha = std::clamp(value, 0.0f, 1.0f); });
+    case ScriptAttributeAccessorId::Video2DPriority:
+        return access_int(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.priority; },
+            [](SceneObjectAttribute& attribute, int value) { attribute.video_2d.priority = value; });
+    case ScriptAttributeAccessorId::Video2DPlayMode:
+        return access_string(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) -> std::string {
+                switch (attribute.video_2d.play_mode)
+                {
+                case SceneObjectVideoPlayMode::Loop: return "Loop";
+                case SceneObjectVideoPlayMode::PlayOnce: return "PlayOnce";
+                case SceneObjectVideoPlayMode::Off: default: return "Off";
+                }
+            },
+            [](SceneObjectAttribute& attribute, const std::string& value) {
+                if (value == "Loop" || value == "loop")
+                {
+                    attribute.video_2d.play_mode = SceneObjectVideoPlayMode::Loop;
+                }
+                else if (value == "PlayOnce" || value == "playonce" || value == "Once" || value == "once")
+                {
+                    attribute.video_2d.play_mode = SceneObjectVideoPlayMode::PlayOnce;
+                }
+                else
+                {
+                    attribute.video_2d.play_mode = SceneObjectVideoPlayMode::Off;
+                }
+            });
+    case ScriptAttributeAccessorId::Video2DVolume:
+        return access_float(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.volume; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.video_2d.volume = std::clamp(value, 0.0f, 20.0f); });
+    case ScriptAttributeAccessorId::Video2DMuted:
+        return access_bool(SceneObjectAttributeKind::Video2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.video_2d.muted; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.video_2d.muted = value; });
     default:
         return luaL_error(lua_state, "Unknown attribute accessor");
     }
@@ -1703,6 +1775,101 @@ int RuntimeRenderer::LuaAudioSetLoop(lua_State* lua_state)
         return 1;
     }
     attribute->audio.loop = loop;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaVideoPlay(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Video2D);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    if (attribute->video_2d.play_mode == SceneObjectVideoPlayMode::Off)
+    {
+        attribute->video_2d.play_mode = SceneObjectVideoPlayMode::PlayOnce;
+    }
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaVideoStop(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Video2D);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->video_2d.play_mode = SceneObjectVideoPlayMode::Off;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaVideoIsPlaying(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Video2D);
+    const bool playing = (attribute != nullptr) && (attribute->video_2d.play_mode != SceneObjectVideoPlayMode::Off);
+    lua_pushboolean(lua_state, playing ? 1 : 0);
+    return 1;
+}
+
+int RuntimeRenderer::LuaVideoSetVolume(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const float volume = static_cast<float>(luaL_checknumber(lua_state, 2));
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Video2D);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->video_2d.volume = std::clamp(volume, 0.0f, 20.0f);
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaVideoSetMuted(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const bool muted = lua_toboolean(lua_state, 2) != 0;
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Video2D);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->video_2d.muted = muted;
     lua_pushboolean(lua_state, 1);
     return 1;
 }
