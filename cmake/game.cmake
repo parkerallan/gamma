@@ -127,6 +127,7 @@ add_executable(game
     src/render/SkyboxRenderer.cpp
     src/render/RuntimeRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
+    src/render/VideoPlaybackManager.cpp
     src/vfs/AssetVFS.cpp
 )
 
@@ -151,6 +152,11 @@ target_link_libraries(game PRIVATE
     lua_runtime
     joltphysics
     miniaudio
+    FFmpeg::avformat
+    FFmpeg::avcodec
+    FFmpeg::avutil
+    FFmpeg::swscale
+    FFmpeg::swresample
     nlohmann_json::nlohmann_json
     Vulkan::Vulkan
 )
@@ -194,6 +200,16 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${GAME_SHADER_OUTPUTS}
             $<TARGET_FILE_DIR:game>/shaders
+        COMMAND_EXPAND_LISTS
+    )
+
+    # Copy DLLs from any SHARED IMPORTED dependencies (FFmpeg, etc.) next to
+    # game.exe so the build dialog's stage step can pick them up. Without this
+    # the game launches with "avformat-XX.dll was not found".
+    add_custom_command(TARGET game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:game>
+            $<TARGET_FILE_DIR:game>
         COMMAND_EXPAND_LISTS
     )
 endif()

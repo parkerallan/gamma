@@ -252,7 +252,6 @@ FetchContent_GetProperties(miniaudio)
 if(NOT miniaudio_POPULATED)
     FetchContent_Populate(miniaudio)
 endif()
-
 # Build miniaudio's single-header implementation as a C static library.
 add_library(miniaudio STATIC
     ${CMAKE_SOURCE_DIR}/src/audio/miniaudio_impl.c
@@ -269,6 +268,59 @@ elseif(UNIX AND NOT APPLE)
     target_link_libraries(miniaudio PUBLIC dl pthread m)
 elseif(APPLE)
     target_link_libraries(miniaudio PUBLIC "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox")
+endif()
+
+# pl_mpeg removed in favor of FFmpeg below.
+
+# FFmpeg (LGPL shared, BtbN's Windows prebuilds). Provides libavformat,
+# libavcodec, libavutil, libswscale + matching DLLs. Used by
+# VideoPlaybackManager to decode arbitrary video files for the Video2D
+# scene attribute.
+if(WIN32)
+    set(FFMPEG_ARCHIVE_URL
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+        CACHE STRING "URL for prebuilt FFmpeg LGPL shared archive")
+
+    FetchContent_Declare(
+        ffmpeg
+        URL ${FFMPEG_ARCHIVE_URL}
+    )
+    FetchContent_GetProperties(ffmpeg)
+    if(NOT ffmpeg_POPULATED)
+        message(STATUS "Downloading prebuilt FFmpeg from ${FFMPEG_ARCHIVE_URL} (~30 MB) ...")
+        FetchContent_Populate(ffmpeg)
+    endif()
+
+    set(FFMPEG_ROOT "${ffmpeg_SOURCE_DIR}")
+    set(FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
+    set(FFMPEG_LIB_DIR "${FFMPEG_ROOT}/lib")
+    set(FFMPEG_BIN_DIR "${FFMPEG_ROOT}/bin")
+
+    function(_add_ffmpeg_imported_lib NAME LIBFILE DLLPATTERN)
+        add_library(FFmpeg::${NAME} SHARED IMPORTED)
+        file(GLOB _ff_dll "${FFMPEG_BIN_DIR}/${DLLPATTERN}")
+        list(GET _ff_dll 0 _ff_dll0)
+        set_target_properties(FFmpeg::${NAME} PROPERTIES
+            IMPORTED_LOCATION "${_ff_dll0}"
+            IMPORTED_IMPLIB "${FFMPEG_LIB_DIR}/${LIBFILE}"
+            INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
+        )
+    endfunction()
+
+    _add_ffmpeg_imported_lib(avformat avformat.lib  "avformat-*.dll")
+    _add_ffmpeg_imported_lib(avcodec  avcodec.lib   "avcodec-*.dll")
+    _add_ffmpeg_imported_lib(avutil   avutil.lib    "avutil-*.dll")
+    _add_ffmpeg_imported_lib(swscale  swscale.lib   "swscale-*.dll")
+    _add_ffmpeg_imported_lib(swresample swresample.lib "swresample-*.dll")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+        libavformat libavcodec libavutil libswscale libswresample)
+    add_library(FFmpeg::avformat   ALIAS PkgConfig::FFMPEG)
+    add_library(FFmpeg::avcodec    ALIAS PkgConfig::FFMPEG)
+    add_library(FFmpeg::avutil     ALIAS PkgConfig::FFMPEG)
+    add_library(FFmpeg::swscale    ALIAS PkgConfig::FFMPEG)
+    add_library(FFmpeg::swresample ALIAS PkgConfig::FFMPEG)
 endif()
 
 FetchContent_Declare(
@@ -443,6 +495,7 @@ add_executable(engine
     src/render/Scene2DRenderer.cpp
     src/render/SkyboxRenderer.cpp
     src/render/SceneViewportRenderer.cpp
+    src/render/VideoPlaybackManager.cpp
     src/panels/SettingsPanel.cpp
     src/render/FontInfoRenderer.cpp
     src/render/ImageInfoRenderer.cpp
@@ -467,6 +520,11 @@ target_link_libraries(engine PRIVATE
     lua_runtime
     joltphysics
     miniaudio
+    FFmpeg::avformat
+    FFmpeg::avcodec
+    FFmpeg::avutil
+    FFmpeg::swscale
+    FFmpeg::swresample
     nlohmann_json::nlohmann_json
 )
 

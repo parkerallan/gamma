@@ -11,6 +11,8 @@
 
 struct stbtt_fontinfo;
 
+class VideoPlaybackManager;
+
 // Shared 2D overlay renderer. Composites Text2D and Image2D attribute quads
 // directly on top of a VkImage (VK_FORMAT_R8G8B8A8_UNORM) that has
 // VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT. The image must be in
@@ -20,10 +22,31 @@ struct stbtt_fontinfo;
 class Scene2DRenderer
 {
 public:
+    // Per-image GPU resources. Public so external subsystems (e.g.
+    // VideoPlaybackManager) can own dynamically updated textures via the
+    // helper methods below.
+    struct GpuTexture
+    {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        int width = 0;
+        int height = 0;
+    };
+
     ~Scene2DRenderer();
 
     bool Initialize(VulkanContext* context);
     void Shutdown();
+
+    // Allow external systems to draw Video2D frames during CompositeOverlay
+    // by providing per-stream GpuTextures keyed by (object name, attr index).
+    void SetVideoPlaybackManager(VideoPlaybackManager* manager) { video_playback_manager_ = manager; }
+
+    // Public helpers for managers that own GpuTextures.
+    bool CreateOrUpdateExternalTexture(const unsigned char* rgba_pixels, int width, int height, GpuTexture& tex);
+    void DestroyExternalTexture(GpuTexture& tex);
 
     // Composite all Text2D and Image2D attributes from scene_metadata onto
     // target_image. Paths in attributes are relative to project_root.
@@ -49,16 +72,6 @@ public:
         float& out_height);
 
 private:
-    struct GpuTexture
-    {
-        VkImage image = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkImageView view = VK_NULL_HANDLE;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-        int width = 0;
-        int height = 0;
-    };
-
     struct TextCacheKey
     {
         std::string font_path;
@@ -179,6 +192,8 @@ private:
     std::unordered_map<FontAtlasKey, FontAtlas, FontAtlasKeyHash> font_atlas_cache_;
     std::unordered_map<std::string, GpuTexture> image_cache_;
     std::unordered_map<TextCacheKey, TextLayoutCacheEntry, TextCacheKeyHash> text_layout_cache_;
+
+    VideoPlaybackManager* video_playback_manager_ = nullptr;
 
     bool pipeline_valid_ = false;
 

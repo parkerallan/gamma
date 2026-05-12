@@ -2332,6 +2332,8 @@ bool SceneViewportRenderer::Initialize(VulkanContext* context)
     vulkan_context_ = context;
     ray_tracing_.Initialize(context);
     scene_2d_renderer_.Initialize(context);
+    video_playback_manager_.Initialize(&scene_2d_renderer_);
+    scene_2d_renderer_.SetVideoPlaybackManager(&video_playback_manager_);
     skybox_renderer_.Initialize(context);
     return vulkan_context_ != nullptr;
 }
@@ -2418,6 +2420,8 @@ void SceneViewportRenderer::ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry)
 void SceneViewportRenderer::Shutdown()
 {
     skybox_renderer_.Shutdown();
+    scene_2d_renderer_.SetVideoPlaybackManager(nullptr);
+    video_playback_manager_.Shutdown();
     scene_2d_renderer_.Shutdown();
     ray_tracing_.Shutdown();
 
@@ -3985,6 +3989,10 @@ void SceneViewportRenderer::RenderGpu()
         SDL_Log("RayTracing::RenderFrame failed: %s", ray_tracing_.GetStatusMessage().c_str());
     }
 
+    // Editor preview: pass dt=0 so the manager only decodes the first frame
+    // (and any subsequent frame after a video path/play-mode change). The
+    // editor does not advance video playback time.
+    video_playback_manager_.Update(0.0f, pending_scene_metadata_, pending_project_root_);
     scene_2d_renderer_.CompositeOverlay(
         pending_scene_metadata_,
         pending_project_root_,

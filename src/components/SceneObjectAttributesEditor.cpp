@@ -23,6 +23,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Animator,
     SceneObjectAttributeKind::Text2D,
     SceneObjectAttributeKind::Image2D,
+    SceneObjectAttributeKind::Video2D,
     SceneObjectAttributeKind::Skybox,
     SceneObjectAttributeKind::Audio,
 };
@@ -244,6 +245,7 @@ bool RenderAttributeSection(
             attribute.kind != SceneObjectAttributeKind::Animator &&
             attribute.kind != SceneObjectAttributeKind::Text2D &&
             attribute.kind != SceneObjectAttributeKind::Image2D &&
+            attribute.kind != SceneObjectAttributeKind::Video2D &&
             attribute.kind != SceneObjectAttributeKind::Skybox)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
@@ -914,6 +916,171 @@ bool RenderAttributeSection(
                 }) || changed;
             }
 
+            break;
+        }
+
+        case SceneObjectAttributeKind::Video2D:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_video_label = attribute.video_2d.video_path.empty()
+                ? std::string("Drop Video Here")
+                : std::filesystem::path(attribute.video_2d.video_path).filename().string();
+            ImGui::Button(current_video_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+                {
+                    const char* payload_text = static_cast<const char*>(payload->Data);
+                    const std::size_t payload_size = payload->DataSize > 0
+                        ? static_cast<std::size_t>(payload->DataSize - 1)
+                        : 0;
+                    const std::filesystem::path dropped_path(std::string(payload_text, payload_size));
+                    if (HasAnyExtension(dropped_path, {".mp4", ".mov", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".m4v"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "video 2D path", [&]()
+                        {
+                            return SetSceneObjectAttributeVideo2DVideoPath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            float v_position[2] = {attribute.video_2d.x, attribute.video_2d.y};
+            if (ImGui::DragFloat2("Position", v_position, 1.0f, -100000.0f, 100000.0f, "%.1f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D position", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DPosition(state.selected_item_path, object.name, attribute_index, v_position[0], v_position[1]);
+                }) || changed;
+            }
+
+            if (attribute.video_2d.lock_aspect_ratio)
+            {
+                const float safe_height = (std::max)(1.0f, attribute.video_2d.height);
+                const float aspect = (std::max)(attribute.video_2d.width / safe_height, 0.0001f);
+                float width_locked = attribute.video_2d.width;
+                if (ImGui::DragFloat("Width", &width_locked, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    const float clamped_width = (std::max)(1.0f, width_locked);
+                    const float clamped_height = (std::max)(1.0f, clamped_width / aspect);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "video 2D size", [&]()
+                    {
+                        return SetSceneObjectAttributeVideo2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            clamped_width,
+                            clamped_height);
+                    }) || changed;
+                }
+            }
+            else
+            {
+                float v_size[2] = {attribute.video_2d.width, attribute.video_2d.height};
+                if (ImGui::DragFloat2("Size", v_size, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "video 2D size", [&]()
+                    {
+                        return SetSceneObjectAttributeVideo2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            (std::max)(1.0f, v_size[0]),
+                            (std::max)(1.0f, v_size[1]));
+                    }) || changed;
+                }
+            }
+
+            bool video_lock_aspect_ratio = attribute.video_2d.lock_aspect_ratio;
+            if (ImGui::Checkbox("Lock Aspect Ratio", &video_lock_aspect_ratio))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D lock aspect ratio", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DLockAspectRatio(state.selected_item_path, object.name, attribute_index, video_lock_aspect_ratio);
+                }) || changed;
+            }
+
+            bool video_stretch = attribute.video_2d.stretch_to_screen;
+            if (ImGui::Checkbox("Stretch to Screen", &video_stretch))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D stretch to screen", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DStretchToScreen(state.selected_item_path, object.name, attribute_index, video_stretch);
+                }) || changed;
+            }
+
+            float v_tint[3] = {
+                attribute.video_2d.tint[0],
+                attribute.video_2d.tint[1],
+                attribute.video_2d.tint[2]};
+            if (ImGui::ColorEdit3("Tint", v_tint))
+            {
+                const SceneColor3 next_tint = {v_tint[0], v_tint[1], v_tint[2]};
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D tint", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DTint(state.selected_item_path, object.name, attribute_index, next_tint);
+                }) || changed;
+            }
+
+            float v_alpha = attribute.video_2d.alpha;
+            if (ImGui::DragFloat("Alpha", &v_alpha, 0.01f, 0.0f, 1.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D alpha", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DAlpha(state.selected_item_path, object.name, attribute_index, std::clamp(v_alpha, 0.0f, 1.0f));
+                }) || changed;
+            }
+
+            int v_priority = attribute.video_2d.priority;
+            if (ImGui::DragInt("Priority", &v_priority))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D priority", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DPriority(state.selected_item_path, object.name, attribute_index, v_priority);
+                }) || changed;
+            }
+
+            ImGui::TextUnformatted("Play Mode");
+            const SceneObjectVideoPlayMode v_mode = attribute.video_2d.play_mode;
+            auto video_play_mode_radio = [&](const char* label, SceneObjectVideoPlayMode mode)
+            {
+                if (ImGui::RadioButton(label, v_mode == mode))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "video 2D play mode", [&]()
+                    {
+                        return SetSceneObjectAttributeVideo2DPlayMode(state.selected_item_path, object.name, attribute_index, mode);
+                    }) || changed;
+                }
+            };
+            video_play_mode_radio("Loop", SceneObjectVideoPlayMode::Loop);
+            ImGui::SameLine();
+            video_play_mode_radio("Play Once", SceneObjectVideoPlayMode::PlayOnce);
+            ImGui::SameLine();
+            video_play_mode_radio("Off", SceneObjectVideoPlayMode::Off);
+
+            float v_volume = attribute.video_2d.volume;
+            if (ImGui::DragFloat("Volume", &v_volume, 0.01f, 0.0f, 1.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D volume", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DVolume(state.selected_item_path, object.name, attribute_index, std::clamp(v_volume, 0.0f, 1.0f));
+                }) || changed;
+            }
+
+            bool v_muted = attribute.video_2d.muted;
+            if (ImGui::Checkbox("Muted", &v_muted))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "video 2D muted", [&]()
+                {
+                    return SetSceneObjectAttributeVideo2DMuted(state.selected_item_path, object.name, attribute_index, v_muted);
+                }) || changed;
+            }
+
+            ImGui::TextDisabled("Audio plays only in Play mode.");
             break;
         }
 

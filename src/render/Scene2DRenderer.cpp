@@ -1,4 +1,5 @@
 #include "render/Scene2DRenderer.h"
+#include "render/VideoPlaybackManager.h"
 #include "vfs/AssetVFS.h"
 
 #include <SDL3/SDL.h>
@@ -349,6 +350,33 @@ TextLayoutData BuildTextLayout(
 Scene2DRenderer::~Scene2DRenderer()
 {
     Shutdown();
+}
+
+bool Scene2DRenderer::CreateOrUpdateExternalTexture(
+    const unsigned char* rgba_pixels,
+    int width,
+    int height,
+    GpuTexture& tex)
+{
+    if (rgba_pixels == nullptr || width <= 0 || height <= 0)
+    {
+        return false;
+    }
+    // If size changed, release and re-upload.
+    if (tex.image != VK_NULL_HANDLE && (tex.width != width || tex.height != height))
+    {
+        ReleaseGpuTexture(tex);
+    }
+    if (tex.image == VK_NULL_HANDLE)
+    {
+        return UploadTexture(rgba_pixels, width, height, false, tex);
+    }
+    return UpdateTexture(rgba_pixels, width, height, false, tex);
+}
+
+void Scene2DRenderer::DestroyExternalTexture(GpuTexture& tex)
+{
+    ReleaseGpuTexture(tex);
 }
 
 bool Scene2DRenderer::Initialize(VulkanContext* context)
@@ -1640,7 +1668,8 @@ void Scene2DRenderer::CompositeOverlay(
         for (const SceneObjectAttribute& attr : object.attributes)
         {
             if (attr.kind == SceneObjectAttributeKind::Text2D ||
-                attr.kind == SceneObjectAttributeKind::Image2D)
+                attr.kind == SceneObjectAttributeKind::Image2D ||
+                attr.kind == SceneObjectAttributeKind::Video2D)
             {
                 has_any = true;
                 break;
@@ -1755,6 +1784,15 @@ void Scene2DRenderer::CompositeOverlay(
                     continue;
                 }
                 overlay_entries.push_back({obj_idx, attr_idx, img.priority});
+            }
+            else if (attr.kind == SceneObjectAttributeKind::Video2D)
+            {
+                const SceneObjectVideo2DAttributes& vid = attr.video_2d;
+                if (vid.video_path.empty())
+                {
+                    continue;
+                }
+                overlay_entries.push_back({obj_idx, attr_idx, vid.priority});
             }
         }
     }
@@ -1880,6 +1918,67 @@ void Scene2DRenderer::CompositeOverlay(
                     quad_index,
                     norm_x, norm_y, norm_w, norm_h,
                     img.tint[0], img.tint[1], img.tint[2], img.alpha);
+                ++quad_index;
+            }
+            else if (attr.kind == SceneObjectAttributeKind::Video2D)
+            {
+                const SceneObjectVideo2DAttributes& vid = attr.video_2d;
+                if (vid.video_path.empty() || video_playback_manager_ == nullptr)
+                {
+                    continue;
+                }
+
+                const GpuTexture* tex = video_playback_manager_->GetFrameTexture(object.name, entry.attr_index);
+                if (tex == nullptr || tex->descriptor_set == VK_NULL_HANDLE)
+                {
+                    continue;
+                }
+
+                if (vid.stretch_to_screen)
+                {
+                    DrawQuad(cmd, *tex,
+                        quad_index,
+                        0.0f, 0.0f, 1.0f, 1.0f,
+                        vid.tint[0], vid.tint[1], vid.tint[2], vid.alpha);
+                    ++quad_index;
+                    continue;
+                }
+
+                // Optionally honor lock_aspect_ratio against the video's natural
+                // size (texture dims). When locked, fit inside vid.width/vid.height.
+                float effective_w = vid.width;
+                float effective_h = vid.height;
+                if (vid.lock_aspect_ratio && tex->width > 0 && tex->height > 0)
+                {
+                    const float src_aspect = static_cast<float>(tex->width) / static_cast<float>(tex->height);
+                    const float box_aspect = effective_w / (std::max)(1.0f, effective_h);
+                    if (src_aspect > box_aspect)
+                    {
+                        effective_h = effective_w / src_aspect;
+                    }
+                    else
+                    {
+                        effective_w = effective_h * src_aspect;
+                    }
+                }
+
+                const float screen_w = effective_w * overlay_size_scale;
+                const float screen_h = effective_h * overlay_size_scale;
+                const float reference_range_x = (std::max)(safe_ref_width - effective_w, 1.0f);
+                const float reference_range_y = (std::max)(safe_ref_height - effective_h, 1.0f);
+                const float screen_range_x = (std::max)(static_cast<float>(width) - screen_w, 0.0f);
+                const float screen_range_y = (std::max)(static_cast<float>(height) - screen_h, 0.0f);
+                const float screen_x = (vid.x / reference_range_x) * screen_range_x;
+                const float screen_y = (vid.y / reference_range_y) * screen_range_y;
+                const float norm_x = screen_x / static_cast<float>((std::max)(1u, width));
+                const float norm_y = screen_y / static_cast<float>((std::max)(1u, height));
+                const float norm_w = screen_w / static_cast<float>((std::max)(1u, width));
+                const float norm_h = screen_h / static_cast<float>((std::max)(1u, height));
+
+                DrawQuad(cmd, *tex,
+                    quad_index,
+                    norm_x, norm_y, norm_w, norm_h,
+                    vid.tint[0], vid.tint[1], vid.tint[2], vid.alpha);
                 ++quad_index;
             }
     }

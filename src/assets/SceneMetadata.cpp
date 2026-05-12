@@ -554,7 +554,20 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeAudioSpatialize:") ||
     StartsWith(line, "AttributeAudioMinDistance:") ||
     StartsWith(line, "AttributeAudioMaxDistance:") ||
-    StartsWith(line, "AttributeAudioDopplerFactor:");
+    StartsWith(line, "AttributeAudioDopplerFactor:") ||
+    StartsWith(line, "AttributeVideo2DVideoPath:") ||
+    StartsWith(line, "AttributeVideo2DX:") ||
+    StartsWith(line, "AttributeVideo2DY:") ||
+    StartsWith(line, "AttributeVideo2DWidth:") ||
+    StartsWith(line, "AttributeVideo2DHeight:") ||
+    StartsWith(line, "AttributeVideo2DTint:") ||
+    StartsWith(line, "AttributeVideo2DAlpha:") ||
+    StartsWith(line, "AttributeVideo2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeVideo2DStretchToScreen:") ||
+    StartsWith(line, "AttributeVideo2DPriority:") ||
+    StartsWith(line, "AttributeVideo2DPlayMode:") ||
+    StartsWith(line, "AttributeVideo2DVolume:") ||
+    StartsWith(line, "AttributeVideo2DMuted:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -920,6 +933,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Skybox";
     case SceneObjectAttributeKind::Audio:
         return "Audio";
+    case SceneObjectAttributeKind::Video2D:
+        return "Video 2D";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -954,6 +969,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Skybox";
     case SceneObjectAttributeKind::Audio:
         return "Audio";
+    case SceneObjectAttributeKind::Video2D:
+        return "Video2D";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -1010,6 +1027,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Audio")
     {
         return SceneObjectAttributeKind::Audio;
+    }
+    if (trimmed == "Video2D")
+    {
+        return SceneObjectAttributeKind::Video2D;
     }
 
     return SceneObjectAttributeKind::None;
@@ -1684,6 +1705,70 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeAudioDopplerFactor:") && current_attribute != nullptr)
         {
             ParseScalar(ExtractValue(trimmed, "AttributeAudioDopplerFactor:"), current_attribute->audio.doppler_factor);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DVideoPath:") && current_attribute != nullptr)
+        {
+            current_attribute->video_2d.video_path = ExtractValue(trimmed, "AttributeVideo2DVideoPath:");
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DX:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeVideo2DX:"), current_attribute->video_2d.x);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DY:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeVideo2DY:"), current_attribute->video_2d.y);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DWidth:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeVideo2DWidth:"), current_attribute->video_2d.width);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DHeight:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeVideo2DHeight:"), current_attribute->video_2d.height);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DTint:") && current_attribute != nullptr)
+        {
+            ParseColor3(ExtractValue(trimmed, "AttributeVideo2DTint:"), current_attribute->video_2d.tint);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DAlpha:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeVideo2DAlpha:"), current_attribute->video_2d.alpha);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DLockAspectRatio:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeVideo2DLockAspectRatio:"), current_attribute->video_2d.lock_aspect_ratio);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DStretchToScreen:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeVideo2DStretchToScreen:"), current_attribute->video_2d.stretch_to_screen);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DPriority:") && current_attribute != nullptr)
+        {
+            ParseInteger(ExtractValue(trimmed, "AttributeVideo2DPriority:"), current_attribute->video_2d.priority);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DPlayMode:") && current_attribute != nullptr)
+        {
+            const std::string mode = TrimCopy(ExtractValue(trimmed, "AttributeVideo2DPlayMode:"));
+            if (mode == "Loop")
+            {
+                current_attribute->video_2d.play_mode = SceneObjectVideoPlayMode::Loop;
+            }
+            else if (mode == "PlayOnce" || mode == "On")
+            {
+                current_attribute->video_2d.play_mode = SceneObjectVideoPlayMode::PlayOnce;
+            }
+            else
+            {
+                current_attribute->video_2d.play_mode = SceneObjectVideoPlayMode::Off;
+            }
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DVolume:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeVideo2DVolume:"), current_attribute->video_2d.volume);
+        }
+        else if (StartsWith(trimmed, "AttributeVideo2DMuted:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeVideo2DMuted:"), current_attribute->video_2d.muted);
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -2527,6 +2612,104 @@ bool SetSceneObjectAttributeAudioMaxDistance(const std::filesystem::path& scene_
 bool SetSceneObjectAttributeAudioDopplerFactor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float doppler_factor)
 {
     return SetSceneObjectAttributeScalar("AttributeAudioDopplerFactor", scene_path, object_name, attribute_index, doppler_factor);
+}
+
+bool SetSceneObjectAttributeVideo2DVideoPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& video_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeVideo2DVideoPath", scene_path, object_name, attribute_index, video_path);
+}
+
+bool SetSceneObjectAttributeVideo2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
+{
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeVideo2DX",
+        "AttributeVideo2DY",
+        scene_path,
+        object_name,
+        attribute_index,
+        x,
+        y);
+}
+
+bool SetSceneObjectAttributeVideo2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height)
+{
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeVideo2DWidth",
+        "AttributeVideo2DHeight",
+        scene_path,
+        object_name,
+        attribute_index,
+        width,
+        height);
+}
+
+bool SetSceneObjectAttributeVideo2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint)
+{
+    return SetSceneObjectAttributeColorValue("AttributeVideo2DTint", scene_path, object_name, attribute_index, tint);
+}
+
+bool SetSceneObjectAttributeVideo2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha)
+{
+    return SetSceneObjectAttributeScalar("AttributeVideo2DAlpha", scene_path, object_name, attribute_index, alpha);
+}
+
+bool SetSceneObjectAttributeVideo2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
+{
+    return SetSceneObjectAttributeBoolean("AttributeVideo2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
+}
+
+bool SetSceneObjectAttributeVideo2DStretchToScreen(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool stretch_to_screen)
+{
+    return SetSceneObjectAttributeBoolean("AttributeVideo2DStretchToScreen", scene_path, object_name, attribute_index, stretch_to_screen);
+}
+
+bool SetSceneObjectAttributeVideo2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string("AttributeVideo2DPriority") + ":";
+        const std::string new_line = std::string("AttributeVideo2DPriority") + ": " + FormatInteger(priority);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
+}
+
+bool SetSceneObjectAttributeVideo2DPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectVideoPlayMode play_mode)
+{
+    const std::string value = (play_mode == SceneObjectVideoPlayMode::Loop) ? "Loop"
+        : (play_mode == SceneObjectVideoPlayMode::PlayOnce) ? "PlayOnce"
+        : "Off";
+    return SetSceneObjectAttributeStringValue("AttributeVideo2DPlayMode", scene_path, object_name, attribute_index, value);
+}
+
+bool SetSceneObjectAttributeVideo2DVolume(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float volume)
+{
+    return SetSceneObjectAttributeScalar("AttributeVideo2DVolume", scene_path, object_name, attribute_index, volume);
+}
+
+bool SetSceneObjectAttributeVideo2DMuted(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool muted)
+{
+    return SetSceneObjectAttributeBoolean("AttributeVideo2DMuted", scene_path, object_name, attribute_index, muted);
 }
 
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height)

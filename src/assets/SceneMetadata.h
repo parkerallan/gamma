@@ -33,12 +33,20 @@ enum class SceneObjectAttributeKind
     Image2D,
     Skybox,
     Audio,
+    Video2D,
 };
 
 enum class SceneObjectAudioPlayMode
 {
     Off,
     On,
+};
+
+enum class SceneObjectVideoPlayMode
+{
+    Off,
+    PlayOnce,
+    Loop,
 };
 
 struct SceneObjectEnvironmentLightAttributes
@@ -156,6 +164,23 @@ struct SceneObjectAudioAttributes
     float doppler_factor = 1.0f;
 };
 
+struct SceneObjectVideo2DAttributes
+{
+    std::string video_path;
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 480.0f;
+    float height = 270.0f;
+    SceneColor3 tint = {1.0f, 1.0f, 1.0f};
+    float alpha = 1.0f;
+    bool lock_aspect_ratio = true;
+    bool stretch_to_screen = false;
+    int priority = 1;
+    SceneObjectVideoPlayMode play_mode = SceneObjectVideoPlayMode::Loop;
+    float volume = 1.0f;
+    bool muted = false;
+};
+
 struct SceneObjectAttribute
 {
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
@@ -171,6 +196,7 @@ struct SceneObjectAttribute
     SceneObjectImage2DAttributes image_2d{};
     SceneObjectSkyboxAttributes skybox{};
     SceneObjectAudioAttributes audio{};
+    SceneObjectVideo2DAttributes video_2d{};
 };
 
 struct SceneObjectMetadata
@@ -311,6 +337,17 @@ bool SetSceneObjectAttributeAudioSpatialize(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeAudioMinDistance(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float min_distance);
 bool SetSceneObjectAttributeAudioMaxDistance(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float max_distance);
 bool SetSceneObjectAttributeAudioDopplerFactor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float doppler_factor);
+bool SetSceneObjectAttributeVideo2DVideoPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& video_path);
+bool SetSceneObjectAttributeVideo2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y);
+bool SetSceneObjectAttributeVideo2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height);
+bool SetSceneObjectAttributeVideo2DTint(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& tint);
+bool SetSceneObjectAttributeVideo2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
+bool SetSceneObjectAttributeVideo2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
+bool SetSceneObjectAttributeVideo2DStretchToScreen(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool stretch_to_screen);
+bool SetSceneObjectAttributeVideo2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority);
+bool SetSceneObjectAttributeVideo2DPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectVideoPlayMode play_mode);
+bool SetSceneObjectAttributeVideo2DVolume(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float volume);
+bool SetSceneObjectAttributeVideo2DMuted(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool muted);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);

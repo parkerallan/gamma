@@ -73,6 +73,11 @@ public:
     // Drop all currently-playing instances. Called on scene stop.
     void StopAll();
 
+    // Direct access to the underlying miniaudio engine, for subsystems that
+    // need to attach their own non-spatial ma_sound (e.g. video audio tracks).
+    // Returns nullptr if not initialized.
+    ma_engine* GetEngine() const { return engine_; }
+
 private:
     struct PlayingSound
     {

@@ -1866,6 +1866,11 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
         SDL_Log("AudioEngine initialization failed; audio attributes will be silent");
     }
 
+    // Video playback manager needs the audio engine for in-band audio tracks,
+    // so wire it after audio_engine_ is up.
+    video_playback_manager_.Initialize(&scene_2d_renderer_, &audio_engine_);
+    scene_2d_renderer_.SetVideoPlaybackManager(&video_playback_manager_);
+
     return true;
 }
 
@@ -2103,6 +2108,8 @@ void RuntimeRenderer::Shutdown()
     skybox_renderer_.Shutdown();
     ShutdownScriptRuntime();
     physics_world_.Shutdown();
+    scene_2d_renderer_.SetVideoPlaybackManager(nullptr);
+    video_playback_manager_.Shutdown();
     scene_2d_renderer_.Shutdown();
     ray_tracing_.Shutdown();
     for (auto& [path, entry] : mesh_cache_)
@@ -5104,6 +5111,19 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
 
     const std::uint64_t overlay_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     float overlay_gpu_wait_ms = 0.0f;
+    {
+        const std::uint64_t now_perf_ticks = overlay_start_ticks;
+        const std::uint64_t perf_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+        float video_dt = 0.0f;
+        if (video_last_perf_ticks_ != 0 && now_perf_ticks > video_last_perf_ticks_ && perf_freq > 0)
+        {
+            video_dt = static_cast<float>(
+                static_cast<double>(now_perf_ticks - video_last_perf_ticks_) /
+                static_cast<double>(perf_freq));
+        }
+        video_last_perf_ticks_ = now_perf_ticks;
+        video_playback_manager_.Update(video_dt, scene_metadata, project_root_);
+    }
     scene_2d_renderer_.CompositeOverlay(
         scene_metadata,
         project_root_,

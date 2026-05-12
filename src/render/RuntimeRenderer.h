@@ -9,6 +9,7 @@
 #include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
 #include "render/Scene2DRenderer.h"
+#include "render/VideoPlaybackManager.h"
 #include "render/SkyboxRenderer.h"
 
 #include <array>
@@ -401,6 +402,7 @@ private:
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
     Scene2DRenderer scene_2d_renderer_{};
+    VideoPlaybackManager video_playback_manager_{};
     SkyboxRenderer skybox_renderer_{};
     std::filesystem::path project_root_;
     std::filesystem::path scene_path_;
@@ -457,6 +459,7 @@ private:
     std::vector<PhysicsCollisionEvent> script_frame_collision_events_;
     std::uint64_t animation_last_tick_ms_ = 0;
     std::uint64_t animation_last_perf_ticks_ = 0;
+    std::uint64_t video_last_perf_ticks_ = 0;
     std::uint64_t script_last_tick_ms_ = 0;
     std::uint64_t script_session_start_ms_ = 0;
     std::vector<QueuedSceneObject> queued_objects_;

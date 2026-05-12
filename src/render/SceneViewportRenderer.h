@@ -7,6 +7,7 @@
 #include "render/Raytracing.h"
 #include "render/Scene2DRenderer.h"
 #include "render/SkyboxRenderer.h"
+#include "render/VideoPlaybackManager.h"
 #include "state/EngineState.h"
 
 #include <vulkan/vulkan.h>
@@ -133,6 +134,7 @@ private:
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
     Scene2DRenderer scene_2d_renderer_{};
+    VideoPlaybackManager video_playback_manager_{};
     SkyboxRenderer skybox_renderer_{};
     bool render_requested_ = false;
     bool middle_mouse_panning_ = false;
