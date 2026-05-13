@@ -10,6 +10,7 @@
 #include "state/EngineState.h"
 
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -30,6 +31,11 @@ private:
     {
         std::filesystem::file_time_type write_time{};
         ModelAsset asset{};
+        // When non-empty, the entry has a worker thread loading the model.
+        // GetModelAssetEntry polls this each call without blocking the UI;
+        // when the future is ready the parsed asset is moved into `asset`.
+        std::shared_future<ModelAsset> pending_load;
+        bool load_in_flight = false;
     };
 
     const ModelMetadata& GetModelMetadata(const std::filesystem::path& path);
@@ -80,4 +86,8 @@ private:
     ImageInfoRenderer image_info_renderer_{};
     FontInfoRenderer font_info_renderer_{};
     float font_preview_size_pixels_ = 34.0f;
+    // Whether the camera attribute preview is visible. Toggle hides the GPU
+    // preview entirely (and frees its renderers) to avoid spending time
+    // rendering an offscreen pass the user isn't looking at.
+    bool show_camera_preview_ = true;
 };

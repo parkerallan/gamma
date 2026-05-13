@@ -474,6 +474,17 @@ private:
     std::unordered_map<std::string, RuntimeSpawnedObject> runtime_spawned_objects_;
     std::unordered_set<std::string> runtime_destroyed_objects_;
     std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_;
+    // Previous and current physics simulation snapshots used to render at a
+    // smooth (interpolated) pose even when the variable per-frame dt would
+    // otherwise produce jittery motion for parented children (e.g. a camera
+    // attached to a velocity-driven player). Updated at a fixed timestep via
+    // an accumulator; the resulting alpha is used to lerp into
+    // physics_object_transforms_.
+    std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_prev_;
+    std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_curr_;
+    float physics_accumulator_seconds_ = 0.0f;
+    std::uint64_t physics_last_tick_ms_ = 0;
+    bool physics_has_curr_snapshot_ = false;
     std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_rotation_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_scale_overrides_;

@@ -3,10 +3,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 
 namespace
 {
@@ -903,6 +906,196 @@ bool SetSceneObjectBoolean(const std::filesystem::path& scene_path, const std::s
         lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(object_end), new_line);
     });
 }
+
+// ---- Hierarchy transform helpers ----------------------------------------------------
+// These mirror the matrix conventions used by the viewport/runtime renderers
+// (column-major, transform = T * Rz * Ry * Rx * S, rotations in degrees, XYZ Euler).
+
+void Mat4Identity(float* m)
+{
+    std::fill(m, m + 16, 0.0f);
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+
+void Mat4Multiply(const float* left, const float* right, float* out)
+{
+    float tmp[16];
+    for (int row = 0; row < 4; ++row)
+    {
+        for (int col = 0; col < 4; ++col)
+        {
+            float v = 0.0f;
+            for (int i = 0; i < 4; ++i)
+            {
+                v += left[i * 4 + row] * right[col * 4 + i];
+            }
+            tmp[col * 4 + row] = v;
+        }
+    }
+    std::memcpy(out, tmp, sizeof(tmp));
+}
+
+bool Mat4Invert(const float* m, float* out)
+{
+    float inv[16];
+    inv[0]  =  m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4]  = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8]  =  m[4] * m[9]  * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9]  * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1]  = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5]  =  m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9]  = -m[0] * m[9]  * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] =  m[0] * m[9]  * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2]  =  m[1] * m[6]  * m[15] - m[1] * m[7]  * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7]  - m[13] * m[3] * m[6];
+    inv[6]  = -m[0] * m[6]  * m[15] + m[0] * m[7]  * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7]  + m[12] * m[3] * m[6];
+    inv[10] =  m[0] * m[5]  * m[15] - m[0] * m[7]  * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7]  - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5]  * m[14] + m[0] * m[6]  * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6]  + m[12] * m[2] * m[5];
+    inv[3]  = -m[1] * m[6]  * m[11] + m[1] * m[7]  * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9]  * m[2] * m[7]  + m[9]  * m[3] * m[6];
+    inv[7]  =  m[0] * m[6]  * m[11] - m[0] * m[7]  * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8]  * m[2] * m[7]  - m[8]  * m[3] * m[6];
+    inv[11] = -m[0] * m[5]  * m[11] + m[0] * m[7]  * m[9]  + m[4] * m[1] * m[11] - m[4] * m[3] * m[9]  - m[8]  * m[1] * m[7]  + m[8]  * m[3] * m[5];
+    inv[15] =  m[0] * m[5]  * m[10] - m[0] * m[6]  * m[9]  - m[4] * m[1] * m[10] + m[4] * m[2] * m[9]  + m[8]  * m[1] * m[6]  - m[8]  * m[2] * m[5];
+
+    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (std::abs(det) < 1e-12f)
+    {
+        Mat4Identity(out);
+        return false;
+    }
+    det = 1.0f / det;
+    for (int i = 0; i < 16; ++i)
+    {
+        out[i] = inv[i] * det;
+    }
+    return true;
+}
+
+void BuildLocalTransformMatrix(const SceneVector3& position, const SceneVector3& rotation_degrees, const SceneVector3& scale, float* out)
+{
+    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+    const float cx = std::cos(rotation_degrees[0] * kDegToRad);
+    const float sx = std::sin(rotation_degrees[0] * kDegToRad);
+    const float cy = std::cos(rotation_degrees[1] * kDegToRad);
+    const float sy = std::sin(rotation_degrees[1] * kDegToRad);
+    const float cz = std::cos(rotation_degrees[2] * kDegToRad);
+    const float sz = std::sin(rotation_degrees[2] * kDegToRad);
+
+    // R = Rz * Ry * Rx, column-major. Expanded coefficients:
+    const float r00 =  cz * cy;
+    const float r10 =  sz * cy;
+    const float r20 = -sy;
+    const float r01 = -sz * cx + cz * sy * sx;
+    const float r11 =  cz * cx + sz * sy * sx;
+    const float r21 =  cy * sx;
+    const float r02 =  sz * sx + cz * sy * cx;
+    const float r12 = -cz * sx + sz * sy * cx;
+    const float r22 =  cy * cx;
+
+    out[0]  = r00 * scale[0];
+    out[1]  = r10 * scale[0];
+    out[2]  = r20 * scale[0];
+    out[3]  = 0.0f;
+    out[4]  = r01 * scale[1];
+    out[5]  = r11 * scale[1];
+    out[6]  = r21 * scale[1];
+    out[7]  = 0.0f;
+    out[8]  = r02 * scale[2];
+    out[9]  = r12 * scale[2];
+    out[10] = r22 * scale[2];
+    out[11] = 0.0f;
+    out[12] = position[0];
+    out[13] = position[1];
+    out[14] = position[2];
+    out[15] = 1.0f;
+}
+
+void DecomposeLocalTransformMatrix(const float* m, SceneVector3& position, SceneVector3& rotation_degrees, SceneVector3& scale)
+{
+    position = {m[12], m[13], m[14]};
+
+    float sx = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2]  * m[2]);
+    float sy = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6]  * m[6]);
+    float sz = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+
+    const float det3 =
+        m[0] * (m[5] * m[10] - m[9] * m[6]) -
+        m[4] * (m[1] * m[10] - m[9] * m[2]) +
+        m[8] * (m[1] * m[6]  - m[5] * m[2]);
+    if (det3 < 0.0f)
+    {
+        sx = -sx;
+    }
+
+    const float inv_sx = std::abs(sx) > 1e-8f ? 1.0f / sx : 0.0f;
+    const float inv_sy = std::abs(sy) > 1e-8f ? 1.0f / sy : 0.0f;
+    const float inv_sz = std::abs(sz) > 1e-8f ? 1.0f / sz : 0.0f;
+
+    const float r00 = m[0]  * inv_sx;
+    const float r10 = m[1]  * inv_sx;
+    const float r20 = m[2]  * inv_sx;
+    const float r11 = m[5]  * inv_sy;
+    const float r21 = m[6]  * inv_sy;
+    const float r12 = m[9]  * inv_sz;
+    const float r22 = m[10] * inv_sz;
+
+    // From R = Rz*Ry*Rx: r20 = -sin(ry).
+    constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
+    const float clamped = std::clamp(-r20, -1.0f, 1.0f);
+    const float ry = std::asin(clamped);
+    float rx;
+    float rz;
+    if (std::abs(r20) < 0.99999f)
+    {
+        rx = std::atan2(r21, r22);
+        rz = std::atan2(r10, r00);
+    }
+    else
+    {
+        // Gimbal lock: roll rolled into yaw; pick rz = 0.
+        rx = std::atan2(-r12, r11);
+        rz = 0.0f;
+    }
+
+    rotation_degrees = {rx * kRadToDeg, ry * kRadToDeg, rz * kRadToDeg};
+    scale = {sx, sy, sz};
+}
+
+void ResolveObjectWorldMatrix(const SceneMetadata& scene_metadata, const std::string& object_name, float* out)
+{
+    Mat4Identity(out);
+    if (object_name.empty())
+    {
+        return;
+    }
+
+    std::vector<const SceneObjectMetadata*> chain;
+    std::unordered_set<std::string> visited;
+    std::string current = object_name;
+    while (!current.empty() && visited.insert(current).second)
+    {
+        const auto it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(),
+            [&](const SceneObjectMetadata& object) { return object.name == current; });
+        if (it == scene_metadata.objects.end())
+        {
+            break;
+        }
+        chain.push_back(&(*it));
+        current = it->parent_name;
+    }
+
+    // chain.front() is the object itself, chain.back() is the (deepest) ancestor.
+    // Accumulate world = ancestor_local * ... * self_local (apply parents first).
+    float accum[16];
+    Mat4Identity(accum);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+    {
+        float local[16];
+        BuildLocalTransformMatrix((*it)->position, (*it)->rotation, (*it)->scale, local);
+        float next[16];
+        Mat4Multiply(accum, local, next);
+        std::memcpy(accum, next, sizeof(next));
+    }
+    std::memcpy(out, accum, sizeof(accum));
+}
 }
 
 const char* ToDisplayName(SceneObjectAttributeKind kind)
@@ -1243,7 +1436,43 @@ bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::st
         return false;
     }
 
-    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    // Locate the object so we can preserve its current world transform across the
+    // reparent. Without this, a child's existing position/rotation/scale would be
+    // re-interpreted in the new parent's space and the child would visibly jump.
+    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(),
+        [&](const SceneObjectMetadata& object) { return object.name == object_name; });
+    const std::string previous_parent_name = object_it != scene_metadata.objects.end() ? object_it->parent_name : std::string{};
+
+    SceneVector3 new_local_position = object_it != scene_metadata.objects.end() ? object_it->position : SceneVector3{0.0f, 0.0f, 0.0f};
+    SceneVector3 new_local_rotation = object_it != scene_metadata.objects.end() ? object_it->rotation : SceneVector3{0.0f, 0.0f, 0.0f};
+    SceneVector3 new_local_scale = object_it != scene_metadata.objects.end() ? object_it->scale : SceneVector3{1.0f, 1.0f, 1.0f};
+    const bool parent_changed = previous_parent_name != parent_name;
+
+    if (parent_changed && object_it != scene_metadata.objects.end())
+    {
+        float object_world[16];
+        ResolveObjectWorldMatrix(scene_metadata, object_name, object_world);
+
+        float new_parent_world[16];
+        if (parent_name.empty())
+        {
+            Mat4Identity(new_parent_world);
+        }
+        else
+        {
+            ResolveObjectWorldMatrix(scene_metadata, parent_name, new_parent_world);
+        }
+
+        float inverse_new_parent_world[16];
+        if (Mat4Invert(new_parent_world, inverse_new_parent_world))
+        {
+            float new_local_matrix[16];
+            Mat4Multiply(inverse_new_parent_world, object_world, new_local_matrix);
+            DecomposeLocalTransformMatrix(new_local_matrix, new_local_position, new_local_rotation, new_local_scale);
+        }
+    }
+
+    const bool parent_written = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
     {
         std::size_t existing_parent_index = object_end;
         for (std::size_t index = object_start + 1; index < object_end; ++index)
@@ -1280,6 +1509,26 @@ bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::st
 
         lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(existing_parent_index), new_line);
     });
+
+    if (!parent_written)
+    {
+        return false;
+    }
+
+    if (parent_changed)
+    {
+        SetSceneObjectTransform(
+            scene_path,
+            object_name,
+            new_local_position,
+            new_local_rotation,
+            new_local_scale,
+            true,
+            true,
+            true);
+    }
+
+    return true;
 }
 
 SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)

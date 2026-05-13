@@ -332,6 +332,56 @@ void BuildTransformMatrixFromPhysicsTransform(const PhysicsBodyTransform& transf
     matrix[14] = transform.position[2];
 }
 
+// Lerp two physics body transforms (position linearly, rotation via shortest-arc NLERP).
+// Used to smooth the rendered pose between successive fixed physics steps so that a
+// camera (or other child) attached to a physics-driven parent does not appear to
+// stutter when the per-frame dt fluctuates.
+PhysicsBodyTransform InterpolatePhysicsTransform(
+    const PhysicsBodyTransform& a,
+    const PhysicsBodyTransform& b,
+    float t)
+{
+    PhysicsBodyTransform out;
+    out.position = {
+        a.position[0] + (b.position[0] - a.position[0]) * t,
+        a.position[1] + (b.position[1] - a.position[1]) * t,
+        a.position[2] + (b.position[2] - a.position[2]) * t,
+    };
+
+    std::array<float, 4> qa = a.rotation;
+    std::array<float, 4> qb = b.rotation;
+    const float dot = qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3];
+    if (dot < 0.0f)
+    {
+        for (float& v : qb)
+        {
+            v = -v;
+        }
+    }
+
+    std::array<float, 4> qr = {
+        qa[0] + (qb[0] - qa[0]) * t,
+        qa[1] + (qb[1] - qa[1]) * t,
+        qa[2] + (qb[2] - qa[2]) * t,
+        qa[3] + (qb[3] - qa[3]) * t,
+    };
+    const float length = std::sqrt(qr[0] * qr[0] + qr[1] * qr[1] + qr[2] * qr[2] + qr[3] * qr[3]);
+    if (length > 1e-8f)
+    {
+        const float inv = 1.0f / length;
+        for (float& v : qr)
+        {
+            v *= inv;
+        }
+    }
+    else
+    {
+        qr = {0.0f, 0.0f, 0.0f, 1.0f};
+    }
+    out.rotation = qr;
+    return out;
+}
+
 Vec3 TransformPoint(const float* matrix, const Vec3& point)
 {
     return Vec3{
@@ -446,7 +496,17 @@ SceneLightingResolvedObjectPoseMap BuildLightingPoseMap(const SceneResolvedObjec
     return lighting_poses;
 }
 
-SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_metadata)
+struct RuntimePoseOverrides
+{
+    const std::unordered_map<std::string, PhysicsBodyTransform>* physics_transforms = nullptr;
+    const std::unordered_map<std::string, SceneVector3>* position_overrides = nullptr;
+    const std::unordered_map<std::string, SceneVector3>* rotation_overrides = nullptr;
+    const std::unordered_map<std::string, SceneVector3>* scale_overrides = nullptr;
+};
+
+SceneResolvedObjectPoseMap ResolveSceneObjectPoses(
+    const SceneMetadata& scene_metadata,
+    const RuntimePoseOverrides& overrides = RuntimePoseOverrides{})
 {
     std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
@@ -481,8 +541,62 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_me
 
         pose.resolving = true;
 
+        // Effective local transform = stored local transform, with physics/script
+        // overrides applied so children (e.g. a camera parented to a player) inherit
+        // the moving parent's transform at runtime.
+        SceneVector3 local_position = object_it->second->position;
+        SceneVector3 local_rotation = object_it->second->rotation;
+        SceneVector3 local_scale    = object_it->second->scale;
+
+        bool physics_overrides_pose = false;
+        std::array<float, 4> physics_quaternion = {0.0f, 0.0f, 0.0f, 1.0f};
+        if (overrides.physics_transforms != nullptr)
+        {
+            const auto it = overrides.physics_transforms->find(object_name);
+            if (it != overrides.physics_transforms->end())
+            {
+                physics_overrides_pose = true;
+                local_position = {it->second.position[0], it->second.position[1], it->second.position[2]};
+                physics_quaternion = it->second.rotation;
+            }
+        }
+        if (overrides.position_overrides != nullptr && !physics_overrides_pose)
+        {
+            const auto it = overrides.position_overrides->find(object_name);
+            if (it != overrides.position_overrides->end())
+            {
+                local_position = it->second;
+            }
+        }
+        if (overrides.rotation_overrides != nullptr && !physics_overrides_pose)
+        {
+            const auto it = overrides.rotation_overrides->find(object_name);
+            if (it != overrides.rotation_overrides->end())
+            {
+                local_rotation = it->second;
+            }
+        }
+        if (overrides.scale_overrides != nullptr)
+        {
+            const auto it = overrides.scale_overrides->find(object_name);
+            if (it != overrides.scale_overrides->end())
+            {
+                local_scale = it->second;
+            }
+        }
+
         float local_matrix[16];
-        BuildTransformMatrix(object_it->second->position, object_it->second->rotation, object_it->second->scale, local_matrix);
+        if (physics_overrides_pose)
+        {
+            PhysicsBodyTransform physics_transform;
+            physics_transform.position = {local_position[0], local_position[1], local_position[2]};
+            physics_transform.rotation = physics_quaternion;
+            BuildTransformMatrixFromPhysicsTransform(physics_transform, local_scale, local_matrix);
+        }
+        else
+        {
+            BuildTransformMatrix(local_position, local_rotation, local_scale, local_matrix);
+        }
 
         const std::string& parent_name = object_it->second->parent_name;
         const auto parent_it = objects_by_name.find(parent_name);
@@ -2131,6 +2245,11 @@ void RuntimeRenderer::Shutdown()
     runtime_spawned_objects_.clear();
     runtime_destroyed_objects_.clear();
     physics_object_transforms_.clear();
+    physics_object_transforms_prev_.clear();
+    physics_object_transforms_curr_.clear();
+    physics_accumulator_seconds_ = 0.0f;
+    physics_last_tick_ms_ = 0;
+    physics_has_curr_snapshot_ = false;
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
@@ -2202,6 +2321,11 @@ bool RuntimeRenderer::StartSession(
     runtime_spawned_objects_.clear();
     runtime_destroyed_objects_.clear();
     physics_object_transforms_.clear();
+    physics_object_transforms_prev_.clear();
+    physics_object_transforms_curr_.clear();
+    physics_accumulator_seconds_ = 0.0f;
+    physics_last_tick_ms_ = 0;
+    physics_has_curr_snapshot_ = false;
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
@@ -2798,6 +2922,11 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
     {
         physics_world_built_ = false;
         physics_object_transforms_.clear();
+        physics_object_transforms_prev_.clear();
+        physics_object_transforms_curr_.clear();
+        physics_accumulator_seconds_ = 0.0f;
+        physics_last_tick_ms_ = 0;
+        physics_has_curr_snapshot_ = false;
     }
 
     return cached_scene_metadata_;
@@ -3775,6 +3904,12 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
         script_next_timer_id_ = 1;
         script_timer_pending_clear_.clear();
         physics_world_built_ = false;
+        physics_object_transforms_.clear();
+        physics_object_transforms_prev_.clear();
+        physics_object_transforms_curr_.clear();
+        physics_accumulator_seconds_ = 0.0f;
+        physics_last_tick_ms_ = 0;
+        physics_has_curr_snapshot_ = false;
         cached_scene_path_.clear();
         cached_scene_metadata_ = SceneMetadata{};
         has_cached_scene_metadata_ = false;
@@ -4648,6 +4783,11 @@ void RuntimeRenderer::HandleScriptAttributeMutation(SceneObjectAttributeKind kin
     case SceneObjectAttributeKind::TriggerVolume:
         physics_world_built_ = false;
         physics_object_transforms_.clear();
+        physics_object_transforms_prev_.clear();
+        physics_object_transforms_curr_.clear();
+        physics_accumulator_seconds_ = 0.0f;
+        physics_last_tick_ms_ = 0;
+        physics_has_curr_snapshot_ = false;
         break;
 
     case SceneObjectAttributeKind::Camera:
@@ -4678,7 +4818,12 @@ bool RuntimeRenderer::BuildQueuedScene(
 {
     queued_objects_.clear();
 
-    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
+    RuntimePoseOverrides pose_overrides;
+    pose_overrides.physics_transforms = &physics_object_transforms_;
+    pose_overrides.position_overrides = &script_object_position_overrides_;
+    pose_overrides.rotation_overrides = &script_object_rotation_overrides_;
+    pose_overrides.scale_overrides = &script_object_scale_overrides_;
+    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata, pose_overrides);
     const auto camera_pose_it = resolved_object_poses.find(active_camera_object.name);
     if (camera_pose_it == resolved_object_poses.end())
     {
@@ -5026,15 +5171,8 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         return false;
     }
 
-    std::array<float, 16> view_inverse = {};
-    std::array<float, 16> projection_inverse = {};
-    ResolvedSceneLighting lighting{};
-    if (!BuildQueuedScene(scene_metadata, *camera_object_it, camera_attribute.camera, view_inverse, projection_inverse, lighting, error_message))
-    {
-        return false;
-    }
-
-    // Build physics world once per session (after the first BuildQueuedScene).
+    // Build physics world once per session, before the first BuildQueuedScene so that
+    // the camera pose resolved this frame already reflects this frame's physics step.
     if (!physics_world_built_ && physics_world_.IsInitialized())
     {
         const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata);
@@ -5058,35 +5196,93 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
                 return entry.asset.loaded ? &entry.asset : nullptr;
             });
         physics_world_built_ = true;
+        physics_object_transforms_curr_ = physics_world_.GetSimulatedTransforms();
+        physics_object_transforms_prev_ = physics_object_transforms_curr_;
+        physics_object_transforms_ = physics_object_transforms_curr_;
+        physics_has_curr_snapshot_ = true;
+        physics_accumulator_seconds_ = 0.0f;
     }
 
-    // Step physics and push simulated positions into the position overrides.
+    // Step physics on a fixed timestep with an accumulator and render with an
+    // interpolated pose between the previous and current physics snapshots. With
+    // a variable per-frame dt, per-frame displacement of velocity-driven bodies
+    // jitters, which is invisible when the camera is stationary but extremely
+    // visible when the camera is parented to a moving body. A fixed step makes
+    // each physics increment deterministic, and the prev->curr interpolation
+    // produces smooth on-screen motion at any render rate.
     if (physics_world_.IsInitialized())
     {
         const std::uint64_t physics_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
-        const float raw_phys_dt = (script_last_tick_ms_ != 0 && now_ms >= script_last_tick_ms_)
-            ? static_cast<float>(now_ms - script_last_tick_ms_) / 1000.0f
+        const float raw_phys_dt = (physics_last_tick_ms_ != 0 && now_ms >= physics_last_tick_ms_)
+            ? static_cast<float>(now_ms - physics_last_tick_ms_) / 1000.0f
             : 0.0f;
-        // Cap the physics step at ~30 FPS worth of time. A periodic editor
-        // hitch (filesystem scan, build, AV) can otherwise translate a frame
-        // dt of 40+ ms into a giant integration step which moves a
-        // velocity-driven body 2-3x its normal per-frame distance, producing
-        // a visible "snap forward" on the next frame. Capping converts that
-        // into a small slowdown instead of a teleport.
-        constexpr float kMaxPhysicsDt = 1.0f / 30.0f;
-        const float phys_dt = (std::min)(raw_phys_dt, kMaxPhysicsDt);
-        physics_world_.Step(phys_dt);
-        physics_object_transforms_ = physics_world_.GetSimulatedTransforms();
-        const auto simulated = physics_world_.GetSimulatedPositions();
-        for (const auto& [name, pos] : simulated)
+        physics_last_tick_ms_ = now_ms;
+
+        // Cap the per-frame delta. A periodic editor hitch can otherwise dump
+        // a huge dt into the accumulator and cause physics to "catch up" with
+        // many steps, producing a visible warp.
+        constexpr float kMaxFrameDt = 1.0f / 30.0f;
+        const float frame_dt = (std::min)(raw_phys_dt, kMaxFrameDt);
+
+        constexpr float kFixedStepSeconds = 1.0f / 60.0f;
+        constexpr int kMaxStepsPerFrame = 4;
+
+        physics_accumulator_seconds_ += frame_dt;
+        int steps_taken = 0;
+        while (physics_accumulator_seconds_ >= kFixedStepSeconds && steps_taken < kMaxStepsPerFrame)
         {
-            // Physics is authoritative for dynamic body positions.
-            SetScriptObjectPosition(name, pos);
+            physics_object_transforms_prev_ = physics_object_transforms_curr_;
+            physics_world_.Step(kFixedStepSeconds);
+            physics_object_transforms_curr_ = physics_world_.GetSimulatedTransforms();
+            physics_has_curr_snapshot_ = true;
+            physics_accumulator_seconds_ -= kFixedStepSeconds;
+            ++steps_taken;
         }
+        // Avoid runaway accumulation if we ran out of catch-up budget.
+        if (physics_accumulator_seconds_ > kFixedStepSeconds)
+        {
+            physics_accumulator_seconds_ = std::fmod(physics_accumulator_seconds_, kFixedStepSeconds);
+        }
+
+        const float alpha = physics_has_curr_snapshot_
+            ? std::clamp(physics_accumulator_seconds_ / kFixedStepSeconds, 0.0f, 1.0f)
+            : 0.0f;
+
+        physics_object_transforms_.clear();
+        physics_object_transforms_.reserve(physics_object_transforms_curr_.size());
+        for (const auto& [name, curr] : physics_object_transforms_curr_)
+        {
+            const auto prev_it = physics_object_transforms_prev_.find(name);
+            if (prev_it == physics_object_transforms_prev_.end())
+            {
+                physics_object_transforms_.emplace(name, curr);
+            }
+            else
+            {
+                physics_object_transforms_.emplace(name, InterpolatePhysicsTransform(prev_it->second, curr, alpha));
+            }
+        }
+
+        // Scripts read positions via GetObjectPosition. Use the authoritative
+        // (non-interpolated) latest physics state so script logic stays
+        // physically consistent regardless of render-time interpolation.
+        for (const auto& [name, transform] : physics_object_transforms_curr_)
+        {
+            SetScriptObjectPosition(name, transform.position);
+        }
+
         performance_stats_.physics_time_ms = TicksToMilliseconds(
             physics_start_ticks,
             static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+    }
+
+    std::array<float, 16> view_inverse = {};
+    std::array<float, 16> projection_inverse = {};
+    ResolvedSceneLighting lighting{};
+    if (!BuildQueuedScene(scene_metadata, *camera_object_it, camera_attribute.camera, view_inverse, projection_inverse, lighting, error_message))
+    {
+        return false;
     }
 
     const std::uint64_t scripts_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
@@ -5765,7 +5961,12 @@ void RuntimeRenderer::UpdateAudioSourcesForFrame(
     const std::array<float, 3> listener_up = {camera_world_matrix[4], camera_world_matrix[5], camera_world_matrix[6]};
     audio_engine_.SetListener(listener_pos, listener_forward, listener_up);
 
-    const SceneResolvedObjectPoseMap resolved_poses = ResolveSceneObjectPoses(scene_metadata);
+    RuntimePoseOverrides pose_overrides;
+    pose_overrides.physics_transforms = &physics_object_transforms_;
+    pose_overrides.position_overrides = &script_object_position_overrides_;
+    pose_overrides.rotation_overrides = &script_object_rotation_overrides_;
+    pose_overrides.scale_overrides = &script_object_scale_overrides_;
+    const SceneResolvedObjectPoseMap resolved_poses = ResolveSceneObjectPoses(scene_metadata, pose_overrides);
 
     // Walk every Audio attribute; resolve world position, push to engine,
     // honour play-mode transitions.

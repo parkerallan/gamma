@@ -4,6 +4,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -208,10 +209,33 @@ const InfoPanel::CachedModelAssetEntry& InfoPanel::GetModelAssetEntry(const std:
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
     CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
-    if (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded)
+
+    // Poll an in-flight load without blocking. The async task runs on a
+    // worker thread (see kick-off below) so the UI thread can continue
+    // rendering the rest of the panel while a large glTF parses.
+    if (cache_entry.load_in_flight && cache_entry.pending_load.valid())
+    {
+        if (cache_entry.pending_load.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        {
+            cache_entry.asset = cache_entry.pending_load.get();
+            cache_entry.pending_load = {};
+            cache_entry.load_in_flight = false;
+        }
+    }
+
+    // Only start a new load when nothing is in flight. If the file changed
+    // mid-load we'll pick up the newer write time on the next call after the
+    // current load completes (a brief lag is acceptable for an info preview).
+    const bool needs_load = !cache_entry.load_in_flight
+        && (!cache_entry.asset.loaded || error || cache_entry.write_time != write_time);
+    if (needs_load)
     {
         cache_entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
-        cache_entry.asset = LoadModelAsset(path);
+        cache_entry.load_in_flight = true;
+        cache_entry.pending_load = std::async(std::launch::async, [path]() -> ModelAsset
+        {
+            return LoadModelAsset(path);
+        }).share();
     }
 
     return cache_entry;
@@ -337,10 +361,66 @@ void InfoPanel::RenderCameraAttributePreview(
         return;
     }
 
+    ImGui::Spacing();
+    ImGui::Checkbox("Show camera preview", &show_camera_preview_);
+    if (!show_camera_preview_)
+    {
+        // Free the GPU renderers when hidden so we're not silently spending
+        // ray-traced frame time on something the user can't see.
+        if (!camera_preview_renderers_.empty())
+        {
+            ClearCameraPreviewRenderers();
+        }
+        return;
+    }
+
     if (!scene_metadata.parsed)
     {
         ImGui::Spacing();
         ImGui::TextDisabled("Preview unavailable.");
+        return;
+    }
+
+    // Kick off async loads for every referenced model. The renderer's
+    // resolve callback would do this synchronously inside RenderCameraPreview
+    // and block the UI for large glTFs (helmet, lamp, fox, ...). Polling all
+    // entries here keeps loading off the UI thread; we only invoke the GPU
+    // preview once every required asset is ready.
+    bool any_model_loading = false;
+    for (const SceneObjectMetadata& scene_object : scene_metadata.objects)
+    {
+        if (scene_object.model_path.empty())
+        {
+            continue;
+        }
+        const std::filesystem::path model_path = state.project_root / scene_object.model_path;
+        const CachedModelAssetEntry& entry = GetModelAssetEntry(model_path);
+        if (entry.load_in_flight)
+        {
+            any_model_loading = true;
+        }
+    }
+
+    if (any_model_loading)
+    {
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Preview");
+        const float available_width = ImGui::GetContentRegionAvail().x;
+        const float preview_height = (std::min)((std::max)(available_width, 1.0f) * (9.0f / 16.0f), 220.0f);
+        const ImVec2 box_min = ImGui::GetCursorScreenPos();
+        const ImVec2 box_max(box_min.x + available_width, box_min.y + preview_height);
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddRectFilled(box_min, box_max, IM_COL32(24, 28, 32, 255), 8.0f);
+        draw_list->AddRect(box_min, box_max, IM_COL32(92, 99, 110, 255), 8.0f, 0, 1.5f);
+        const char* message = "Loading...";
+        const ImVec2 text_size = ImGui::CalcTextSize(message);
+        draw_list->AddText(
+            ImVec2(
+                (box_min.x + box_max.x - text_size.x) * 0.5f,
+                (box_min.y + box_max.y - text_size.y) * 0.5f),
+            IM_COL32(235, 238, 242, 255),
+            message);
+        ImGui::Dummy(ImVec2(available_width, preview_height));
         return;
     }
 

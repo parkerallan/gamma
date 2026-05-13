@@ -295,6 +295,22 @@ const SceneMetadata* WorkspacePanel::TryGetCachedSceneMetadata(const std::filesy
     {
         return nullptr;
     }
+
+    // Validate against the current on-disk write time. Without this a Play
+    // started shortly after an edit (e.g. a drag-drop reparent in the Files
+    // panel that rewrote Parent / Position lines) could still be served the
+    // pre-edit cached metadata, and the runtime would simulate the previous
+    // hierarchy / transforms. The editor viewport reloads via
+    // GetSceneMetadata each frame which already validates write time, so
+    // mismatches here mean the cache hasn't caught up yet — fall back to
+    // letting the caller re-parse from disk.
+    std::error_code error;
+    const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(scene_path, error);
+    if (error || write_time != cached_scene_write_time_)
+    {
+        return nullptr;
+    }
+
     return &cached_scene_metadata_;
 }
 
