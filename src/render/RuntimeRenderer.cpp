@@ -1328,6 +1328,15 @@ struct RuntimeAnimationModelCacheEntry
     // Cache of node-name -> aiNodeAnim* per animation, built lazily on first sample.
     // Avoids rebuilding the unordered_map every frame inside SampleClipBoneMatrices.
     std::unordered_map<const aiAnimation*, std::unordered_map<std::string, const aiNodeAnim*>> channels_by_animation;
+    // Pointer-keyed mirror of channels_by_animation, also built lazily. Used by
+    // the physics sampling path to avoid allocating a std::string per node per
+    // frame for hashmap lookups. Resolved once via scene->FindNode().
+    std::unordered_map<const aiAnimation*, std::unordered_map<const aiNode*, const aiNodeAnim*>> channels_by_node_per_animation;
+    // Pointer-keyed bone index lookup, built lazily once. Mirrors
+    // bone_index_by_name but avoids per-node string allocations in the hot
+    // emit loop of the physics sampler.
+    std::unordered_map<const aiNode*, std::size_t> bone_index_by_node;
+    bool bone_index_by_node_built = false;
 };
 
 std::unordered_map<std::string, RuntimeAnimationModelCacheEntry> g_runtime_animation_model_cache;
@@ -1943,6 +1952,531 @@ bool SampleClipBoneMatrices(
         out_bone_matrices);
     return true;
 }
+
+// Recursive evaluator that also records each node's world transform and its
+// parent pointer. Used by the bone-physics path so we can read animated world
+// positions, modify them, and recompose bone matrices afterwards.
+struct NodeWorldRecord
+{
+    aiMatrix4x4 world;
+    const aiNode* parent = nullptr;
+};
+
+void EvaluateAnimationHierarchyWithWorld(
+    const aiAnimation* animation,
+    double animation_time,
+    const aiNode* node,
+    const aiNode* parent_node,
+    const aiMatrix4x4& parent_transform,
+    const std::unordered_map<std::string, const aiNodeAnim*>& channels_by_name,
+    std::unordered_map<const aiNode*, NodeWorldRecord>& out_world_by_node)
+{
+    aiMatrix4x4 node_transform = node->mTransformation;
+    const auto channel_it = channels_by_name.find(ToDisplayString(node->mName));
+    if (channel_it != channels_by_name.end())
+    {
+        const aiNodeAnim* channel = channel_it->second;
+        const aiVector3D scale = InterpolateScale(animation_time, channel);
+        const aiQuaternion rotation = InterpolateRotation(animation_time, channel);
+        const aiVector3D translation = InterpolatePosition(animation_time, channel);
+        node_transform = ComposeTransform(scale, rotation, translation);
+    }
+    const aiMatrix4x4 global_transform = parent_transform * node_transform;
+    out_world_by_node[node] = {global_transform, parent_node};
+    for (unsigned int c = 0; c < node->mNumChildren; ++c)
+    {
+        EvaluateAnimationHierarchyWithWorld(animation, animation_time, node->mChildren[c], node, global_transform, channels_by_name, out_world_by_node);
+    }
+}
+
+// Pointer-keyed variant used by the physics sampling path. Avoids the
+// per-node std::string allocation that ToDisplayString(node->mName) does
+// every frame; channel resolution is a single pointer hashmap probe.
+void EvaluateAnimationHierarchyWithWorldByPtr(
+    const aiAnimation* animation,
+    double animation_time,
+    const aiNode* node,
+    const aiNode* parent_node,
+    const aiMatrix4x4& parent_transform,
+    const std::unordered_map<const aiNode*, const aiNodeAnim*>& channels_by_node,
+    std::unordered_map<const aiNode*, NodeWorldRecord>& out_world_by_node)
+{
+    aiMatrix4x4 node_transform = node->mTransformation;
+    const auto channel_it = channels_by_node.find(node);
+    if (channel_it != channels_by_node.end())
+    {
+        const aiNodeAnim* channel = channel_it->second;
+        const aiVector3D scale = InterpolateScale(animation_time, channel);
+        const aiQuaternion rotation = InterpolateRotation(animation_time, channel);
+        const aiVector3D translation = InterpolatePosition(animation_time, channel);
+        node_transform = ComposeTransform(scale, rotation, translation);
+    }
+    const aiMatrix4x4 global_transform = parent_transform * node_transform;
+    out_world_by_node[node] = {global_transform, parent_node};
+    for (unsigned int c = 0; c < node->mNumChildren; ++c)
+    {
+        EvaluateAnimationHierarchyWithWorldByPtr(animation, animation_time, node->mChildren[c], node, global_transform, channels_by_node, out_world_by_node);
+    }
+}
+
+// Same as SampleClipBoneMatrices, but additionally applies a spring-damper
+// translation simulation to each named Jiggle bone. The simulation state is
+// stored per RuntimeAnimatorState so each animated instance has independent
+// bone-physics. Mirrors the logic in AnimatorPreviewRenderer::StepBonePhysics.
+bool SampleClipBoneMatricesWithPhysics(
+    RuntimeAnimationModelCacheEntry& anim_cache_entry,
+    const std::string& clip_name,
+    float state_time_seconds,
+    float frame_delta_seconds,
+    const std::vector<AnimatorBoneModifier>& modifiers,
+    const std::array<float, 16>& object_world_matrix,
+    RuntimeRenderer::RuntimeAnimatorState& runtime_state,
+    std::vector<aiMatrix4x4>& out_bone_matrices)
+{
+    if (anim_cache_entry.scene == nullptr)
+    {
+        return false;
+    }
+    // Tolerate a missing/empty clip: when the controller has bone modifiers
+    // but the active state doesn't reference an animation, fall back to the
+    // bind pose so jiggle still runs (driven purely by object world-matrix
+    // motion). Walking with player motion is enough to excite the springs.
+    const aiAnimation* const animation = FindAnimationByName(anim_cache_entry.scene, clip_name);
+
+    double animation_time = 0.0;
+    static const std::unordered_map<const aiNode*, const aiNodeAnim*> kEmptyChannelsByNode;
+    const std::unordered_map<const aiNode*, const aiNodeAnim*>* channels_by_node = &kEmptyChannelsByNode;
+    if (animation != nullptr)
+    {
+        const double ticks_per_second = animation->mTicksPerSecond > 0.0 ? animation->mTicksPerSecond : 25.0;
+        const double duration = animation->mDuration > 0.0 ? animation->mDuration : 1.0;
+        animation_time = std::fmod(static_cast<double>(state_time_seconds) * ticks_per_second, duration);
+
+        auto channels_it = anim_cache_entry.channels_by_node_per_animation.find(animation);
+        if (channels_it == anim_cache_entry.channels_by_node_per_animation.end())
+        {
+            std::unordered_map<const aiNode*, const aiNodeAnim*> channels_by_node_map;
+            channels_by_node_map.reserve(animation->mNumChannels);
+            for (unsigned int channel_index = 0; channel_index < animation->mNumChannels; ++channel_index)
+            {
+                const aiNodeAnim* channel = animation->mChannels[channel_index];
+                if (channel != nullptr)
+                {
+                    const aiNode* n = anim_cache_entry.scene->mRootNode->FindNode(channel->mNodeName);
+                    if (n != nullptr)
+                    {
+                        channels_by_node_map.emplace(n, channel);
+                    }
+                }
+            }
+            channels_it = anim_cache_entry.channels_by_node_per_animation.emplace(animation, std::move(channels_by_node_map)).first;
+        }
+        channels_by_node = &channels_it->second;
+    }
+
+    std::unordered_map<const aiNode*, NodeWorldRecord> world_by_node;
+    world_by_node.reserve(128);
+    EvaluateAnimationHierarchyWithWorldByPtr(
+        animation,
+        animation_time,
+        anim_cache_entry.scene->mRootNode,
+        nullptr,
+        aiMatrix4x4(),
+        *channels_by_node,
+        world_by_node);
+
+    // Fixed-timestep accumulator (1/120s) so simulation rate is decoupled
+    // from frame rate. Cap substeps to avoid spiral of death after stalls.
+    constexpr float kStep = 1.0f / 120.0f;
+    constexpr int kMaxSteps = 4;
+    runtime_state.physics_accumulator_seconds += (std::max)(0.0f, frame_delta_seconds);
+    int steps = 0;
+    while (runtime_state.physics_accumulator_seconds >= kStep && steps < kMaxSteps)
+    {
+        runtime_state.physics_accumulator_seconds -= kStep;
+        ++steps;
+    }
+    // Clamp residual so a long stall doesn't bank up un-bounded substep debt.
+    if (runtime_state.physics_accumulator_seconds > kStep * static_cast<float>(kMaxSteps))
+    {
+        runtime_state.physics_accumulator_seconds = 0.0f;
+    }
+    const float dt = kStep * static_cast<float>(steps);
+
+    // Per-bone simulation state. Tracked by node pointer for this frame
+    // (small map; only nodes that actually have a modifier or are descendants
+    // of one get inserted). Stale persistent entries are pruned at the end
+    // using a parallel "used" bitset indexed into runtime_state.jiggle_states.
+    std::unordered_map<const aiNode*, RuntimeRenderer::JiggleSimEntry*> state_by_node;
+    std::vector<bool> jiggle_used(runtime_state.jiggle_states.size(), false);
+
+    auto get_or_create_state = [&](const aiNode* n) -> RuntimeRenderer::JiggleSimEntry* {
+        auto cached = state_by_node.find(n);
+        if (cached != state_by_node.end())
+        {
+            return cached->second;
+        }
+        // Linear scan is fine: chain length is typically <16 bones per
+        // modifier and there are usually only a handful of modifiers.
+        for (std::size_t i = 0; i < runtime_state.jiggle_states.size(); ++i)
+        {
+            auto& e = runtime_state.jiggle_states[i];
+            if (e.bone_name.size() == n->mName.length &&
+                std::memcmp(e.bone_name.data(), n->mName.C_Str(), n->mName.length) == 0)
+            {
+                jiggle_used[i] = true;
+                state_by_node[n] = &e;
+                return &e;
+            }
+        }
+        RuntimeRenderer::JiggleSimEntry fresh;
+        fresh.bone_name.assign(n->mName.C_Str(), n->mName.length);
+        runtime_state.jiggle_states.push_back(std::move(fresh));
+        jiggle_used.push_back(true);
+        RuntimeRenderer::JiggleSimEntry* ptr = &runtime_state.jiggle_states.back();
+        state_by_node[n] = ptr;
+        return ptr;
+    };
+
+    // Decompose the object world matrix (column-major, no shear) into
+    // per-axis basis vectors + scales. Used to convert a world-space delta
+    // back into the model space the bone hierarchy lives in.
+    const std::array<float, 16>& M = object_world_matrix;
+    auto v3_len = [](float x, float y, float z) {
+        return std::sqrt(x * x + y * y + z * z);
+    };
+    const float sx = v3_len(M[0], M[1], M[2]);
+    const float sy = v3_len(M[4], M[5], M[6]);
+    const float sz = v3_len(M[8], M[9], M[10]);
+    const float inv_sx = (sx > 1e-8f) ? (1.0f / sx) : 1.0f;
+    const float inv_sy = (sy > 1e-8f) ? (1.0f / sy) : 1.0f;
+    const float inv_sz = (sz > 1e-8f) ? (1.0f / sz) : 1.0f;
+    const std::array<float, 3> bx{M[0] * inv_sx, M[1] * inv_sx, M[2] * inv_sx};
+    const std::array<float, 3> by{M[4] * inv_sy, M[5] * inv_sy, M[6] * inv_sy};
+    const std::array<float, 3> bz{M[8] * inv_sz, M[9] * inv_sz, M[10] * inv_sz};
+    const std::array<float, 3> origin{M[12], M[13], M[14]};
+
+    auto model_point_to_world = [&](float mx, float my, float mz) -> std::array<float, 3> {
+        return {
+            bx[0] * mx * sx + by[0] * my * sy + bz[0] * mz * sz + origin[0],
+            bx[1] * mx * sx + by[1] * my * sy + bz[1] * mz * sz + origin[1],
+            bx[2] * mx * sx + by[2] * my * sy + bz[2] * mz * sz + origin[2],
+        };
+    };
+    auto world_vec_to_model = [&](float wx, float wy, float wz) -> std::array<float, 3> {
+        return {
+            (bx[0] * wx + bx[1] * wy + bx[2] * wz) * inv_sx,
+            (by[0] * wx + by[1] * wy + by[2] * wz) * inv_sy,
+            (bz[0] * wx + bz[1] * wy + bz[2] * wz) * inv_sz,
+        };
+    };
+
+    // Per-bone simulation: spring in world space, then apply as a pivot
+    // rotation around the parent so descendants ride with the bone. Each
+    // descendant in the chain will get its own simulate_bone call after
+    // this one, adding its own lag on top.
+    auto simulate_bone = [&](const aiNode* bone_node, const AnimatorBoneModifier& m) {
+        auto wit = world_by_node.find(bone_node);
+        if (wit == world_by_node.end()) { return; }
+        RuntimeRenderer::JiggleSimEntry* sp = get_or_create_state(bone_node);
+        if (sp == nullptr) { return; }
+        RuntimeRenderer::JiggleSimEntry& s = *sp;
+
+        const aiMatrix4x4& bone_model = wit->second.world;
+        const float mx = bone_model.a4;
+        const float my = bone_model.b4;
+        const float mz = bone_model.c4;
+        const auto target_world = model_point_to_world(mx, my, mz);
+        const float tx = target_world[0];
+        const float ty = target_world[1];
+        const float tz = target_world[2];
+
+        if (!s.initialized)
+        {
+            s.sim_pos = {tx, ty, tz};
+            s.sim_vel = {0.0f, 0.0f, 0.0f};
+            s.initialized = true;
+            return;
+        }
+
+        const float strength = std::clamp(m.strength, 0.0f, 2.0f);
+
+        if (steps > 0)
+        {
+            const float stiff_k = 60.0f * (std::max)(0.0f, m.stiffness);
+            const float mass = (std::max)(0.001f, m.mass);
+            // Damping is a critical-damping fraction. c_critical = 2*sqrt(k*m).
+            // Effective per-step velocity decay = c/m * dt = 2*frac*sqrt(k/m)*dt.
+            // frac=1 yields no overshoot, <1 oscillates, >1 is sluggish.
+            const float damp_k = 2.0f * (std::max)(0.0f, m.damping) * std::sqrt(stiff_k / mass);
+            const float drag_k = std::clamp(m.drag, 0.0f, 1.0f);
+
+            std::array<float, 3> accel{0.0f, 0.0f, 0.0f};
+            for (int a = 0; a < 3; ++a)
+            {
+                accel[a] = (target_world[a] - s.sim_pos[a]) * stiff_k / mass;
+                accel[a] += m.gravity_dir[a] * m.gravity_scale * 9.81f;
+            }
+            for (int a = 0; a < 3; ++a)
+            {
+                // Clamp the per-step multiplier to [0,1] so an overdamped
+                // value combined with a large dt can't flip velocity sign.
+                const float decay = std::clamp(1.0f - damp_k * dt, 0.0f, 1.0f);
+                s.sim_vel[a] *= decay;
+                s.sim_vel[a] += accel[a] * dt;
+                s.sim_vel[a] *= (1.0f - drag_k * dt);
+                s.sim_pos[a] += s.sim_vel[a] * dt;
+            }
+
+            // Cone limit relative to parent.
+            if (m.angle_limit_deg < 179.5f && wit->second.parent != nullptr)
+            {
+                auto pit = world_by_node.find(wit->second.parent);
+                if (pit != world_by_node.end())
+                {
+                    const aiMatrix4x4& pw_model = pit->second.world;
+                    const auto pw = model_point_to_world(pw_model.a4, pw_model.b4, pw_model.c4);
+                    std::array<float, 3> ad{tx - pw[0], ty - pw[1], tz - pw[2]};
+                    std::array<float, 3> sd{s.sim_pos[0] - pw[0], s.sim_pos[1] - pw[1], s.sim_pos[2] - pw[2]};
+                    const float al = std::sqrt(ad[0] * ad[0] + ad[1] * ad[1] + ad[2] * ad[2]);
+                    const float sl = std::sqrt(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);
+                    if (al > 1e-5f && sl > 1e-5f)
+                    {
+                        const std::array<float, 3> an{ad[0] / al, ad[1] / al, ad[2] / al};
+                        const std::array<float, 3> sn{sd[0] / sl, sd[1] / sl, sd[2] / sl};
+                        const float dot = std::clamp(an[0] * sn[0] + an[1] * sn[1] + an[2] * sn[2], -1.0f, 1.0f);
+                        const float angle = std::acos(dot);
+                        const float limit_rad = m.angle_limit_deg * (3.14159265f / 180.0f);
+                        if (angle > limit_rad)
+                        {
+                            const float t = (angle - limit_rad) / angle;
+                            std::array<float, 3> corrected{
+                                sn[0] * (1.0f - t) + an[0] * t,
+                                sn[1] * (1.0f - t) + an[1] * t,
+                                sn[2] * (1.0f - t) + an[2] * t,
+                            };
+                            const float cl = std::sqrt(corrected[0] * corrected[0] + corrected[1] * corrected[1] + corrected[2] * corrected[2]);
+                            if (cl > 1e-5f)
+                            {
+                                corrected[0] /= cl;
+                                corrected[1] /= cl;
+                                corrected[2] /= cl;
+                                s.sim_pos[0] = pw[0] + corrected[0] * sl;
+                                s.sim_pos[1] = pw[1] + corrected[1] * sl;
+                                s.sim_pos[2] = pw[2] + corrected[2] * sl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clamp the world-space spring offset to a fraction of the bone's
+        // natural length (parent->target) so fast character translation
+        // can't drag sim_pos arbitrarily far and make the bone look stretched
+        // off its joint. Without this, lag from bulk movement scales with
+        // velocity and easily exceeds the bone length.
+        float ox = s.sim_pos[0] - tx;
+        float oy = s.sim_pos[1] - ty;
+        float oz = s.sim_pos[2] - tz;
+        {
+            float bone_world_len = 0.0f;
+            auto pit_len = world_by_node.find(wit->second.parent);
+            if (pit_len != world_by_node.end())
+            {
+                const aiMatrix4x4& pw_m = pit_len->second.world;
+                const auto pw_w = model_point_to_world(pw_m.a4, pw_m.b4, pw_m.c4);
+                const float dxl = tx - pw_w[0];
+                const float dyl = ty - pw_w[1];
+                const float dzl = tz - pw_w[2];
+                bone_world_len = std::sqrt(dxl * dxl + dyl * dyl + dzl * dzl);
+            }
+            // Fall back to a small absolute cap if there's no parent or the
+            // bone has zero length, so root bones still can't fly off.
+            const float max_offset = (bone_world_len > 1e-4f) ? (bone_world_len * 0.6f) : 0.05f;
+            const float off_len = std::sqrt(ox * ox + oy * oy + oz * oz);
+            if (off_len > max_offset && off_len > 1e-6f)
+            {
+                const float scale = max_offset / off_len;
+                ox *= scale;
+                oy *= scale;
+                oz *= scale;
+                // Pull sim_pos back onto the clamped offset and kill the
+                // outward component of velocity so it doesn't just re-stretch
+                // next step.
+                s.sim_pos[0] = tx + ox;
+                s.sim_pos[1] = ty + oy;
+                s.sim_pos[2] = tz + oz;
+                const float vdot = s.sim_vel[0] * ox + s.sim_vel[1] * oy + s.sim_vel[2] * oz;
+                const float o2 = ox * ox + oy * oy + oz * oz;
+                if (vdot > 0.0f && o2 > 1e-8f)
+                {
+                    const float k = vdot / o2;
+                    s.sim_vel[0] -= k * ox;
+                    s.sim_vel[1] -= k * oy;
+                    s.sim_vel[2] -= k * oz;
+                }
+            }
+        }
+        const float wdx = ox * strength;
+        const float wdy = oy * strength;
+        const float wdz = oz * strength;
+        const auto md = world_vec_to_model(wdx, wdy, wdz);
+        if (md[0] == 0.0f && md[1] == 0.0f && md[2] == 0.0f) { return; }
+
+        auto pit_apply = world_by_node.find(wit->second.parent);
+        if (pit_apply == world_by_node.end())
+        {
+            wit->second.world.a4 += md[0];
+            wit->second.world.b4 += md[1];
+            wit->second.world.c4 += md[2];
+            return;
+        }
+        const aiMatrix4x4& pw_model = pit_apply->second.world;
+        const std::array<float, 3> ppos{pw_model.a4, pw_model.b4, pw_model.c4};
+        const std::array<float, 3> anim_v{mx - ppos[0], my - ppos[1], mz - ppos[2]};
+        const std::array<float, 3> new_v{
+            mx + md[0] - ppos[0],
+            my + md[1] - ppos[1],
+            mz + md[2] - ppos[2],
+        };
+        const float anim_len = std::sqrt(anim_v[0] * anim_v[0] + anim_v[1] * anim_v[1] + anim_v[2] * anim_v[2]);
+        const float new_len = std::sqrt(new_v[0] * new_v[0] + new_v[1] * new_v[1] + new_v[2] * new_v[2]);
+        if (anim_len <= 1e-5f || new_len <= 1e-5f) { return; }
+        const std::array<float, 3> an{anim_v[0] / anim_len, anim_v[1] / anim_len, anim_v[2] / anim_len};
+        const std::array<float, 3> nn{new_v[0] / new_len, new_v[1] / new_len, new_v[2] / new_len};
+        const float cos_a = std::clamp(an[0] * nn[0] + an[1] * nn[1] + an[2] * nn[2], -1.0f, 1.0f);
+        const float angle = std::acos(cos_a);
+        if (angle <= 1e-5f) { return; }
+        std::array<float, 3> axis{
+            an[1] * nn[2] - an[2] * nn[1],
+            an[2] * nn[0] - an[0] * nn[2],
+            an[0] * nn[1] - an[1] * nn[0],
+        };
+        float axis_len = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+        if (axis_len <= 1e-6f) { return; }
+        axis[0] /= axis_len; axis[1] /= axis_len; axis[2] /= axis_len;
+        const float c = std::cos(angle);
+        const float si = std::sin(angle);
+        const float tt = 1.0f - c;
+        aiMatrix4x4 R;
+        R.a1 = tt * axis[0] * axis[0] + c;
+        R.a2 = tt * axis[0] * axis[1] - si * axis[2];
+        R.a3 = tt * axis[0] * axis[2] + si * axis[1];
+        R.a4 = 0.0f;
+        R.b1 = tt * axis[0] * axis[1] + si * axis[2];
+        R.b2 = tt * axis[1] * axis[1] + c;
+        R.b3 = tt * axis[1] * axis[2] - si * axis[0];
+        R.b4 = 0.0f;
+        R.c1 = tt * axis[0] * axis[2] - si * axis[1];
+        R.c2 = tt * axis[1] * axis[2] + si * axis[0];
+        R.c3 = tt * axis[2] * axis[2] + c;
+        R.c4 = 0.0f;
+        R.d1 = 0.0f; R.d2 = 0.0f; R.d3 = 0.0f; R.d4 = 1.0f;
+        aiMatrix4x4 t_neg; t_neg.a4 = -ppos[0]; t_neg.b4 = -ppos[1]; t_neg.c4 = -ppos[2];
+        aiMatrix4x4 t_pos; t_pos.a4 =  ppos[0]; t_pos.b4 =  ppos[1]; t_pos.c4 =  ppos[2];
+        const aiMatrix4x4 delta = t_pos * R * t_neg;
+        // Rotate the bone AND every descendant so the subtree stays attached
+        // for this step. Each descendant then gets its own simulate_bone call
+        // next in the depth-first walk, adding its own lag on top. Uses an
+        // iterative stack to avoid std::function heap allocations.
+        thread_local std::vector<const aiNode*> rotate_stack;
+        rotate_stack.clear();
+        rotate_stack.push_back(bone_node);
+        while (!rotate_stack.empty())
+        {
+            const aiNode* n = rotate_stack.back();
+            rotate_stack.pop_back();
+            auto it = world_by_node.find(n);
+            if (it != world_by_node.end())
+            {
+                it->second.world = delta * it->second.world;
+            }
+            for (unsigned int c2 = 0; c2 < n->mNumChildren; ++c2)
+            {
+                rotate_stack.push_back(n->mChildren[c2]);
+            }
+        }
+    };
+
+    // Process each tagged modifier. When affects_children is set, walk the
+    // chain depth-first so each child springs against its already-simulated
+    // parent — this is what produces a wave-like sway down the chain instead
+    // of a rigid swing. Iterative DFS to avoid std::function allocations.
+    thread_local std::vector<const aiNode*> walk_stack;
+    for (const AnimatorBoneModifier& m : modifiers)
+    {
+        if (m.bone_name.empty() || m.strength <= 0.0001f) { continue; }
+        const aiNode* root = anim_cache_entry.scene->mRootNode->FindNode(m.bone_name.c_str());
+        if (root == nullptr) { continue; }
+
+        if (!m.affects_children)
+        {
+            simulate_bone(root, m);
+            continue;
+        }
+        walk_stack.clear();
+        walk_stack.push_back(root);
+        while (!walk_stack.empty())
+        {
+            const aiNode* n = walk_stack.back();
+            walk_stack.pop_back();
+            simulate_bone(n, m);
+            for (unsigned int c = 0; c < n->mNumChildren; ++c)
+            {
+                walk_stack.push_back(n->mChildren[c]);
+            }
+        }
+    }
+
+    // Drop simulation state for bones that are no longer referenced this
+    // frame so the list doesn't grow unbounded across controller edits.
+    if (!runtime_state.jiggle_states.empty())
+    {
+        std::size_t write = 0;
+        for (std::size_t read = 0; read < runtime_state.jiggle_states.size(); ++read)
+        {
+            if (read < jiggle_used.size() && jiggle_used[read])
+            {
+                if (write != read)
+                {
+                    runtime_state.jiggle_states[write] = std::move(runtime_state.jiggle_states[read]);
+                }
+                ++write;
+            }
+        }
+        runtime_state.jiggle_states.resize(write);
+    }
+
+    // Build (or reuse) a pointer-keyed bone index cache so we don't have to
+    // allocate a std::string for every node in the emit loop below.
+    if (!anim_cache_entry.bone_index_by_node_built)
+    {
+        anim_cache_entry.bone_index_by_node.reserve(anim_cache_entry.bone_index_by_name.size());
+        for (const auto& kv : anim_cache_entry.bone_index_by_name)
+        {
+            const aiNode* n = anim_cache_entry.scene->mRootNode->FindNode(kv.first.c_str());
+            if (n != nullptr)
+            {
+                anim_cache_entry.bone_index_by_node.emplace(n, kv.second);
+            }
+        }
+        anim_cache_entry.bone_index_by_node_built = true;
+    }
+
+    // Emit final bone matrices from the (possibly modified) world transforms.
+    out_bone_matrices.assign(anim_cache_entry.bone_offsets.size(), aiMatrix4x4());
+    for (const auto& kv : world_by_node)
+    {
+        const aiNode* node = kv.first;
+        const auto bit = anim_cache_entry.bone_index_by_node.find(node);
+        if (bit != anim_cache_entry.bone_index_by_node.end() && bit->second < out_bone_matrices.size())
+        {
+            out_bone_matrices[bit->second] = anim_cache_entry.global_inverse * kv.second.world * anim_cache_entry.bone_offsets[bit->second];
+        }
+    }
+    return true;
+}
 }
 
 bool RuntimeRenderer::Initialize(VulkanContext* context)
@@ -2418,6 +2952,7 @@ void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& sce
             static_cast<double>(perf_freq));
     }
     animation_last_perf_ticks_ = now_perf_ticks;
+    animation_last_delta_time_seconds_ = delta_time;
     // Keep the millisecond clock in sync for any other consumers.
     animation_last_tick_ms_ = static_cast<std::uint64_t>(SDL_GetTicks());
 
@@ -5411,7 +5946,36 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
 bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& object)
 {
     RuntimeAnimatorState* const runtime_state = FindRuntimeAnimatorState(object.name);
-    if (runtime_state == nullptr || runtime_state->active_clip_name.empty())
+    if (runtime_state == nullptr)
+    {
+        return true;
+    }
+
+    // Resolve the controller and check for bone modifiers up front. With
+    // modifiers present we always run the animation path (even if no clip is
+    // bound to the current state) so jiggle can react to object world-matrix
+    // motion. Without modifiers we keep the old fast-out when there's no
+    // active clip.
+    const std::vector<AnimatorBoneModifier>* bone_modifiers = nullptr;
+    {
+        const std::filesystem::path controller_path = std::filesystem::path(runtime_state->controller_path).is_absolute()
+            ? std::filesystem::path(runtime_state->controller_path)
+            : (project_root_ / runtime_state->controller_path);
+        const auto controller_it = animator_controller_cache_.find(controller_path);
+        if (controller_it != animator_controller_cache_.end() && controller_it->second.loaded)
+        {
+            for (const AnimatorBoneModifier& m : controller_it->second.asset.bone_modifiers)
+            {
+                if (!m.bone_name.empty())
+                {
+                    bone_modifiers = &controller_it->second.asset.bone_modifiers;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (runtime_state->active_clip_name.empty() && bone_modifiers == nullptr)
     {
         return true;
     }
@@ -5428,6 +5992,8 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
         return true;
     }
 
+    // When no clip is bound, sample the model itself for the bind-pose
+    // skeleton (jiggle still has bones to drive).
     std::filesystem::path clip_source_path = object.model_path;
     if (!runtime_state->active_clip_source_model_path.empty())
     {
@@ -5443,7 +6009,19 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
     }
 
     std::vector<aiMatrix4x4> bone_matrices;
-    if (!SampleClipBoneMatrices(*anim_cache_entry, runtime_state->active_clip_name, runtime_state->state_time_seconds, bone_matrices))
+
+    const bool sampled = (bone_modifiers != nullptr)
+        ? SampleClipBoneMatricesWithPhysics(
+              *anim_cache_entry,
+              runtime_state->active_clip_name,
+              runtime_state->state_time_seconds,
+              animation_last_delta_time_seconds_,
+              *bone_modifiers,
+              object.model_matrix,
+              *runtime_state,
+              bone_matrices)
+        : SampleClipBoneMatrices(*anim_cache_entry, runtime_state->active_clip_name, runtime_state->state_time_seconds, bone_matrices);
+    if (!sampled)
     {
         return true;
     }

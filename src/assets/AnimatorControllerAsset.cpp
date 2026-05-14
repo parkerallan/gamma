@@ -3,6 +3,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 
 using json = nlohmann::json;
@@ -92,10 +93,16 @@ json BuildBoneModifierJson(const AnimatorBoneModifier& modifier)
 {
     json data;
     data["bone_name"] = modifier.bone_name;
-    data["modifier_type"] = modifier.modifier_type;
     data["strength"] = modifier.strength;
     data["damping"] = modifier.damping;
     data["stiffness"] = modifier.stiffness;
+    data["mass"] = modifier.mass;
+    data["drag"] = modifier.drag;
+    data["gravity_scale"] = modifier.gravity_scale;
+    data["gravity_dir"] = json::array({modifier.gravity_dir[0], modifier.gravity_dir[1], modifier.gravity_dir[2]});
+    data["angle_limit_deg"] = modifier.angle_limit_deg;
+    data["radius"] = modifier.radius;
+    data["affects_children"] = modifier.affects_children;
     return data;
 }
 } // namespace
@@ -140,6 +147,7 @@ bool LoadAnimatorControllerAsset(const std::filesystem::path& path, AnimatorCont
     out_asset.version = root.value("version", 1);
     out_asset.name = root.value("name", std::string("NewAnimator"));
     out_asset.default_state = root.value("default_state", std::string());
+    out_asset.preview_model_path = root.value("preview_model_path", std::string());
 
     if (const auto clips_it = root.find("clips"); clips_it != root.end() && clips_it->is_array())
     {
@@ -207,14 +215,22 @@ bool LoadAnimatorControllerAsset(const std::filesystem::path& path, AnimatorCont
 
             AnimatorBoneModifier modifier;
             modifier.bone_name = ReadString(modifier_json, "bone_name");
-            modifier.modifier_type = ReadString(modifier_json, "modifier_type");
-            if (modifier.modifier_type.empty())
-            {
-                modifier.modifier_type = "Jiggle";
-            }
             modifier.strength = ReadFloat(modifier_json, "strength", 0.5f);
             modifier.damping = ReadFloat(modifier_json, "damping", 0.5f);
             modifier.stiffness = ReadFloat(modifier_json, "stiffness", 0.5f);
+            modifier.mass = std::max(0.001f, ReadFloat(modifier_json, "mass", 1.0f));
+            modifier.drag = ReadFloat(modifier_json, "drag", 0.05f);
+            modifier.gravity_scale = ReadFloat(modifier_json, "gravity_scale", 0.0f);
+            if (const auto gdir_it = modifier_json.find("gravity_dir");
+                gdir_it != modifier_json.end() && gdir_it->is_array() && gdir_it->size() == 3)
+            {
+                modifier.gravity_dir[0] = (*gdir_it)[0].get<float>();
+                modifier.gravity_dir[1] = (*gdir_it)[1].get<float>();
+                modifier.gravity_dir[2] = (*gdir_it)[2].get<float>();
+            }
+            modifier.angle_limit_deg = ReadFloat(modifier_json, "angle_limit_deg", 60.0f);
+            modifier.radius = ReadFloat(modifier_json, "radius", 0.05f);
+            modifier.affects_children = ReadBool(modifier_json, "affects_children", true);
             out_asset.bone_modifiers.push_back(std::move(modifier));
         }
     }
@@ -235,6 +251,7 @@ bool SaveAnimatorControllerAsset(const std::filesystem::path& path, const Animat
     root["version"] = asset.version;
     root["name"] = asset.name;
     root["default_state"] = asset.default_state;
+    root["preview_model_path"] = asset.preview_model_path;
 
     root["clips"] = json::array();
     for (const AnimatorClipReference& clip : asset.clips)

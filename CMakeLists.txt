@@ -411,6 +411,8 @@ add_engine_shader(standard_rt_fxaa.comp comp)
 add_engine_shader(skinning.comp comp)
 add_engine_shader(overlay2d.vert vert)
 add_engine_shader(overlay2d.frag frag)
+add_engine_shader(animator_preview.vert vert)
+add_engine_shader(animator_preview.frag frag)
 
 add_custom_target(engine_scene_shaders
     DEPENDS ${ENGINE_SHADER_OUTPUTS}
@@ -483,6 +485,7 @@ add_executable(engine
     src/panels/FilesPanel.cpp
     src/panels/EffectsPanel.cpp
     src/panels/AnimatorPanel.cpp
+    src/panels/AnimatorPreviewRenderer.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp
     src/panels/PerformancePanel.cpp

@@ -211,6 +211,14 @@ public:
         std::uint64_t next_disk_check_perf_ticks = 0;
     };
 
+    struct JiggleSimEntry
+    {
+        std::string bone_name;
+        std::array<float, 3> sim_pos{};
+        std::array<float, 3> sim_vel{};
+        bool initialized = false;
+    };
+
     struct RuntimeAnimatorState
     {
         std::string runtime_key;
@@ -231,6 +239,10 @@ public:
         std::unordered_map<std::string, float> float_parameters;
         std::unordered_map<std::string, bool> bool_parameters;
         std::unordered_set<std::string> triggers;
+        // Bone-physics per-instance simulation state. Preserved across frames
+        // so springs don't reset when the user nudges parameters.
+        std::vector<JiggleSimEntry> jiggle_states;
+        float physics_accumulator_seconds = 0.0f;
     };
 
 private:
@@ -494,6 +506,9 @@ private:
     std::vector<PhysicsCollisionEvent> script_frame_collision_events_;
     std::uint64_t animation_last_tick_ms_ = 0;
     std::uint64_t animation_last_perf_ticks_ = 0;
+    // Most-recent animation frame delta in seconds, exposed for downstream
+    // per-object work (e.g. bone-physics simulation in UpdateAnimatedMeshForObject).
+    float animation_last_delta_time_seconds_ = 0.0f;
     std::uint64_t video_last_perf_ticks_ = 0;
     std::uint64_t script_last_tick_ms_ = 0;
     std::uint64_t script_session_start_ms_ = 0;

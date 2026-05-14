@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -32,10 +33,18 @@ struct AnimatorTransitionDefinition
 struct AnimatorBoneModifier
 {
     std::string bone_name;
-    std::string modifier_type = "Jiggle";
-    float strength = 0.5f;
-    float damping = 0.5f;
-    float stiffness = 0.5f;
+    // Core spring-damper parameters. Stiffness/damping are normalized
+    // [0,1]-ish and converted to internal spring constants at simulate time.
+    float strength = 1.0f;   // overall effect multiplier (0 = disabled)
+    float damping = 1.0f;    // critical-damping fraction; 1 = no bounce, <1 = oscillatory, >1 = sluggish
+    float stiffness = 0.3f;  // spring constant scale; 0 = no return, 1 = snappy
+    float mass = 1.0f;       // resistance to acceleration; must be > 0
+    float drag = 0.05f;      // simple air drag applied to velocity
+    float gravity_scale = 0.0f; // 0 = ignore gravity; 1 = full 9.81 m/s^2
+    std::array<float, 3> gravity_dir = {0.0f, -1.0f, 0.0f};
+    float angle_limit_deg = 60.0f; // max deflection from animated direction
+    float radius = 0.05f;    // for collider pushout (Phase E); harmless otherwise
+    bool affects_children = true; // recompute descendant transforms after sim
 };
 
 struct AnimatorControllerAsset
@@ -43,6 +52,10 @@ struct AnimatorControllerAsset
     int version = 1;
     std::string name = "NewAnimator";
     std::string default_state;
+    // Path (project-relative or absolute) to a model file used by the Animator
+    // panel for the in-editor skeleton/animation preview. Persisted so the
+    // panel's preview rebinds automatically when the controller is reopened.
+    std::string preview_model_path;
     std::vector<AnimatorClipReference> clips;
     std::vector<AnimatorStateDefinition> states;
     std::vector<AnimatorTransitionDefinition> transitions;
