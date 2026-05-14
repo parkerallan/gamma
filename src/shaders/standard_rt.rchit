@@ -773,8 +773,25 @@ vec3 layer_clearcoat_over_brdf(
     return mix(base_brdf, clearcoat_brdf, clearcoat_weight);
 }
 
+// Set in main() when this rchit invocation is a BLEND-continuation recursion
+// (hair card behind another hair card). When true, trace_shadow_visibility()
+// short-circuits to 1.0 instead of firing a shadow ray per light. See the
+// detailed rationale on the trace_shadow_visibility() definition below.
+bool g_skip_shadow_trace = false;
+
 float trace_shadow_visibility(vec3 origin, vec3 direction, float max_distance)
 {
+    // Skip the per-light shadow trace entirely when this hit is a BLEND
+    // continuation (hair card behind another hair card). The outer card
+    // already alpha-blends most of its own colour forward, so per-strand
+    // shadow detail beneath it is invisible. Returning unshadowed visibility
+    // collapses the per-recursion-level traceRayEXT cost to zero, which is
+    // the dominant cost in dense regions like the back-of-head hair bun.
+    // The flag is set once in main() based on the recursion entry payload.
+    if (g_skip_shadow_trace)
+    {
+        return 1.0;
+    }
     shadow_payload = 1.0;
     traceRayEXT(
         top_level_as,
@@ -866,6 +883,23 @@ vec3 evaluate_point_light_emitter(vec3 ray_origin, vec3 ray_direction, float sce
 
 void main()
 {
+    // The unused alpha channel of primary_payload.color carries the remaining
+    // contribution budget for nested BLEND-continuation traces. The rgen and
+    // every other traceRayEXT site initialise it to 1.0 (default "full
+    // contribution"); only the BLEND-continuation path below writes a smaller
+    // value before recursing, so the alpha product across stacked hair cards
+    // converges naturally and lets us stop recursing once the deepest layer
+    // would contribute less than the perceptual floor.
+    float incoming_remaining_alpha = clamp(primary_payload.color.a, 0.0, 1.0);
+
+    // Detect "we're inside a BLEND continuation": depth > 0 with a sub-1.0
+    // remaining budget. Reflection and transmission traces always seed the
+    // payload with .a = 1.0 before tracing, so they never match here. When
+    // set, the in-shader shadow-ray helper short-circuits to unshadowed
+    // visibility (see trace_shadow_visibility) -- the dominant per-recursion
+    // cost in dense hair regions like the back-of-head bun.
+    g_skip_shadow_trace = primary_payload.depth > 0u && incoming_remaining_alpha < 0.999;
+
     MeshRecord mesh = meshes[gl_InstanceCustomIndexEXT];
     uint primitive_first_index = gl_PrimitiveID * 3u;
     uint section_index = find_section_index(mesh, primitive_first_index);
@@ -1169,7 +1203,16 @@ void main()
 
     vec3 shaded_color = lighting + emissive * base_layer_weight;
 
-    if (primary_payload.depth < 2u)
+    // Reflection and clearcoat reflection traces fire only on the primary-depth hit.
+    // At depth > 0 we're already inside a BLEND-continuation trace (e.g. shading the
+    // hair card behind a more-foreground hair card) and the result is multiplied by
+    // the outer card's alpha before being mixed back -- a full extra reflection ray
+    // per nested card multiplied 8 deep is the dominant per-pixel cost on stacked
+    // hair. It also injects bright sky/IBL through the strong grazing-angle fresnel
+    // on hair silhouettes, which reads as a white halo around the strands once the
+    // outer card alpha-blends it forward. Diffuse + direct lighting alone is the
+    // correct approximation for what's behind an alpha layer.
+    if (primary_payload.depth < 1u)
     {
         vec3 fresnel = view_fresnel;
         float reflection_sharpness = clamp(1.0 - roughness, 0.0, 1.0);
@@ -1301,12 +1344,26 @@ void main()
     // Hair_Transparency planes, Scalp_Transparency, BabyHair, Std_Eyelash, tearlines).
     // A low cap here exhausts recursion before reaching the skin/scalp behind the
     // stack, leaving the dark fallback color which then blends with each card and
-    // shows as a white/speckled artifact along the hairline. Keep in sync with
-    // maxPipelineRayRecursionDepth in RayTracing.cpp.
-    if (alpha < 0.999 && material.alpha_mode == 2u && primary_payload.depth < 8u)
+    // shows as a white/speckled artifact along the hairline. Keep the full budget
+    // in sync with maxPipelineRayRecursionDepth in RayTracing.cpp; the heavy
+    // reflection/IBL trace is already gated to primary-depth-only above, so each
+    // recursion level here is now diffuse + direct lighting only.
+    //
+    // Contribution-budget termination: track the running product of (1 - alpha)
+    // down the recursion chain via primary_payload.color.a (otherwise unused
+    // by rgen/rmiss). The deepest card's contribution to the final pixel is
+    // alpha_deepest * incoming_remaining; once that drops below the perceptual
+    // floor (~5%) further recursion is invisible. In dense regions like the
+    // back-of-head hair bun, every card has alpha ~0.7-0.9 viewed at grazing
+    // angles, so (1-0.7)^3 = 0.027 < 0.05 -- the bun collapses to ~3 levels
+    // instead of running all 8 nested traces. Wispy hairline tips have very
+    // low per-texel alpha and keep their full budget (1.0 -> 0.9 -> 0.81 ...)
+    // so they still blend correctly down to the scalp.
+    float next_remaining_alpha = incoming_remaining_alpha * (1.0 - alpha);
+    if (alpha < 0.999 && material.alpha_mode == 2u && primary_payload.depth < 8u && next_remaining_alpha > 0.05)
     {
         const uint current_depth = primary_payload.depth;
-        primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);
+        primary_payload.color = vec4(0.08, 0.09, 0.11, next_remaining_alpha);
         primary_payload.hit_distance = 1e30;
         primary_payload.depth = current_depth + 1u;
         // Continue the same ray past the current hit. Using

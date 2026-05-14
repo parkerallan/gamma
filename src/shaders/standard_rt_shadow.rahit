@@ -204,6 +204,24 @@ void main()
 
     float alpha = sample_alpha(material, uv, vertex_color);
 
+    // Hair-card fast path: zero-transmission BLEND (the common authoring pattern for hair / eyelashes /
+    // fur cards) is treated as a binary 0.5 cutoff. Without this, every overlapping card along a soft
+    // shadow ray runs the full analytic accumulation below, multiplying transparency and continuing — a
+    // 6+ deep hair stack times 6 soft-shadow samples per primary hit is the dominant per-pixel cost on
+    // the hair silhouette. Binary terminate at the first ~50%+ opaque card matches what the analytic
+    // accumulation converges to and collapses N any-hit invocations per ray into ~1.
+    if (transmission < 0.001 && material.alpha_mode == 2u)
+    {
+        if (alpha >= 0.5)
+        {
+            shadow_payload = 0.0;
+            terminateRayEXT;
+            return;
+        }
+        ignoreIntersectionEXT;
+        return;
+    }
+
     // MASK: binary visibility — below cutoff is fully transparent, at or above is fully opaque (minus transmission).
     float effective_opacity;
     if (material.alpha_mode == 1u)
@@ -229,7 +247,10 @@ void main()
     if (effective_opacity < 0.999)
     {
         shadow_payload *= (1.0 - effective_opacity);
-        if (shadow_payload <= 0.01)
+        // Early-out at 10% residual: after 1-2 dense BLEND cards the contribution is below the
+        // single-frame soft-shadow noise floor, so terminating here is imperceptible and prunes the
+        // tail of any deep BLEND chain (glass stacks, foliage layers, fabric).
+        if (shadow_payload <= 0.1)
         {
             shadow_payload = 0.0;
             terminateRayEXT;

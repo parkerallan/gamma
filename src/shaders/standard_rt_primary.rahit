@@ -192,8 +192,8 @@ void main()
     {
         // A higher cutoff than 0.001 trades a barely-visible edge of hair fuzz
         // against not consuming the recursion budget on texels that contribute
-        // <2% to the final blend. Stacking 6+ hair cards otherwise exhausts
-        // recursion before reaching the body behind the hair.
+        // <2% to the final blend. The rchit caps continuation recursion depth
+        // so stacked hair cards stay bounded in cost.
         if (alpha < 0.02)
         {
             ignoreIntersectionEXT;
