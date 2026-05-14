@@ -1297,12 +1297,27 @@ void main()
         primary_payload.depth = current_depth;
     }
 
-    if (alpha < 0.999 && material.alpha_mode == 2u && primary_payload.depth < 2u)
+    // Stacked alpha-blended cards (character hair has 6+ overlapping layers: multiple
+    // Hair_Transparency planes, Scalp_Transparency, BabyHair, Std_Eyelash, tearlines).
+    // A low cap here exhausts recursion before reaching the skin/scalp behind the
+    // stack, leaving the dark fallback color which then blends with each card and
+    // shows as a white/speckled artifact along the hairline. Keep in sync with
+    // maxPipelineRayRecursionDepth in RayTracing.cpp.
+    if (alpha < 0.999 && material.alpha_mode == 2u && primary_payload.depth < 8u)
     {
         const uint current_depth = primary_payload.depth;
         primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);
         primary_payload.hit_distance = 1e30;
         primary_payload.depth = current_depth + 1u;
+        // Continue the same ray past the current hit. Using
+        // `world_position + ray_dir * 0.01` as the origin would offset 1cm
+        // along the ray direction, which tunnels through sub-millimeter gaps
+        // (eyelash -> cornea/skin, hair card -> scalp) on characters in meter
+        // units and makes BLEND surfaces appear to "cull" the geometry behind
+        // them. Keep the original origin and shift tMin just past the current
+        // intersection so the next-closest hit is reliably found regardless
+        // of how thin the gap behind this surface is.
+        float continuation_tmin = gl_HitTEXT + max(1e-5, gl_HitTEXT * 1e-5);
         traceRayEXT(
             top_level_as,
             gl_RayFlagsNoneEXT,
@@ -1310,8 +1325,8 @@ void main()
             0,
             1,
             0,
-            world_position + gl_WorldRayDirectionEXT * 0.01,
-            0.001,
+            gl_WorldRayOriginEXT,
+            continuation_tmin,
             gl_WorldRayDirectionEXT,
             10000.0,
             0);

@@ -1873,8 +1873,12 @@ bool RayTracing::EnsurePipelineResources()
         pipeline_info.pStages = stages.data();
         pipeline_info.groupCount = static_cast<std::uint32_t>(groups.size());
         pipeline_info.pGroups = groups.data();
+        // Raised to 9 so stacked alpha-blended hair cards (Aria has 6+ overlapping
+        // BLEND materials per view ray) can be traversed without exhausting the
+        // recursion budget and falling back to the miss/default color, which
+        // otherwise shows as a white speckled halo around the hairline.
         pipeline_info.maxPipelineRayRecursionDepth =
-            (std::min)(4u, vulkan_context_->GetRayTracingSupport().ray_tracing_pipeline_properties.maxRayRecursionDepth);
+            (std::min)(9u, vulkan_context_->GetRayTracingSupport().ray_tracing_pipeline_properties.maxRayRecursionDepth);
         pipeline_info.layout = pipeline_layout_;
 
         VkResult result = vulkan_context_->GetRayTracingDispatch().create_ray_tracing_pipelines(
