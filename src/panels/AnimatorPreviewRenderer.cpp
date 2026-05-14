@@ -459,12 +459,31 @@ bool UploadRgbaTexture(
 AnimatorPreviewRenderer::AnimatorPreviewRenderer() = default;
 AnimatorPreviewRenderer::~AnimatorPreviewRenderer()
 {
+    // Block on the worker so it can't write into our members after we
+    // start tearing down GPU state.
+    if (load_thread_.joinable())
+    {
+        load_thread_.join();
+    }
     DestroyGpu();
     DestroyTextures();
 }
 
 void AnimatorPreviewRenderer::ClearModel()
 {
+    // Drain any in-flight async load so the worker doesn't race with the
+    // teardown below. Discard whatever it produced.
+    if (load_thread_.joinable())
+    {
+        load_thread_.join();
+    }
+    loading_.store(false, std::memory_order_release);
+    load_ready_.store(false, std::memory_order_release);
+    pending_importer_.reset();
+    pending_scene_ = nullptr;
+    pending_path_.clear();
+    pending_error_.clear();
+
     // Tear down GPU mesh buffers (but keep the shared pipeline alive) so a
     // new model can be loaded without recreating the entire renderer state.
     if (texture_context_ != nullptr && !gpu_meshes_.empty())
@@ -666,10 +685,28 @@ void AnimatorPreviewRenderer::EnsureTextures(VulkanContext* vulkan_context)
 
 bool AnimatorPreviewRenderer::SetModel(const std::filesystem::path& absolute_model_path)
 {
+    // Already showing this exact model — no work.
     if (loaded_ && model_path_ == absolute_model_path)
     {
         return true;
     }
+    // Already queued for this path — wait for the worker.
+    if (loading_.load(std::memory_order_acquire) && pending_path_ == absolute_model_path)
+    {
+        return true;
+    }
+
+    // If a different load is in-flight, drain it before kicking off the new
+    // request. The completed/orphaned result is simply discarded.
+    if (load_thread_.joinable())
+    {
+        load_thread_.join();
+    }
+    loading_.store(false, std::memory_order_release);
+    load_ready_.store(false, std::memory_order_release);
+    pending_importer_.reset();
+    pending_scene_ = nullptr;
+    pending_error_.clear();
 
     ClearModel();
 
@@ -679,39 +716,86 @@ bool AnimatorPreviewRenderer::SetModel(const std::filesystem::path& absolute_mod
         return false;
     }
 
-    importer_ = std::make_unique<Assimp::Importer>();
-    const unsigned int flags =
-        aiProcess_Triangulate |
-        aiProcess_JoinIdenticalVertices |
-        aiProcess_GenSmoothNormals |
-        aiProcess_LimitBoneWeights |
-        aiProcess_ImproveCacheLocality |
-        aiProcess_SortByPType;
+    pending_path_ = absolute_model_path;
+    loading_.store(true, std::memory_order_release);
+    load_ready_.store(false, std::memory_order_release);
 
-    const aiScene* scene = importer_->ReadFile(absolute_model_path.string(), flags);
-    if (scene == nullptr || scene->mRootNode == nullptr)
+    // Worker thread: do the heavy Assimp parse off the main thread. Only
+    // touches the pending_* members (no main-thread state is mutated until
+    // PollPendingLoad runs on the main thread).
+    const std::filesystem::path path_copy = absolute_model_path;
+    load_thread_ = std::thread([this, path_copy]()
     {
-        last_error_ = importer_->GetErrorString();
-        if (last_error_.empty())
+        auto importer = std::make_unique<Assimp::Importer>();
+        const unsigned int flags =
+            aiProcess_Triangulate |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_GenSmoothNormals |
+            aiProcess_LimitBoneWeights |
+            aiProcess_ImproveCacheLocality |
+            aiProcess_SortByPType;
+        const aiScene* scene = importer->ReadFile(path_copy.string(), flags);
+        if (scene == nullptr || scene->mRootNode == nullptr)
         {
-            last_error_ = "Assimp failed to load the model";
+            std::string err = importer->GetErrorString();
+            if (err.empty()) { err = "Assimp failed to load the model"; }
+            pending_error_ = std::move(err);
+            pending_scene_ = nullptr;
+            pending_importer_.reset();
         }
-        importer_.reset();
-        return false;
+        else
+        {
+            pending_scene_ = scene;
+            pending_importer_ = std::move(importer);
+            pending_error_.clear();
+        }
+        load_ready_.store(true, std::memory_order_release);
+    });
+
+    return true;
+}
+
+void AnimatorPreviewRenderer::PollPendingLoad()
+{
+    if (!loading_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+    if (!load_ready_.load(std::memory_order_acquire))
+    {
+        return;
     }
 
-    scene_ = scene;
-    loaded_ = true;
-    model_path_ = absolute_model_path;
+    // Worker is done — drain it.
+    if (load_thread_.joinable())
+    {
+        load_thread_.join();
+    }
 
-    // Cache global inverse of the root node (Assimp convention).
+    if (pending_scene_ == nullptr)
+    {
+        last_error_ = pending_error_.empty() ? std::string("Failed to load model") : pending_error_;
+        pending_importer_.reset();
+        pending_path_.clear();
+        load_ready_.store(false, std::memory_order_release);
+        loading_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // Promote worker results to live state.
+    importer_ = std::move(pending_importer_);
+    scene_ = pending_scene_;
+    pending_scene_ = nullptr;
+    loaded_ = true;
+    model_path_ = pending_path_;
+    pending_path_.clear();
+
     aiMatrix4x4 gi = scene_->mRootNode->mTransformation;
     gi.Inverse();
     global_inverse_ = FromAi(gi);
 
     BuildBindings(scene_);
 
-    // Default to the first available clip if none selected.
     if (!active_clip_name_.empty())
     {
         bool found = false;
@@ -731,7 +815,9 @@ bool AnimatorPreviewRenderer::SetModel(const std::filesystem::path& absolute_mod
 
     ComputeFrameBounds();
     ResetView();
-    return true;
+
+    load_ready_.store(false, std::memory_order_release);
+    loading_.store(false, std::memory_order_release);
 }
 
 void AnimatorPreviewRenderer::BuildBindings(const aiScene* scene)
@@ -1156,6 +1242,7 @@ float AnimatorPreviewRenderer::ClipDurationSeconds() const
 
 void AnimatorPreviewRenderer::Tick(float delta_seconds)
 {
+    PollPendingLoad();
     if (!playing_)
     {
         return;
@@ -1265,7 +1352,7 @@ void AnimatorPreviewRenderer::StepBonePhysics(float frame_seconds)
         // Spring constants. Damping is interpreted as a critical-damping
         // fraction: damping=1 yields no overshoot, <1 oscillates, >1 is
         // sluggish. c/m = 2*frac*sqrt(k/m).
-        const float stiff_k = 60.0f * std::max(0.0f, p.stiffness);
+        const float stiff_k = 180.0f * std::max(0.0f, p.stiffness);
         const float mass = std::max(0.001f, p.mass);
         const float damp_k = 2.0f * std::max(0.0f, p.damping) * std::sqrt(stiff_k / mass);
         const float drag_k = std::clamp(p.drag, 0.0f, 1.0f);
@@ -2244,6 +2331,8 @@ void AnimatorPreviewRenderer::DestroyGpu()
 
 bool AnimatorPreviewRenderer::Render(VulkanContext* vulkan_context, const ImVec2& region_min, const ImVec2& region_max)
 {
+    PollPendingLoad();
+
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->PushClipRect(region_min, region_max, true);
     draw_list->AddRectFilledMultiColor(
@@ -2256,12 +2345,25 @@ bool AnimatorPreviewRenderer::Render(VulkanContext* vulkan_context, const ImVec2
 
     if (!HasModel())
     {
-        const char* placeholder = last_error_.empty() ? "Drop a model here" : last_error_.c_str();
-        const ImVec2 text_size = ImGui::CalcTextSize(placeholder);
+        // While the worker thread is parsing, show an animated "Loading…"
+        // placeholder instead of the generic drop-target text.
+        const bool is_loading = IsLoading();
+        std::string placeholder_text;
+        if (is_loading)
+        {
+            const int dots = static_cast<int>(ImGui::GetTime() * 2.0f) % 4;
+            placeholder_text = "Loading";
+            placeholder_text.append(dots, '.');
+        }
+        else
+        {
+            placeholder_text = last_error_.empty() ? "Drop a model here" : last_error_;
+        }
+        const ImVec2 text_size = ImGui::CalcTextSize(placeholder_text.c_str());
         draw_list->AddText(
             ImVec2((region_min.x + region_max.x - text_size.x) * 0.5f, (region_min.y + region_max.y - text_size.y) * 0.5f),
-            IM_COL32(220, 226, 236, 255),
-            placeholder);
+            is_loading ? IM_COL32(180, 200, 230, 255) : IM_COL32(220, 226, 236, 255),
+            placeholder_text.c_str());
         draw_list->PopClipRect();
         return false;
     }

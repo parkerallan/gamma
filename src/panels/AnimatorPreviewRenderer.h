@@ -13,11 +13,13 @@
 #include <vulkan/vulkan.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -47,6 +49,9 @@ public:
     void ClearModel();
 
     bool HasModel() const { return loaded_ && scene_ != nullptr; }
+    // True while a model is being parsed on the background worker thread.
+    // Callers can show a placeholder until HasModel() returns true.
+    bool IsLoading() const { return loading_.load(std::memory_order_acquire); }
     const std::string& LastError() const { return last_error_; }
 
     // List of clip names found in the loaded model (in source order). Empty
@@ -157,6 +162,11 @@ private:
     void EnsureTextures(VulkanContext* vulkan_context);
     void DestroyTextures();
 
+    // Drains a completed background-loader thread (if any) and promotes the
+    // worker-built scene into the live renderer state. Cheap no-op when no
+    // load is pending. Called from Tick() and Render() every frame.
+    void PollPendingLoad();
+
     // Runs a fixed-timestep spring-damper integration over node_world_transforms_
     // for every entry in bone_physics_, then recomputes descendant transforms
     // (when affects_children) and animated bone matrices. Called between
@@ -178,6 +188,18 @@ private:
     bool loaded_ = false;
     std::filesystem::path model_path_;
     std::string last_error_;
+
+    // ---- Async load state (parsed on worker thread) ----------------------
+    // While loading_ is true, the worker thread owns pending_importer_ and
+    // pending_scene_. When load_ready_ flips to true, the main thread joins
+    // the worker, promotes the importer/scene, and runs BuildBindings.
+    std::thread load_thread_;
+    std::atomic<bool> loading_{false};
+    std::atomic<bool> load_ready_{false};
+    std::filesystem::path pending_path_;
+    std::unique_ptr<Assimp::Importer> pending_importer_;
+    const aiScene* pending_scene_ = nullptr;
+    std::string pending_error_;
 
     // Source-data caches built once per loaded model.
     std::vector<MeshBinding> mesh_bindings_;

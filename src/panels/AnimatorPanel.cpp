@@ -727,6 +727,22 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
                     presets[0].name, presets[1].name, presets[2].name, presets[3].name,
                     presets[4].name, presets[5].name, presets[6].name,
                 };
+                // Small helper: append a "(?)" hint after the previous
+                // widget. Hover to see a plain-English description.
+                auto tooltip = [](const char* text)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(?)");
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::BeginTooltip();
+                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+                        ImGui::TextUnformatted(text);
+                        ImGui::PopTextWrapPos();
+                        ImGui::EndTooltip();
+                    }
+                };
+
                 int preset_index = 0;
                 if (ImGui::Combo("Preset", &preset_index, preset_names, static_cast<int>(presets.size())))
                 {
@@ -751,31 +767,57 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
                     modifier.strength = std::clamp(modifier.strength, 0.0f, 2.0f);
                     controller_dirty_ = true;
                 }
+                tooltip("How much of the simulated bone offset is applied to the final pose.\n"
+                        "0 = no effect (bone stays glued to the animation).\n"
+                        "1 = full physics influence.\n"
+                        "Use values above 1 only to exaggerate motion.");
+
                 if (ImGui::DragFloat("Stiffness", &modifier.stiffness, 0.01f, 0.0f, 1.0f, "%.2f"))
                 {
                     modifier.stiffness = std::clamp(modifier.stiffness, 0.0f, 1.0f);
                     controller_dirty_ = true;
                 }
+                tooltip("How strongly the bone is pulled back to its rest (animated) position.\n"
+                        "Low = floppy, slow oscillation (long hair, cloth).\n"
+                        "High = snappy, quick return (short hair, breast jiggle).");
+
                 if (ImGui::DragFloat("Damping", &modifier.damping, 0.01f, 0.0f, 3.0f, "%.2f"))
                 {
                     modifier.damping = std::clamp(modifier.damping, 0.0f, 3.0f);
                     controller_dirty_ = true;
                 }
+                tooltip("How quickly oscillation dies out (critical-damping fraction).\n"
+                        "0 = bouncy / wobbly forever.\n"
+                        "1 = no bounce, settles in one swing.\n"
+                        ">1 = overdamped, sluggish return.");
+
                 if (ImGui::DragFloat("Mass", &modifier.mass, 0.01f, 0.001f, 100.0f, "%.3f"))
                 {
                     modifier.mass = std::max(0.001f, modifier.mass);
                     controller_dirty_ = true;
                 }
+                tooltip("Inertia of the simulated bone.\n"
+                        "Low = light, reacts instantly (whiskers, ribbons).\n"
+                        "High = heavy, slow to start and stop (ponytails, thick cloth).");
+
                 if (ImGui::DragFloat("Drag", &modifier.drag, 0.005f, 0.0f, 1.0f, "%.3f"))
                 {
                     modifier.drag = std::clamp(modifier.drag, 0.0f, 1.0f);
                     controller_dirty_ = true;
                 }
+                tooltip("Air resistance applied to bone velocity each frame.\n"
+                        "Bleeds off motion smoothly without affecting stiffness/damping tuning.\n"
+                        "Useful to kill jitter without making the bone feel mushy.");
+
                 if (ImGui::DragFloat("Gravity Scale", &modifier.gravity_scale, 0.01f, 0.0f, 5.0f, "%.2f"))
                 {
                     modifier.gravity_scale = std::clamp(modifier.gravity_scale, 0.0f, 5.0f);
                     controller_dirty_ = true;
                 }
+                tooltip("Multiplier applied to the Gravity Dir vector (in Advanced).\n"
+                        "0 = no gravity; rest pose is the resting position.\n"
+                        "Set above 0 only when the animated bone is NOT already where gravity would settle it (e.g. flag cloth at rest pose horizontal).\n"
+                        "For body parts (hair/breast/etc) leave at 0 — non-zero will sag the bone below its rest position.");
 
                 if (ImGui::TreeNode("Advanced"))
                 {
@@ -783,20 +825,32 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
                     {
                         controller_dirty_ = true;
                     }
+                    tooltip("World-space direction of gravity for this bone (X, Y, Z).\n"
+                            "Default (0, -1, 0) is straight down. Only has an effect when Gravity Scale > 0.");
+
                     if (ImGui::DragFloat("Angle Limit", &modifier.angle_limit_deg, 0.5f, 0.0f, 180.0f, "%.1f deg"))
                     {
                         modifier.angle_limit_deg = std::clamp(modifier.angle_limit_deg, 0.0f, 180.0f);
                         controller_dirty_ = true;
                     }
+                    tooltip("Maximum angle (degrees) the bone can deflect from its rest direction before being clamped.\n"
+                            "Lower = stiffer cone (small wobble).\n"
+                            "Higher = more freedom of movement.");
+
                     if (ImGui::DragFloat("Radius", &modifier.radius, 0.001f, 0.0f, 1.0f, "%.3f"))
                     {
                         modifier.radius = std::max(0.0f, modifier.radius);
                         controller_dirty_ = true;
                     }
+                    tooltip("Collision radius around the bone in meters.\n"
+                            "Reserved for future collider support; currently informational.");
+
                     if (ImGui::Checkbox("Affects Children", &modifier.affects_children))
                     {
                         controller_dirty_ = true;
                     }
+                    tooltip("When enabled, rotating this bone also carries its descendant bones along.\n"
+                            "Required for chains (hair strands, tails) so children don't tear away from the parent.");
                     ImGui::TreePop();
                 }
 

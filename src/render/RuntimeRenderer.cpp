@@ -2203,7 +2203,7 @@ bool SampleClipBoneMatricesWithPhysics(
 
         if (steps > 0)
         {
-            const float stiff_k = 60.0f * (std::max)(0.0f, m.stiffness);
+            const float stiff_k = 180.0f * (std::max)(0.0f, m.stiffness);
             const float mass = (std::max)(0.001f, m.mass);
             // Damping is a critical-damping fraction. c_critical = 2*sqrt(k*m).
             // Effective per-step velocity decay = c/m * dt = 2*frac*sqrt(k/m)*dt.
