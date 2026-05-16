@@ -215,20 +215,10 @@ void main()
 {
     vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
     vec2 pixel_base = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
-    uint frame_index = scene_uniforms.accumulation_data.w;
-    uint history_sample_count = scene_uniforms.accumulation_data.y != 0u ? scene_uniforms.accumulation_data.x : 0u;
 
-    vec3 current_color = trace_primary_sample(pixel_base + jittered_sample_offset(frame_index), launch_size);
+    // True no-AA baseline: pixel-center sample, no jitter, no temporal
+    // accumulation. frame_index / accumulation_data are intentionally unused.
+    vec3 current_color = trace_primary_sample(pixel_base, launch_size);
 
-    vec3 accumulated_linear = current_color;
-    if (history_sample_count > 0u)
-    {
-        vec3 history_color = imageLoad(history_image, ivec2(gl_LaunchIDEXT.xy)).rgb;
-        float blend = 1.0 / float(history_sample_count + 1u);
-        accumulated_linear = mix(history_color, current_color, blend);
-    }
-
-    imageStore(history_image, ivec2(gl_LaunchIDEXT.xy), vec4(accumulated_linear, 1.0));
-    // The post FXAA compute pass owns the sRGB write into output_image; raygen
-    // only produces the linear HDR history. See standard_rt_fxaa.comp.
+    imageStore(history_image, ivec2(gl_LaunchIDEXT.xy), vec4(current_color, 1.0));
 }

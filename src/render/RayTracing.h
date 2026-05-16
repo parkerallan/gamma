@@ -306,14 +306,38 @@ private:
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
-    // Post AA / sRGB resolve compute pipeline. Reads linear HDR from
-    // history_image_, writes sRGB to output_image_. Owned independently of the
-    // RT pipeline so material / hit shaders never need to be touched to tune AA.
-    VkDescriptorSetLayout fxaa_descriptor_set_layout_ = VK_NULL_HANDLE;
-    VkPipelineLayout fxaa_pipeline_layout_ = VK_NULL_HANDLE;
-    VkPipeline fxaa_pipeline_ = VK_NULL_HANDLE;
-    VkDescriptorSet fxaa_descriptor_set_ = VK_NULL_HANDLE;
-    bool fxaa_descriptors_dirty_ = false;
+    // SMAA 1x post-AA / sRGB resolve. Three compute passes:
+    //   1. edges  : history (rgba16f, linear)  -> edges   (rg8)
+    //   2. weights: edges                       -> weights (rgba8)   [+ LUTs, Phase 1b]
+    //   3. blend  : history + weights           -> output  (rgba8 sRGB)
+    // All three pipelines are owned independently of the RT pipeline so the
+    // post-AA chain can evolve without touching any hit / miss / shadow code.
+    // smaa_*_image_ are recreated whenever output_image_ / history_image_ are.
+    VkDescriptorSetLayout smaa_edges_set_layout_     = VK_NULL_HANDLE;
+    VkPipelineLayout      smaa_edges_pipeline_layout_= VK_NULL_HANDLE;
+    VkPipeline            smaa_edges_pipeline_       = VK_NULL_HANDLE;
+    VkDescriptorSet       smaa_edges_set_            = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout smaa_weights_set_layout_     = VK_NULL_HANDLE;
+    VkPipelineLayout      smaa_weights_pipeline_layout_= VK_NULL_HANDLE;
+    VkPipeline            smaa_weights_pipeline_       = VK_NULL_HANDLE;
+    VkDescriptorSet       smaa_weights_set_            = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout smaa_blend_set_layout_     = VK_NULL_HANDLE;
+    VkPipelineLayout      smaa_blend_pipeline_layout_= VK_NULL_HANDLE;
+    VkPipeline            smaa_blend_pipeline_       = VK_NULL_HANDLE;
+    VkDescriptorSet       smaa_blend_set_            = VK_NULL_HANDLE;
+
+    // Per-resize intermediate storage images.
+    VkImage        smaa_edges_image_  = VK_NULL_HANDLE;
+    VkDeviceMemory smaa_edges_memory_ = VK_NULL_HANDLE;
+    VkImageView    smaa_edges_view_   = VK_NULL_HANDLE;
+
+    VkImage        smaa_weights_image_  = VK_NULL_HANDLE;
+    VkDeviceMemory smaa_weights_memory_ = VK_NULL_HANDLE;
+    VkImageView    smaa_weights_view_   = VK_NULL_HANDLE;
+
+    bool smaa_descriptors_dirty_ = false;
     ShaderBindingTable raygen_sbt_{};
     ShaderBindingTable miss_sbt_{};
     ShaderBindingTable hit_sbt_{};
