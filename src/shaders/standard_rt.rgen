@@ -221,4 +221,5 @@ void main()
     vec3 current_color = trace_primary_sample(pixel_base, launch_size);
 
     imageStore(history_image, ivec2(gl_LaunchIDEXT.xy), vec4(current_color, 1.0));
+    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(linear_to_srgb(current_color), 1.0));
 }

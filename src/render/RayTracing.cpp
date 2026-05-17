@@ -1004,50 +1004,6 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
 
     history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    // SMAA intermediate storage images. Sized to match the output (which is
-    // the launch resolution of the RT pipeline). Both used as storage-only;
-    // contents are written each frame by their producing compute pass and
-    // consumed by the next compute pass within the same frame, so we never
-    // need TRANSFER_DST / TRANSFER_SRC here.
-    if (!CreateVulkanImage(
-            vulkan_context_->GetPhysicalDevice(),
-            device,
-            allocator,
-            width,
-            height,
-            VK_FORMAT_R8G8_UNORM,
-            VK_IMAGE_USAGE_STORAGE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            smaa_edges_image_,
-            smaa_edges_memory_,
-            smaa_edges_view_))
-    {
-        status_message_ = "Failed to create viewport RT SMAA edges image";
-        DestroyOutputResources();
-        return false;
-    }
-
-    if (!CreateVulkanImage(
-            vulkan_context_->GetPhysicalDevice(),
-            device,
-            allocator,
-            width,
-            height,
-            VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_STORAGE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            smaa_weights_image_,
-            smaa_weights_memory_,
-            smaa_weights_view_))
-    {
-        status_message_ = "Failed to create viewport RT SMAA weights image";
-        DestroyOutputResources();
-        return false;
-    }
-
-    // New views demand new descriptor writes on all 3 SMAA sets.
-    smaa_descriptors_dirty_ = true;
-
     ResetAccumulationState();
     return true;
 }
@@ -1445,12 +1401,6 @@ void RayTracing::DestroyOutputResources()
         history_image_ = VK_NULL_HANDLE;
         history_memory_ = VK_NULL_HANDLE;
         history_view_ = VK_NULL_HANDLE;
-        smaa_edges_image_ = VK_NULL_HANDLE;
-        smaa_edges_memory_ = VK_NULL_HANDLE;
-        smaa_edges_view_ = VK_NULL_HANDLE;
-        smaa_weights_image_ = VK_NULL_HANDLE;
-        smaa_weights_memory_ = VK_NULL_HANDLE;
-        smaa_weights_view_ = VK_NULL_HANDLE;
         return;
     }
 
@@ -1485,36 +1435,6 @@ void RayTracing::DestroyOutputResources()
     {
         vkFreeMemory(device, history_memory_, allocator);
         history_memory_ = VK_NULL_HANDLE;
-    }
-    if (smaa_edges_view_ != VK_NULL_HANDLE)
-    {
-        vkDestroyImageView(device, smaa_edges_view_, allocator);
-        smaa_edges_view_ = VK_NULL_HANDLE;
-    }
-    if (smaa_edges_image_ != VK_NULL_HANDLE)
-    {
-        vkDestroyImage(device, smaa_edges_image_, allocator);
-        smaa_edges_image_ = VK_NULL_HANDLE;
-    }
-    if (smaa_edges_memory_ != VK_NULL_HANDLE)
-    {
-        vkFreeMemory(device, smaa_edges_memory_, allocator);
-        smaa_edges_memory_ = VK_NULL_HANDLE;
-    }
-    if (smaa_weights_view_ != VK_NULL_HANDLE)
-    {
-        vkDestroyImageView(device, smaa_weights_view_, allocator);
-        smaa_weights_view_ = VK_NULL_HANDLE;
-    }
-    if (smaa_weights_image_ != VK_NULL_HANDLE)
-    {
-        vkDestroyImage(device, smaa_weights_image_, allocator);
-        smaa_weights_image_ = VK_NULL_HANDLE;
-    }
-    if (smaa_weights_memory_ != VK_NULL_HANDLE)
-    {
-        vkFreeMemory(device, smaa_weights_memory_, allocator);
-        smaa_weights_memory_ = VK_NULL_HANDLE;
     }
 }
 
@@ -1621,51 +1541,6 @@ void RayTracing::DestroyPipelineResources()
             vkDestroyDescriptorSetLayout(device, descriptor_set_layout_, allocator);
             descriptor_set_layout_ = VK_NULL_HANDLE;
         }
-        if (smaa_edges_pipeline_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipeline(device, smaa_edges_pipeline_, allocator);
-            smaa_edges_pipeline_ = VK_NULL_HANDLE;
-        }
-        if (smaa_edges_pipeline_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipelineLayout(device, smaa_edges_pipeline_layout_, allocator);
-            smaa_edges_pipeline_layout_ = VK_NULL_HANDLE;
-        }
-        if (smaa_edges_set_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyDescriptorSetLayout(device, smaa_edges_set_layout_, allocator);
-            smaa_edges_set_layout_ = VK_NULL_HANDLE;
-        }
-        if (smaa_weights_pipeline_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipeline(device, smaa_weights_pipeline_, allocator);
-            smaa_weights_pipeline_ = VK_NULL_HANDLE;
-        }
-        if (smaa_weights_pipeline_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipelineLayout(device, smaa_weights_pipeline_layout_, allocator);
-            smaa_weights_pipeline_layout_ = VK_NULL_HANDLE;
-        }
-        if (smaa_weights_set_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyDescriptorSetLayout(device, smaa_weights_set_layout_, allocator);
-            smaa_weights_set_layout_ = VK_NULL_HANDLE;
-        }
-        if (smaa_blend_pipeline_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipeline(device, smaa_blend_pipeline_, allocator);
-            smaa_blend_pipeline_ = VK_NULL_HANDLE;
-        }
-        if (smaa_blend_pipeline_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyPipelineLayout(device, smaa_blend_pipeline_layout_, allocator);
-            smaa_blend_pipeline_layout_ = VK_NULL_HANDLE;
-        }
-        if (smaa_blend_set_layout_ != VK_NULL_HANDLE)
-        {
-            vkDestroyDescriptorSetLayout(device, smaa_blend_set_layout_, allocator);
-            smaa_blend_set_layout_ = VK_NULL_HANDLE;
-        }
         if (texture_sampler_ != VK_NULL_HANDLE)
         {
             vkDestroySampler(device, texture_sampler_, allocator);
@@ -1696,15 +1571,6 @@ void RayTracing::DestroyPipelineResources()
         pipeline_ = VK_NULL_HANDLE;
         pipeline_layout_ = VK_NULL_HANDLE;
         descriptor_set_layout_ = VK_NULL_HANDLE;
-        smaa_edges_pipeline_ = VK_NULL_HANDLE;
-        smaa_edges_pipeline_layout_ = VK_NULL_HANDLE;
-        smaa_edges_set_layout_ = VK_NULL_HANDLE;
-        smaa_weights_pipeline_ = VK_NULL_HANDLE;
-        smaa_weights_pipeline_layout_ = VK_NULL_HANDLE;
-        smaa_weights_set_layout_ = VK_NULL_HANDLE;
-        smaa_blend_pipeline_ = VK_NULL_HANDLE;
-        smaa_blend_pipeline_layout_ = VK_NULL_HANDLE;
-        smaa_blend_set_layout_ = VK_NULL_HANDLE;
         texture_sampler_ = VK_NULL_HANDLE;
         skybox_texture_view_ = VK_NULL_HANDLE;
         fallback_texture_view_ = VK_NULL_HANDLE;
@@ -1713,10 +1579,6 @@ void RayTracing::DestroyPipelineResources()
     }
 
     descriptor_set_ = VK_NULL_HANDLE;
-    smaa_edges_set_ = VK_NULL_HANDLE;
-    smaa_weights_set_ = VK_NULL_HANDLE;
-    smaa_blend_set_ = VK_NULL_HANDLE;
-    smaa_descriptors_dirty_ = false;
 }
 
 bool RayTracing::EnsurePipelineResources()
@@ -2043,130 +1905,6 @@ bool RayTracing::EnsurePipelineResources()
         }
     }
 
-    // ---------- Post SMAA 1x / sRGB resolve compute pipelines ----------
-    // Three independent compute pipelines, run in order each frame:
-    //   1. smaa_edges_pipeline_   :  history (rgba16f, storage RO)
-    //                              + edges   (rg8,    storage WO)
-    //   2. smaa_weights_pipeline_ :  edges   (rg8,    storage RO)
-    //                              + weights (rgba8,  storage WO)
-    //      [Phase 1b will add AreaTex / SearchTex sampler bindings here.]
-    //   3. smaa_blend_pipeline_   :  history (rgba16f, storage RO)
-    //                              + weights (rgba8,  storage RO)
-    //                              + output  (rgba8,  storage WO, sRGB-encoded)
-    // Owned independently of the RT pipeline so changes here cannot regress
-    // any-hit / closest-hit / shadow code paths. The shader stubs in
-    // smaa_edges.comp / smaa_weights.comp / smaa_blend.comp produce an image
-    // identical to no-AA until Phase 2 fills in the real SMAA logic.
-    auto create_compute_pipeline =
-        [&](const char* shader_relative_path,
-            const char* purpose,
-            VkDescriptorSetLayout set_layout,
-            VkPipelineLayout& out_pipeline_layout,
-            VkPipeline& out_pipeline) -> bool
-    {
-        if (out_pipeline_layout == VK_NULL_HANDLE)
-        {
-            VkPipelineLayoutCreateInfo layout_info = {};
-            layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            layout_info.setLayoutCount = 1;
-            layout_info.pSetLayouts = &set_layout;
-            VkResult result = vkCreatePipelineLayout(device, &layout_info, allocator, &out_pipeline_layout);
-            VulkanContext::CheckVkResult(result);
-            if (result != VK_SUCCESS)
-            {
-                status_message_ = std::string{"Failed to create viewport RT "} + purpose + " pipeline layout";
-                return false;
-            }
-        }
-
-        if (out_pipeline == VK_NULL_HANDLE)
-        {
-            VkShaderModule shader = LoadShaderModule(device, ResolveShaderPath(shader_relative_path));
-            if (shader == VK_NULL_HANDLE)
-            {
-                status_message_ = std::string{"Failed to load viewport RT "} + purpose + " shader";
-                return false;
-            }
-
-            VkComputePipelineCreateInfo compute_info = {};
-            compute_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            compute_info.layout = out_pipeline_layout;
-            compute_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            compute_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            compute_info.stage.module = shader;
-            compute_info.stage.pName = "main";
-
-            VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &compute_info, allocator, &out_pipeline);
-            VulkanContext::CheckVkResult(result);
-            vkDestroyShaderModule(device, shader, allocator);
-            if (result != VK_SUCCESS)
-            {
-                out_pipeline = VK_NULL_HANDLE;
-                status_message_ = std::string{"Failed to create viewport RT "} + purpose + " pipeline";
-                return false;
-            }
-        }
-        return true;
-    };
-
-    auto create_compute_set_and_layout =
-        [&](std::uint32_t binding_count,
-            const char* purpose,
-            VkDescriptorSetLayout& out_set_layout,
-            VkDescriptorSet& out_set) -> bool
-    {
-        if (out_set_layout == VK_NULL_HANDLE)
-        {
-            // All current SMAA stub bindings are STORAGE_IMAGE. Phase 1b will
-            // extend this helper (or replace the weights-pass call site) when
-            // AreaTex / SearchTex sampled-image bindings are added.
-            std::array<VkDescriptorSetLayoutBinding, 4> bindings = {};
-            for (std::uint32_t i = 0; i < binding_count; ++i)
-            {
-                bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-            }
-
-            VkDescriptorSetLayoutCreateInfo layout_info = {};
-            layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layout_info.bindingCount = binding_count;
-            layout_info.pBindings = bindings.data();
-            VkResult result = vkCreateDescriptorSetLayout(device, &layout_info, allocator, &out_set_layout);
-            VulkanContext::CheckVkResult(result);
-            if (result != VK_SUCCESS)
-            {
-                status_message_ = std::string{"Failed to create viewport RT "} + purpose + " descriptor set layout";
-                return false;
-            }
-        }
-
-        if (out_set == VK_NULL_HANDLE)
-        {
-            VkDescriptorSetAllocateInfo allocate_info = {};
-            allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            allocate_info.descriptorPool = vulkan_context_->GetDescriptorPool();
-            allocate_info.descriptorSetCount = 1;
-            allocate_info.pSetLayouts = &out_set_layout;
-            VkResult result = vkAllocateDescriptorSets(device, &allocate_info, &out_set);
-            VulkanContext::CheckVkResult(result);
-            if (result != VK_SUCCESS)
-            {
-                status_message_ = std::string{"Failed to allocate viewport RT "} + purpose + " descriptor set";
-                out_set = VK_NULL_HANDLE;
-                return false;
-            }
-            smaa_descriptors_dirty_ = true;
-        }
-        return true;
-    };
-
-    if (!create_compute_set_and_layout(2u, "SMAA edges",   smaa_edges_set_layout_,   smaa_edges_set_))   return false;
-    if (!create_compute_set_and_layout(2u, "SMAA weights", smaa_weights_set_layout_, smaa_weights_set_)) return false;
-    if (!create_compute_set_and_layout(3u, "SMAA blend",   smaa_blend_set_layout_,   smaa_blend_set_))   return false;
-
-    if (!create_compute_pipeline("smaa_edges.comp.spv",   "SMAA edges",   smaa_edges_set_layout_,   smaa_edges_pipeline_layout_,   smaa_edges_pipeline_))   return false;
-    if (!create_compute_pipeline("smaa_weights.comp.spv", "SMAA weights", smaa_weights_set_layout_, smaa_weights_pipeline_layout_, smaa_weights_pipeline_)) return false;
-    if (!create_compute_pipeline("smaa_blend.comp.spv",   "SMAA blend",   smaa_blend_set_layout_,   smaa_blend_pipeline_layout_,   smaa_blend_pipeline_))   return false;
-
     if (descriptors_dirty_)
     {
         const bool ok = UpdateDescriptors();
@@ -2303,60 +2041,6 @@ bool RayTracing::UpdateDescriptors()
     writes[8].pImageInfo = &skybox_image_info;
 
     vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
-
-    // Mirror history_image_ / smaa_edges_image_ / smaa_weights_image_ / output_image_
-    // into the three SMAA compute descriptor sets. All bindings use GENERAL layout
-    // for storage-image access; transitions to/from GENERAL are issued in Render().
-    if (smaa_descriptors_dirty_ &&
-        smaa_edges_set_   != VK_NULL_HANDLE &&
-        smaa_weights_set_ != VK_NULL_HANDLE &&
-        smaa_blend_set_   != VK_NULL_HANDLE)
-    {
-        VkDescriptorImageInfo history_info = {};
-        history_info.imageView = history_view_;
-        history_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo edges_info = {};
-        edges_info.imageView = smaa_edges_view_;
-        edges_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo weights_info = {};
-        weights_info.imageView = smaa_weights_view_;
-        weights_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo output_info = {};
-        output_info.imageView = output_view_;
-        output_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        auto make_storage_write =
-            [](VkDescriptorSet set, std::uint32_t binding, const VkDescriptorImageInfo* info) {
-                VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                w.dstSet = set;
-                w.dstBinding = binding;
-                w.descriptorCount = 1;
-                w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-                w.pImageInfo = info;
-                return w;
-            };
-
-        std::array<VkWriteDescriptorSet, 7> smaa_writes = {};
-        // Pass 1 (edges):   binding 0 = history (RO), 1 = edges (WO)
-        smaa_writes[0] = make_storage_write(smaa_edges_set_,   0, &history_info);
-        smaa_writes[1] = make_storage_write(smaa_edges_set_,   1, &edges_info);
-        // Pass 2 (weights): binding 0 = edges (RO),   1 = weights (WO)
-        // Phase 1b will add bindings 2 = AreaTex (CIS) and 3 = SearchTex (CIS).
-        smaa_writes[2] = make_storage_write(smaa_weights_set_, 0, &edges_info);
-        smaa_writes[3] = make_storage_write(smaa_weights_set_, 1, &weights_info);
-        // Pass 3 (blend):   binding 0 = history (RO), 1 = weights (RO), 2 = output (WO)
-        smaa_writes[4] = make_storage_write(smaa_blend_set_,   0, &history_info);
-        smaa_writes[5] = make_storage_write(smaa_blend_set_,   1, &weights_info);
-        smaa_writes[6] = make_storage_write(smaa_blend_set_,   2, &output_info);
-
-        vkUpdateDescriptorSets(vulkan_context_->GetDevice(),
-                               static_cast<std::uint32_t>(smaa_writes.size()),
-                               smaa_writes.data(), 0, nullptr);
-        smaa_descriptors_dirty_ = false;
-    }
 
     return true;
 }
@@ -3088,92 +2772,6 @@ bool RayTracing::RenderFrame(
         output_width_,
         output_height_,
         1);
-
-    // ---- Post SMAA 1x / sRGB resolve ----
-    // Three sequential compute dispatches with W->R compute barriers between
-    // them. Layout for all SMAA images stays GENERAL throughout the frame.
-    //   barrier A : RT raygen   --(W->R)--> SMAA edges     (history, smaa images)
-    //   dispatch  : smaa_edges      [history RO,            edges WO]
-    //   barrier B : SMAA edges   --(W->R)--> SMAA weights  (edges)
-    //   dispatch  : smaa_weights    [edges RO,              weights WO]
-    //   barrier C : SMAA weights --(W->R)--> SMAA blend    (weights)
-    //   dispatch  : smaa_blend      [history RO, weights RO, output WO]
-    // output_image_ also needs a self W->W barrier so prior frames' compute
-    // writes drain before this frame's writes begin.
-    if (smaa_edges_pipeline_   != VK_NULL_HANDLE && smaa_edges_set_   != VK_NULL_HANDLE &&
-        smaa_weights_pipeline_ != VK_NULL_HANDLE && smaa_weights_set_ != VK_NULL_HANDLE &&
-        smaa_blend_pipeline_   != VK_NULL_HANDLE && smaa_blend_set_   != VK_NULL_HANDLE)
-    {
-        const VkImageSubresourceRange color_range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        auto make_barrier = [&](VkImage image, VkAccessFlags src, VkAccessFlags dst) {
-            VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            b.srcAccessMask = src;
-            b.dstAccessMask = dst;
-            b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-            b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = image;
-            b.subresourceRange = color_range;
-            return b;
-        };
-
-        const std::uint32_t group_x = (output_width_ + 7u) / 8u;
-        const std::uint32_t group_y = (output_height_ + 7u) / 8u;
-
-        // Barrier A: RT raygen finished writing history_image_; drain any
-        // outstanding compute writes to smaa_edges_/smaa_weights_/output_.
-        std::array<VkImageMemoryBarrier, 4> barriers_a = {
-            make_barrier(history_image_,       VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT),
-            make_barrier(smaa_edges_image_,    VK_ACCESS_SHADER_READ_BIT  | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT),
-            make_barrier(smaa_weights_image_,  VK_ACCESS_SHADER_READ_BIT  | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT),
-            make_barrier(output_image_,        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT),
-        };
-        vkCmdPipelineBarrier(
-            command_buffer_,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr,
-            static_cast<std::uint32_t>(barriers_a.size()), barriers_a.data());
-
-        // Pass 1: edge detection.
-        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, smaa_edges_pipeline_);
-        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                smaa_edges_pipeline_layout_, 0, 1, &smaa_edges_set_, 0, nullptr);
-        vkCmdDispatch(command_buffer_, group_x, group_y, 1);
-
-        // Barrier B: edges W->R for weights pass.
-        VkImageMemoryBarrier barrier_b = make_barrier(smaa_edges_image_,
-                                                     VK_ACCESS_SHADER_WRITE_BIT,
-                                                     VK_ACCESS_SHADER_READ_BIT);
-        vkCmdPipelineBarrier(
-            command_buffer_,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &barrier_b);
-
-        // Pass 2: blending-weight calculation.
-        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, smaa_weights_pipeline_);
-        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                smaa_weights_pipeline_layout_, 0, 1, &smaa_weights_set_, 0, nullptr);
-        vkCmdDispatch(command_buffer_, group_x, group_y, 1);
-
-        // Barrier C: weights W->R for blend pass.
-        VkImageMemoryBarrier barrier_c = make_barrier(smaa_weights_image_,
-                                                     VK_ACCESS_SHADER_WRITE_BIT,
-                                                     VK_ACCESS_SHADER_READ_BIT);
-        vkCmdPipelineBarrier(
-            command_buffer_,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &barrier_c);
-
-        // Pass 3: neighborhood blending + linear->sRGB resolve into output_image_.
-        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, smaa_blend_pipeline_);
-        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                smaa_blend_pipeline_layout_, 0, 1, &smaa_blend_set_, 0, nullptr);
-        vkCmdDispatch(command_buffer_, group_x, group_y, 1);
-    }
 
     accumulation_reference_uniforms_ = accumulation_reference;
     accumulation_reference_uniforms_valid_ = true;
