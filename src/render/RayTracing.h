@@ -140,6 +140,12 @@ public:
     void SetSkyboxTexture(VkImageView skybox_view);
     void SetSkyboxRotation(float rotation_degrees);
 
+    // Invalidate the TAA history so the next frame is treated as the first
+    // frame (no temporal blend). Call after viewport resize, scene reload,
+    // editor-camera teleport, play/stop transition, or any event that breaks
+    // temporal coherency.
+    void ResetTemporalHistory() { taa_history_valid_ = false; }
+
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
 
@@ -254,6 +260,16 @@ private:
         std::uint32_t section_count = 0;
         std::uint32_t texture_count = 0;
         std::array<std::uint32_t, 4> accumulation_data = {0, 0, 0, 0};
+        // TAA reprojection / jitter state. view_proj_curr is the unjittered
+        // projection*view for the frame currently being traced. view_proj_prev
+        // is the same matrix from the previous successful frame; on the very
+        // first frame after a reset it equals view_proj_curr (taa_history_
+        // valid_ is also false, so the resolve pass clamps to current).
+        // jitter_state.xy = jitter applied to current frame (pixel units),
+        // jitter_state.zw = jitter applied to previous frame (pixel units).
+        std::array<float, 16> view_proj_curr = {};
+        std::array<float, 16> view_proj_prev = {};
+        std::array<float, 4> jitter_state = {0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     void ResetAccumulationState();
@@ -263,6 +279,9 @@ private:
     void DestroyPipelineResources();
     bool EnsurePipelineResources();
     bool UpdateDescriptors();
+    bool EnsureTaaPipeline();
+    void DestroyTaaPipeline();
+    bool UpdateTaaDescriptors();
 
     VulkanContext* vulkan_context_ = nullptr;
     bool available_ = false;
@@ -273,6 +292,47 @@ private:
     VkImage history_image_ = VK_NULL_HANDLE;
     VkDeviceMemory history_memory_ = VK_NULL_HANDLE;
     VkImageView history_view_ = VK_NULL_HANDLE;
+    // Motion-vector image (rg16f). Written by the rgen each frame; consumed
+    // by the TAA resolve compute pass for history reprojection.
+    VkImage motion_vector_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory motion_vector_memory_ = VK_NULL_HANDLE;
+    VkImageView motion_vector_view_ = VK_NULL_HANDLE;
+    VkImageLayout motion_vector_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Linear-depth image (r32f, camera-space primary-ray hit distance).
+    // Used by the TAA pass for closest-depth motion sampling and the
+    // disocclusion test.
+    VkImage linear_depth_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory linear_depth_memory_ = VK_NULL_HANDLE;
+    VkImageView linear_depth_view_ = VK_NULL_HANDLE;
+    VkImageLayout linear_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Ping-pong target. The TAA compute pass writes the resolved frame here;
+    // the swap with `history_image_` is performed at the end of each frame so
+    // the resolved output becomes the next frame's history sample source.
+    // Index 0/1 alternates each frame via `taa_current_slot_` so the previous
+    // frame's resolve (the actual TAA history) can be sampled while the
+    // current frame is being written.
+    VkImage taa_resolve_image_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory taa_resolve_memory_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView taa_resolve_view_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageLayout taa_resolve_layout_[2] = {VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED};
+    std::uint32_t taa_current_slot_ = 0; // slot we WRITE to this frame
+    // Linear-filtering sampler used by the TAA compute pass for sampled
+    // reads of history / motion / depth images.
+    VkSampler taa_sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout taa_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout taa_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline taa_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet taa_descriptor_set_ = VK_NULL_HANDLE;
+    GpuBuffer taa_uniform_buffer_{};
+    bool taa_history_valid_ = false;
+    std::uint32_t taa_frame_index_ = 0;
+    // Captured at end of each successful frame, consumed at the start of the
+    // next. Drives motion-vector reprojection in the rgen and (eventually)
+    // jitter cancellation in the TAA compute pass.
+    std::array<float, 16> prev_view_proj_ = {};
+    bool prev_view_proj_valid_ = false;
+    std::array<float, 2> jitter_curr_ = {0.0f, 0.0f};
+    std::array<float, 2> jitter_prev_ = {0.0f, 0.0f};
     VkSampler output_sampler_ = VK_NULL_HANDLE;
     VkDescriptorSet output_descriptor_set_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
@@ -340,6 +400,20 @@ private:
     std::vector<VkAccelerationStructureInstanceKHR> pending_acceleration_instances_;
     bool tlas_rebuild_pending_ = false;  // full rebuild required (topology or capacity changed)
     bool tlas_refit_pending_   = false;  // transform-only update via VK UPDATE mode
+
+    // Per-instance world transform tracking for TAA per-object motion
+    // vectors (descriptor set 0 binding 11).  tlas_instance_keys_ and
+    // tlas_instance_transforms_ are kept in TLAS-instance order so they
+    // index 1:1 against gl_InstanceID.  prev_instance_transforms_by_key_
+    // maps an InstanceInput::key to the transform it had on the most
+    // recently submitted frame, so when an instance reappears the rchit's
+    // prev_O2W lookup recovers the actual previous-frame pose rather than
+    // assuming static.
+    GpuBuffer prev_instance_transforms_buffer_{};
+    std::uint32_t prev_instance_transforms_capacity_ = 0;
+    std::vector<std::string> tlas_instance_keys_;
+    std::vector<std::array<float, 16>> tlas_instance_transforms_;
+    std::unordered_map<std::string, std::array<float, 16>> prev_instance_transforms_by_key_;
 
     // Pending BLAS refit requests collected by UpdateScene and submitted from
     // RenderFrame. Recording the BLAS UPDATE on the same immediate command

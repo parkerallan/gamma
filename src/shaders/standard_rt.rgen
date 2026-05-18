@@ -6,11 +6,20 @@ struct PrimaryPayload
     vec4 color;
     float hit_distance;
     uint depth;
+    // World-space position of the hit point as it was in the PREVIOUS frame.
+    // For static instances this equals the current frame's world hit; for
+    // rigid-body-moving instances the rchit computes
+    //   prev_world_pos = prev_O2W * (gl_WorldToObjectEXT * world_hit)
+    // so projecting through view_proj_prev produces a motion vector that
+    // includes the object's world-space motion, not just camera motion.
+    vec3 prev_world_pos;
 };
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
 layout(set = 0, binding = 1, rgba8) uniform image2D output_image;
 layout(set = 0, binding = 7, rgba16f) uniform image2D history_image;
+layout(set = 0, binding = 9, rg16f) uniform image2D motion_vector_image;
+layout(set = 0, binding = 10, r32f) uniform image2D linear_depth_image;
 
 layout(set = 0, binding = 2, std140) uniform SceneUniforms
 {
@@ -32,6 +41,9 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    mat4 view_proj_curr;
+    mat4 view_proj_prev;
+    vec4 jitter_state;
 } scene_uniforms;
 
 layout(location = 0) rayPayloadEXT PrimaryPayload primary_payload;
@@ -180,7 +192,7 @@ vec3 evaluate_point_light_emitter(vec3 ray_origin, vec3 ray_direction, float sce
     return result;
 }
 
-vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
+vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size, out vec3 world_origin_out, out vec3 world_direction_out)
 {
     vec2 ndc = (pixel_sample / launch_size) * 2.0 - 1.0;
 
@@ -189,6 +201,8 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
     vec3 view_direction = normalize(view_target.xyz / max(view_target.w, 0.0001));
     vec3 world_origin = (scene_uniforms.view_inverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 world_direction = normalize((scene_uniforms.view_inverse * vec4(view_direction, 0.0)).xyz);
+    world_origin_out = world_origin;
+    world_direction_out = world_direction;
 
     primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);
     primary_payload.hit_distance = 1e30;
@@ -214,12 +228,70 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
 void main()
 {
     vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
-    vec2 pixel_base = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    vec2 pixel_center = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
 
-    // True no-AA baseline: pixel-center sample, no jitter, no temporal
-    // accumulation. frame_index / accumulation_data are intentionally unused.
-    vec3 current_color = trace_primary_sample(pixel_base, launch_size);
+    // Halton(2,3) sub-pixel jitter for super-sampling under temporal
+    // accumulation. The host upload sets scene_uniforms.jitter_state.xy in
+    // pixel units; when TAA jitter is disabled the host writes zeros.
+    vec2 jitter_curr = scene_uniforms.jitter_state.xy;
+    vec2 jitter_prev = scene_uniforms.jitter_state.zw;
+    vec2 pixel_jittered = pixel_center + jitter_curr;
 
-    imageStore(history_image, ivec2(gl_LaunchIDEXT.xy), vec4(current_color, 1.0));
-    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(linear_to_srgb(current_color), 1.0));
+    vec3 world_origin;
+    vec3 world_direction;
+    vec3 current_color = trace_primary_sample(pixel_jittered, launch_size, world_origin, world_direction);
+
+    // Per-pixel motion vector in normalized [0,1] UV space.
+    //   curr_uv = pixel_center / launch_size           (unjittered current pixel UV)
+    //   prev_uv = projection of the same world point through the previous
+    //             frame's view*projection, with previous frame's jitter
+    //             un-applied so it matches that frame's UN-JITTERED pixel grid.
+    // We store (curr_uv - prev_uv); the TAA resolve samples history at
+    //   history_uv = curr_uv - mv.
+    vec2 curr_uv = pixel_center / launch_size;
+    vec2 mv = vec2(0.0);
+
+    bool hit_geometry = primary_payload.hit_distance < 1.0e29;
+    vec4 prev_clip;
+    if (hit_geometry)
+    {
+        // Use the previous-frame world position written by the rchit /
+        // grid-rmiss path. For a static instance this equals the current
+        // world hit (MV reflects camera motion only); for a rigid body
+        // that moved last frame -> this frame, the prev_world_pos lands
+        // where that object-space point was last frame, so the resulting
+        // MV includes the object's world-space motion.
+        prev_clip = scene_uniforms.view_proj_prev * vec4(primary_payload.prev_world_pos, 1.0);
+    }
+    else
+    {
+        // Sky / miss: project the ray direction with w=0 so the result
+        // reflects only camera rotation (camera translation has no parallax
+        // effect at infinity). For a standard pinhole projection
+        //   prev_clip = P_prev * V_prev * vec4(dir, 0)
+        // the w component is -view_z, so dividing by w gives the correct
+        // pinhole-projected NDC.x/y of the direction in the previous frame.
+        prev_clip = scene_uniforms.view_proj_prev * vec4(world_direction, 0.0);
+    }
+
+    if (abs(prev_clip.w) > 1.0e-6)
+    {
+        vec3 prev_ndc = prev_clip.xyz / prev_clip.w;
+        vec2 prev_uv = prev_ndc.xy * 0.5 + 0.5;
+        // Cancel the CURRENT jitter, not the previous one. The world hit P
+        // came from a ray jittered by jitter_curr, so prev_view_proj * P
+        // lands at a position offset by ~jitter_curr/size from where the
+        // unjittered current ray would have hit. Subtracting jitter_curr/size
+        // recovers the prev-frame UN-jittered pixel-grid location of the
+        // SAME world point. (history image stores values at integer pixel
+        // centers, so we want the unjittered grid for sampling.) For a
+        // static camera this yields MV = 0 exactly.
+        prev_uv -= jitter_curr / launch_size;
+        mv = curr_uv - prev_uv;
+    }
+
+    ivec2 pixel_xy = ivec2(gl_LaunchIDEXT.xy);
+    imageStore(history_image, pixel_xy, vec4(current_color, 1.0));
+    imageStore(motion_vector_image, pixel_xy, vec4(mv, 0.0, 0.0));
+    imageStore(linear_depth_image, pixel_xy, vec4(primary_payload.hit_distance, 0.0, 0.0, 0.0));
 }

@@ -72,6 +72,7 @@ add_game_shader(standard_rt_primary.rahit rahit)
 add_game_shader(standard_rt_shadow.rahit rahit)
 add_game_shader(standard_rt_fxaa.comp comp)
 add_game_shader(skinning.comp comp)
+add_game_shader(taa.comp comp)
 add_game_shader(overlay2d.vert vert)
 add_game_shader(overlay2d.frag frag)
 

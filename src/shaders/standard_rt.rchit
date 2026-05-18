@@ -9,6 +9,10 @@ struct PrimaryPayload
     vec4 color;
     float hit_distance;
     uint depth;
+    // See standard_rt.rgen for the contract -- rchit writes the previous
+    // frame's world-space hit position via prev_O2W * gl_WorldToObjectEXT,
+    // rgen consumes it to build a per-object motion vector.
+    vec3 prev_world_pos;
 };
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;
@@ -36,6 +40,9 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    mat4 view_proj_curr;
+    mat4 view_proj_prev;
+    vec4 jitter_state;
 } scene_uniforms;
 
 struct SceneVertex
@@ -124,6 +131,17 @@ layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
 };
 
 layout(set = 0, binding = 6) uniform sampler2D material_textures[256];
+
+// Per-instance object-to-world transforms from the PREVIOUS frame, in the
+// same order as the TLAS instance list (indexed by gl_InstanceID).  Static
+// instances and any new instance on its first frame have prev == current,
+// so prev_world_pos == world_hit and the rgen produces a camera-only MV.
+// Rigid bodies / kinematic objects that moved last->this frame produce a
+// per-object MV component on top of the camera MV.
+layout(set = 0, binding = 11, scalar) readonly buffer PrevInstanceTransforms
+{
+    mat4 transforms[];
+} prev_instance_transforms;
 
 const float PI = 3.1415926535897932384626433832795;
 const uint SOFT_SHADOW_SAMPLE_COUNT = 6u;
@@ -1393,4 +1411,13 @@ void main()
 
     primary_payload.color = vec4(shaded_color, 1.0);
     primary_payload.hit_distance = gl_HitTEXT;
+
+    // ---- Per-object motion-vector contribution ----
+    // World-space hit position this frame.
+    vec3 world_hit = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+    // Object-space hit position (independent of this instance's pose).
+    vec3 object_hit = (gl_WorldToObjectEXT * vec4(world_hit, 1.0)).xyz;
+    // Where the same object-space point was in the previous frame.
+    mat4 prev_o2w = prev_instance_transforms.transforms[gl_InstanceID];
+    primary_payload.prev_world_pos = (prev_o2w * vec4(object_hit, 1.0)).xyz;
 }
