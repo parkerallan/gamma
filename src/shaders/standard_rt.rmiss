@@ -9,11 +9,6 @@ struct PrimaryPayload
     vec4 color;
     float hit_distance;
     uint depth;
-    // See standard_rt.rgen for the full contract. On a sky miss this stays
-    // at vec3(0) (rgen uses direction reprojection w=0 and ignores the
-    // field); on a grid hit we set it to the world plane intersection so
-    // the grid reprojects as a static surface.
-    vec3 prev_world_pos;
 };
 
 layout(set = 0, binding = 2, std140) uniform SceneUniforms
@@ -36,9 +31,6 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
-    mat4 view_proj_curr;
-    mat4 view_proj_prev;
-    vec4 jitter_state;
 } scene_uniforms;
 
 layout(set = 0, binding = 8) uniform sampler2D skybox_texture;
@@ -108,50 +100,17 @@ vec3 evaluate_grid(vec3 world_position)
 void main()
 {
     vec3 color = evaluate_sky(normalize(gl_WorldRayDirectionEXT));
-    // Default hit distance for sky pixels.
-    float final_hit_distance = 1e30;
     if (abs(gl_WorldRayDirectionEXT.y) > 0.0001)
     {
         float plane_t = -gl_WorldRayOriginEXT.y / gl_WorldRayDirectionEXT.y;
-        if (plane_t > 0.0 && scene_uniforms.grid_data.x >= 0.5)
+        if (plane_t > 0.0)
         {
-            vec3 plane_position = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * plane_t;
-            float extent = scene_uniforms.grid_origin_extent.w;
-            vec2 grid_origin = scene_uniforms.grid_origin_extent.xz;
-            vec2 local = plane_position.xz - grid_origin;
-            // Only treat this miss as a grid hit (with finite hit_distance
-            // so the TAA reprojection uses world-point reprojection rather
-            // than direction-only sky reprojection) when we're inside the
-            // grid extent. Outside the grid we fall back to sky shading.
-            if (abs(local.x) <= extent && abs(local.y) <= extent)
-            {
-                color = evaluate_grid(plane_position);
-                final_hit_distance = plane_t;
-            }
-        }
-        else if (plane_t > 0.0)
-        {
-            // Grid disabled but the legacy code still shaded the floor at
-            // y=0; preserve that visual but keep hit_distance as sky so we
-            // don't fight the sky reprojection path.
             vec3 plane_position = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * plane_t;
             color = evaluate_grid(plane_position);
         }
     }
 
     primary_payload.color = vec4(color, 1.0);
-    primary_payload.hit_distance = final_hit_distance;
+    primary_payload.hit_distance = 1e30;
     primary_payload.depth = primary_payload.depth;
-    // Default: sky -- rgen branches on hit_distance and uses direction
-    // reprojection (w=0) for the sky case, so prev_world_pos is unused.
-    // For a grid hit we store the plane intersection so the grid is
-    // treated as a static world-space surface in the MV reprojection.
-    if (final_hit_distance < 1e29)
-    {
-        primary_payload.prev_world_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * final_hit_distance;
-    }
-    else
-    {
-        primary_payload.prev_world_pos = vec3(0.0);
-    }
 }
