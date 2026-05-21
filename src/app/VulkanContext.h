@@ -43,7 +43,13 @@ struct VulkanWindowContext
 class VulkanContext
 {
 public:
-    bool Initialize(SDL_Window* window);
+    // When prefer_low_latency is true, the main swapchain is created with
+    // MAILBOX (or IMMEDIATE) instead of FIFO. The standalone game wants this:
+    // with FIFO on a single swapchain, any frame where GPU time exceeds the
+    // vsync interval causes vkQueuePresentKHR to back-pressure the queue,
+    // ballooning input-to-photon latency while the present rate counter still
+    // reads the refresh rate. MAILBOX avoids that stall.
+    bool Initialize(SDL_Window* window, bool prefer_low_latency = false);
     void Shutdown();
     void WaitIdle();
     void RenderFrame(SDL_Window* window, ImDrawData* draw_data, const ImVec4& clear_color);
@@ -98,7 +104,7 @@ private:
     void SavePipelineCache();
     bool CreateSurface(SDL_Window* window);
     bool CreateSurface(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data);
-    void SetupWindowData(SDL_Window* window);
+    void SetupWindowData(SDL_Window* window, bool prefer_low_latency = false);
     void SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data, bool prefer_low_latency = false);
     void EnsureSwapchain(SDL_Window* window);
     void EnsureSwapchain(SDL_Window* window, VulkanWindowContext& window_context);

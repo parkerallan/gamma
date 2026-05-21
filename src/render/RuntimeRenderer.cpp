@@ -2504,6 +2504,7 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
         ShutdownScriptRuntime();
         return false;
     }
+    ray_tracing_.SetTAAEnabled(true);
 
     scene_2d_renderer_.Initialize(context);
     skybox_renderer_.Initialize(context);
@@ -2643,7 +2644,7 @@ bool RuntimeRenderer::EnsureSkinningPipeline()
 
     if (skinning_descriptor_set_layout_ == VK_NULL_HANDLE)
     {
-        std::array<VkDescriptorSetLayoutBinding, 4> bindings = {};
+        std::array<VkDescriptorSetLayoutBinding, 5> bindings = {};
         for (std::uint32_t i = 0; i < bindings.size(); ++i)
         {
             bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
@@ -2744,6 +2745,7 @@ void RuntimeRenderer::ReleaseSkinningResources(GpuSkinningResources& resources)
     ReleaseBuffer(resources.bind_pose_buffer);
     ReleaseBuffer(resources.influence_buffer);
     ReleaseBuffer(resources.palette_buffer);
+    ReleaseBuffer(resources.prev_position_buffer);
     // Descriptor sets are freed implicitly when the pool is reset/destroyed.
     resources.descriptor_set = VK_NULL_HANDLE;
     resources.ready = false;
@@ -5610,6 +5612,18 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
             mesh_input.key = mesh_key;
             mesh_input.vertex_device_address = mesh_entry.vertex_buffer.device_address;
             mesh_input.index_device_address = mesh_entry.index_buffer.device_address;
+            // For skinned meshes, surface the previous-frame skinned-position
+            // buffer device address to the RT closest-hit (per-vertex
+            // motion vectors). Static meshes leave this at 0.
+            {
+                auto skin_it = gpu_skinning_resources_.find(object.model_path);
+                if (skin_it != gpu_skinning_resources_.end() && skin_it->second.ready &&
+                    skin_it->second.prev_position_buffer.device_address != 0)
+                {
+                    mesh_input.prev_position_device_address =
+                        skin_it->second.prev_position_buffer.device_address;
+                }
+            }
             mesh_input.vertex_count = mesh_entry.vertex_count;
             mesh_input.vertex_stride = static_cast<std::uint32_t>(sizeof(SceneGpuVertex));
             mesh_input.index_count = mesh_entry.index_count;
@@ -6228,6 +6242,9 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                         static_cast<VkDeviceSize>(influence_storage.size() * sizeof(GpuVertexInfluence));
                     const VkDeviceSize palette_size =
                         static_cast<VkDeviceSize>(total_bone_count * 16 * sizeof(float));
+                    // 3 floats per vertex = previous-frame skinned object-space position.
+                    const VkDeviceSize prev_pos_size =
+                        static_cast<VkDeviceSize>(total_vertex_count) * 3u * sizeof(float);
 
                     const bool buffers_ok =
                         CreateVulkanBuffer(*vulkan_context_, bind_size,
@@ -6241,13 +6258,35 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                         CreateVulkanBuffer(*vulkan_context_, palette_size,
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            resources.palette_buffer);
+                            resources.palette_buffer) &&
+                        CreateVulkanBuffer(*vulkan_context_, prev_pos_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            resources.prev_position_buffer);
+
+                    // Seed the prev-position buffer with the bind-pose positions
+                    // so the very first frame's motion vector reads sane data.
+                    std::vector<float> prev_pose_seed;
+                    if (buffers_ok)
+                    {
+                        prev_pose_seed.resize(static_cast<std::size_t>(total_vertex_count) * 3u);
+                        for (std::uint32_t v = 0; v < total_vertex_count; ++v)
+                        {
+                            const SceneGpuVertex& src = bind_pose_vertices[v];
+                            prev_pose_seed[v * 3u + 0u] = src.position[0];
+                            prev_pose_seed[v * 3u + 1u] = src.position[1];
+                            prev_pose_seed[v * 3u + 2u] = src.position[2];
+                        }
+                    }
                     bool uploaded_static =
                         buffers_ok &&
                         UploadBufferData(vulkan_context_->GetDevice(), resources.bind_pose_buffer,
                             bind_pose_vertices.data(), static_cast<std::size_t>(bind_size)) &&
                         UploadBufferData(vulkan_context_->GetDevice(), resources.influence_buffer,
-                            influence_storage.data(), static_cast<std::size_t>(inf_size));
+                            influence_storage.data(), static_cast<std::size_t>(inf_size)) &&
+                        UploadBufferData(vulkan_context_->GetDevice(), resources.prev_position_buffer,
+                            prev_pose_seed.data(), static_cast<std::size_t>(prev_pos_size));
 
                     VkDescriptorSet desc_set = VK_NULL_HANDLE;
                     if (uploaded_static)
@@ -6267,14 +6306,15 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
 
                     if (uploaded_static && desc_set != VK_NULL_HANDLE)
                     {
-                        std::array<VkDescriptorBufferInfo, 4> buf_infos = {};
+                        std::array<VkDescriptorBufferInfo, 5> buf_infos = {};
                         buf_infos[0] = {resources.bind_pose_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[1] = {mesh_cache_it->second.vertex_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[2] = {resources.influence_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[3] = {resources.palette_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[4] = {resources.prev_position_buffer.buffer, 0, VK_WHOLE_SIZE};
 
-                        std::array<VkWriteDescriptorSet, 4> writes = {};
-                        for (std::uint32_t i = 0; i < 4; ++i)
+                        std::array<VkWriteDescriptorSet, 5> writes = {};
+                        for (std::uint32_t i = 0; i < writes.size(); ++i)
                         {
                             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                             writes[i].dstSet = desc_set;
@@ -6335,6 +6375,7 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                 dispatch.pipeline_layout = skinning_pipeline_layout_;
                 dispatch.descriptor_set = resources.descriptor_set;
                 dispatch.output_vertex_buffer = mesh_cache_it->second.vertex_buffer.buffer;
+                dispatch.prev_position_buffer = resources.prev_position_buffer.buffer;
                 dispatch.vertex_count = resources.vertex_count;
                 dispatch.bone_count = resources.bone_count;
                 dispatch.group_count_x = (resources.vertex_count + 63u) / 64u;

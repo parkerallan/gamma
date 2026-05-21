@@ -3,12 +3,16 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 struct PrimaryPayload
 {
     vec4 color;
     float hit_distance;
     uint depth;
+    vec3 pos_ws_curr;
+    vec3 pos_ws_prev;
+    vec3 shading_normal;
 };
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;
@@ -36,6 +40,10 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    mat4 prev_view_projection;
+    mat4 current_view_projection;
+    vec4 taa_params;
+    vec4 jitter_offset;
 } scene_uniforms;
 
 struct SceneVertex
@@ -57,10 +65,22 @@ layout(buffer_reference, scalar) readonly buffer IndexBuffer
     uint indices[];
 };
 
+// Per-vertex previous-frame skinned object-space positions.
+// Layout: tightly-packed vec3 per vertex (12 bytes/vertex). Indexed by
+// the same vertex index the IndexBuffer resolves to. The MeshRecord's
+// `prev_position_buffer` is zero for static meshes -- the closest-hit
+// detects that via `uint64_t(prev_position_buffer) == 0` and falls back
+// to the current object-space position.
+layout(buffer_reference, scalar) readonly buffer PrevPositionBuffer
+{
+    vec3 positions[];
+};
+
 struct MeshRecord
 {
     VertexBuffer vertex_buffer;
     IndexBuffer index_buffer;
+    PrevPositionBuffer prev_position_buffer;
     uint vertex_count;
     uint vertex_stride;
     uint index_count;
@@ -124,6 +144,20 @@ layout(set = 0, binding = 5, scalar) readonly buffer MaterialRecordBuffer
 };
 
 layout(set = 0, binding = 6) uniform sampler2D material_textures[256];
+
+// Per-instance motion-vector record (current + previous transform).
+// Indexed via gl_InstanceID, NOT gl_InstanceCustomIndexEXT (which carries the
+// mesh index). Layout matches `RayTracing::InstanceRecordGpu` exactly.
+struct InstanceRecord
+{
+    mat4 current_transform;
+    mat4 prev_transform;
+};
+
+layout(set = 0, binding = 10, std430) readonly buffer InstanceRecordBuffer
+{
+    InstanceRecord instance_records[];
+};
 
 const float PI = 3.1415926535897932384626433832795;
 const uint SOFT_SHADOW_SAMPLE_COUNT = 6u;
@@ -1393,4 +1427,31 @@ void main()
 
     primary_payload.color = vec4(shaded_color, 1.0);
     primary_payload.hit_distance = gl_HitTEXT;
+    primary_payload.shading_normal = world_normal;
+
+    // --- Per-object motion-vector data ---
+    // Interpolate the OBJECT-space CURRENT-frame hit position. For static
+    // meshes this is just the bind-pose vertex; for skinned meshes the
+    // skinning compute pass writes per-frame skinned positions here.
+    vec3 pos_obj_curr =
+        vertex0.position * barycentrics.x +
+        vertex1.position * barycentrics.y +
+        vertex2.position * barycentrics.z;
+    // Previous-frame object-space position. If the mesh has a per-vertex
+    // prev_position buffer (skinned mesh, populated by the skinning
+    // compute pass), interpolate from it. Otherwise (static mesh, first
+    // frame, or no skinning) use the current position -- the motion
+    // contribution is then driven entirely by the per-instance
+    // prev_transform.
+    vec3 pos_obj_prev = pos_obj_curr;
+    if (uint64_t(mesh.prev_position_buffer) != 0ul)
+    {
+        vec3 p0 = mesh.prev_position_buffer.positions[index0];
+        vec3 p1 = mesh.prev_position_buffer.positions[index1];
+        vec3 p2 = mesh.prev_position_buffer.positions[index2];
+        pos_obj_prev = p0 * barycentrics.x + p1 * barycentrics.y + p2 * barycentrics.z;
+    }
+    InstanceRecord inst = instance_records[gl_InstanceID];
+    primary_payload.pos_ws_curr = (inst.current_transform * vec4(pos_obj_curr, 1.0)).xyz;
+    primary_payload.pos_ws_prev = (inst.prev_transform    * vec4(pos_obj_prev, 1.0)).xyz;
 }

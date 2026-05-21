@@ -23,7 +23,11 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, std430) readonly  buffer BindPoseBuffer  { uint  data[]; } bind_pose;
-layout(set = 0, binding = 1, std430) writeonly buffer OutputBuffer    { uint  data[]; } output_vertices;
+// NOTE: output_vertices is no longer `writeonly` -- the per-vertex
+// motion-vector path reads the *existing* position at the start of each
+// dispatch (which is the previous frame's skinned output) and copies it
+// into prev_position before overwriting it with the new skinned position.
+layout(set = 0, binding = 1, std430)           buffer OutputBuffer    { uint  data[]; } output_vertices;
 
 // 4 bone indices (uvec4) + 4 weights (vec4) per vertex = 8 uints.
 struct VertexInfluence
@@ -33,6 +37,10 @@ struct VertexInfluence
 };
 layout(set = 0, binding = 2, std430) readonly buffer InfluenceBuffer { VertexInfluence data[]; } influences;
 layout(set = 0, binding = 3, std430) readonly buffer PaletteBuffer   { mat4 bones[]; }            palette;
+// Per-vertex previous-frame skinned object-space positions. Tightly
+// packed vec3 per vertex. Surfaced to the RT closest-hit via the mesh
+// record's `prev_position_buffer` field.
+layout(set = 0, binding = 4, std430) writeonly buffer PrevPositionBuffer { float data[]; } prev_positions;
 
 layout(push_constant) uniform PushConstants
 {
@@ -71,6 +79,19 @@ void main()
     }
 
     const uint base = vertex_index * kVertexUintCount;
+
+    // Motion-vector support: capture the *previous frame's* skinned
+    // position (which is currently sitting in output_vertices, since this
+    // dispatch hasn't written to it yet) and stash it in prev_positions.
+    // First frame: output_vertices still holds the bind pose (the host seeds
+    // it during mesh upload), so prev_positions ends up matching the bind
+    // pose -- safe.
+    {
+        const uint pp_base = vertex_index * 3u;
+        prev_positions.data[pp_base + 0u] = uintBitsToFloat(output_vertices.data[base + 0u]);
+        prev_positions.data[pp_base + 1u] = uintBitsToFloat(output_vertices.data[base + 1u]);
+        prev_positions.data[pp_base + 2u] = uintBitsToFloat(output_vertices.data[base + 2u]);
+    }
 
     // --- Read bind-pose vertex ---
     const vec3 bind_position = read_vec3(base + 0u);

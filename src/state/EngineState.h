@@ -94,6 +94,45 @@ struct EngineState
     int auto_save_interval_minutes = 5;
     bool highlight_drop_targets = true;
     bool wrap_editor_text = false;
+
+    // --- Temporal AA debug / tuning ---
+    // Master enable. When false, TAA is bypassed and the raw RT output is shown.
+    bool taa_enabled = true;
+    // Visualisation mode for taa.comp:
+    //   0 = normal
+    //   1 = motion vectors  (R = max(+x), G = max(+y), B = max(-x or -y), scaled)
+    //   2 = pixel weight    (grayscale; 1.0 = full current, 0 = full history)
+    //   3 = jitter offset   (R = jitter.x+0.5, G = jitter.y+0.5)
+    //   4 = current only    (skip history blend)
+    //   5 = history only    (skip current sample)
+    int taa_viz_mode = 0;
+    // 3x3 neighborhood color clamp width (sigma multiplier) on STATIC pixels.
+    // 0 disables NCC entirely.
+    float taa_variance_scale = 1.25f;
+    // 3x3 NCC clamp width on FAST-MOVING pixels. Lerped against
+    // taa_variance_scale using the per-pixel motion weight. Tight clamp
+    // here suppresses directional history streaks on movers without
+    // sacrificing static-pixel smoothing.
+    float taa_variance_scale_moving = 0.75f;
+    // Anti-sparkle clamp strength
+    float taa_anti_sparkle = 0.25f;
+    // Maximum per-frame blend weight of current sample into history.
+    float taa_history_blend = 0.1f;
+    // 0 = legacy motion vectors (no jitter compensation, may shimmer);
+    // 1 = subtract jitter_curr from uv_curr (pixel-center reprojection).
+    // Slider lets the user blend between the two live to diagnose.
+    float taa_jitter_compensation = 0.0f;
+    // Adaptive supersampling on undersampled pixels (hair, thin specular,
+    // alpha edges). Drives sample count from a 3x3 luma-contrast probe of
+    // last frame's 1-spp output: pixels above the threshold get up to
+    // taa_adaptive_max_samples primary rays this frame.
+    bool  taa_adaptive_enabled = false;
+    int   taa_adaptive_max_samples = 2;     // 1..8
+    float taa_adaptive_threshold = 0.25f;   // relative luma contrast, 0..1
+    // 0 = pure average (clean, but subpixel strands look semi-transparent);
+    // 1 = bias toward the brightest sample where samples disagree strongly,
+    // restoring hair/highlight opacity while keeping smooth surfaces stable.
+    float taa_adaptive_preservation = 0.7f;
     bool request_files_tree_refresh = false;
     bool play_start_requested = false;
     bool play_stop_requested = false;
@@ -890,6 +929,17 @@ struct EngineState
             else if (key == "autoSaveIntervalMinutes") auto_save_interval_minutes = parse_int(value, 5);
             else if (key == "uiScale") ui_scale = parse_float(value, 1.0f);
             else if (key == "versionControlRemoteUrl") version_control_remote_url = value;
+            else if (key == "taaEnabled") taa_enabled = parse_bool(value);
+            else if (key == "taaVizMode") taa_viz_mode = parse_int(value, 0);
+            else if (key == "taaVarianceScale") taa_variance_scale = parse_float(value, 1.25f);
+            else if (key == "taaVarianceScaleMoving") taa_variance_scale_moving = parse_float(value, 0.75f);
+            else if (key == "taaAntiSparkle") taa_anti_sparkle = parse_float(value, 0.25f);
+            else if (key == "taaHistoryBlend") taa_history_blend = parse_float(value, 0.1f);
+            else if (key == "taaJitterCompensation") taa_jitter_compensation = parse_float(value, 0.0f);
+            else if (key == "taaAdaptiveEnabled") taa_adaptive_enabled = parse_bool(value);
+            else if (key == "taaAdaptiveMaxSamples") taa_adaptive_max_samples = parse_int(value, 2);
+            else if (key == "taaAdaptiveThreshold") taa_adaptive_threshold = parse_float(value, 0.25f);
+            else if (key == "taaAdaptivePreservation") taa_adaptive_preservation = parse_float(value, 0.7f);
         }
 
         return true;
@@ -942,6 +992,19 @@ struct EngineState
         output << "\n";
         output << "# Version Control\n";
         output << "versionControlRemoteUrl=" << version_control_remote_url << "\n";
+        output << "\n";
+        output << "# Temporal AA debug\n";
+        output << "taaEnabled=" << write_bool(taa_enabled) << "\n";
+        output << "taaVizMode=" << taa_viz_mode << "\n";
+        output << "taaVarianceScale=" << taa_variance_scale << "\n";
+        output << "taaVarianceScaleMoving=" << taa_variance_scale_moving << "\n";
+        output << "taaAntiSparkle=" << taa_anti_sparkle << "\n";
+        output << "taaHistoryBlend=" << taa_history_blend << "\n";
+        output << "taaJitterCompensation=" << taa_jitter_compensation << "\n";
+        output << "taaAdaptiveEnabled=" << write_bool(taa_adaptive_enabled) << "\n";
+        output << "taaAdaptiveMaxSamples=" << taa_adaptive_max_samples << "\n";
+        output << "taaAdaptiveThreshold=" << taa_adaptive_threshold << "\n";
+        output << "taaAdaptivePreservation=" << taa_adaptive_preservation << "\n";
 
         return output.good();
     }

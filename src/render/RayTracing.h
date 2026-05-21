@@ -70,6 +70,15 @@ public:
         std::string key;
         VkDeviceAddress vertex_device_address = 0;
         VkDeviceAddress index_device_address = 0;
+        // Optional: device address of a tightly-packed `vec3` per-vertex
+        // buffer holding the *previous* frame's skinned object-space
+        // position. Non-zero only for animated/skinned meshes; the RT
+        // closest-hit interpolates `pos_obj_prev` from this buffer when
+        // computing per-object motion vectors. For static meshes
+        // and the very first frame it stays 0 and the shader falls back
+        // to `pos_obj_curr` (per-vertex contribution is zero, motion is
+        // driven entirely by the per-instance prev_transform).
+        VkDeviceAddress prev_position_device_address = 0;
         std::uint32_t vertex_count = 0;
         std::uint32_t vertex_stride = 0;
         std::uint32_t index_count = 0;
@@ -83,6 +92,12 @@ public:
         std::string key;
         std::string mesh_key;
         std::array<float, 16> transform = {};
+        // Optional caller-supplied previous-frame transform. If the caller
+        // does not supply one (left default-initialized to all zeros), the
+        // ray tracer uses its own cached previous transform for this
+        // instance key, falling back to `transform` on the first frame.
+        std::array<float, 16> prev_transform = {};
+        bool has_prev_transform = false;
     };
 
     struct GpuBuffer
@@ -140,6 +155,36 @@ public:
     void SetSkyboxTexture(VkImageView skybox_view);
     void SetSkyboxRotation(float rotation_degrees);
 
+    // TAA (temporal anti-aliasing) controls. Off by default until the host
+    // explicitly opts in (the editor viewport and the runtime renderer both
+    // enable it on startup).
+    void SetTAAEnabled(bool enabled);
+    bool IsTAAEnabled() const { return taa_enabled_; }
+
+    // Runtime-tunable TAA debug knobs (wired to the editor SettingsPanel).
+    struct TaaDebugSettings
+    {
+        int   viz_mode               = 0;     // 0=normal, 1=mv, 2=pixel weight, 3=jitter, 4=current, 5=history
+        float variance_scale         = 1.25f; // 3x3 NCC clamp width on static pixels
+        float variance_scale_moving  = 0.75f; // 3x3 NCC clamp width on moving pixels (lerped by motion_weight). Tighter than static to kill disocclusion ghost trails (e.g. a foreground mover passing in front of a static surface).
+        float anti_sparkle           = 0.25f; // firefly clamp
+        float history_blend          = 0.1f;  // max current weight
+        float jitter_compensation    = 0.0f;  // 0..1 strength of jitter_curr subtraction in motion vectors
+        // Adaptive supersampling on undersampled pixels (hair, thin specular,
+        // alpha-tested edges). Driven by 3x3 luma contrast probe of last
+        // frame's 1-spp output.
+        bool  adaptive_enabled       = false;
+        int   adaptive_max_samples   = 2;     // 1..8 primary rays for high-contrast pixels
+        float adaptive_threshold     = 0.25f; // relative luma contrast trigger
+        // 0 = pure average across samples (clean, but subpixel strands look
+        // transparent because most samples miss them). 1 = bias toward the
+        // brightest sample on high-spread pixels (preserves hair/highlight
+        // opacity but can amplify HDR fireflies). 0.7 is a balanced default.
+        float adaptive_preservation  = 0.7f;
+    };
+    void SetTaaDebugSettings(const TaaDebugSettings& settings) { taa_debug_ = settings; }
+    const TaaDebugSettings& GetTaaDebugSettings() const { return taa_debug_; }
+
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
 
@@ -155,6 +200,10 @@ public:
         VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         VkBuffer output_vertex_buffer = VK_NULL_HANDLE;
+        // Per-vertex prev-position buffer written by the same compute
+        // dispatch. Needs the same compute->RT barrier as output_vertex_buffer
+        // because the closest-hit shader reads it for motion vectors.
+        VkBuffer prev_position_buffer = VK_NULL_HANDLE;
         std::uint32_t group_count_x = 0;
         std::uint32_t vertex_count = 0;
         std::uint32_t bone_count = 0;
@@ -184,12 +233,35 @@ private:
     {
         VkDeviceAddress vertex_buffer_address = 0;
         VkDeviceAddress index_buffer_address = 0;
+        // Per-vertex previous-frame skinned position buffer (vec3
+        // per vertex). Zero for static meshes; non-zero for skinned
+        // meshes, populated by the GPU skinning compute pass before the
+        // BLAS refit. The closest-hit shader treats a zero address as
+        // "no per-vertex prev positions, use pos_obj_curr instead".
+        VkDeviceAddress prev_position_buffer_address = 0;
         std::uint32_t vertex_count = 0;
         std::uint32_t vertex_stride = 0;
         std::uint32_t index_count = 0;
         std::uint32_t section_offset = 0;
         std::uint32_t section_count = 0;
         std::uint32_t material_offset = 0;
+    };
+
+    // Per-instance motion-vector record. Indexed in the closest
+    // hit shader via `gl_InstanceID` (matches the index of the TLAS
+    // instance descriptor created in UpdateScene). Both transforms are
+    // 4x4 row-major-on-host / column-major-in-GLSL (mat4 in scalar layout
+    // round-trips identically when uploaded as a flat std::array<float,16>).
+    struct InstanceRecordGpu
+    {
+        std::array<float, 16> current_transform = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                   0.0f, 1.0f, 0.0f, 0.0f,
+                                                   0.0f, 0.0f, 1.0f, 0.0f,
+                                                   0.0f, 0.0f, 0.0f, 1.0f};
+        std::array<float, 16> prev_transform    = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                   0.0f, 1.0f, 0.0f, 0.0f,
+                                                   0.0f, 0.0f, 1.0f, 0.0f,
+                                                   0.0f, 0.0f, 0.0f, 1.0f};
     };
 
     struct SectionRecordGpu
@@ -254,6 +326,38 @@ private:
         std::uint32_t section_count = 0;
         std::uint32_t texture_count = 0;
         std::array<std::uint32_t, 4> accumulation_data = {0, 0, 0, 0};
+        // Row-major previous-frame view*projection matrix used by the ray-gen
+        // shader to compute camera-space motion vectors for TAA reprojection.
+        std::array<float, 16> prev_view_projection = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                      0.0f, 1.0f, 0.0f, 0.0f,
+                                                      0.0f, 0.0f, 1.0f, 0.0f,
+                                                      0.0f, 0.0f, 0.0f, 1.0f};
+        // Current-frame view*projection used by the ray-gen shader to
+        // project the per-instance interpolated current world position to
+        // screen space (motion-vector convention).
+        std::array<float, 16> current_view_projection = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                         0.0f, 1.0f, 0.0f, 0.0f,
+                                                         0.0f, 0.0f, 1.0f, 0.0f,
+                                                         0.0f, 0.0f, 0.0f, 1.0f};
+        // (enabled, variance_scale, anti_sparkle, _).
+        std::array<float, 4> taa_params = {0.0f, 1.0f, 1.0f, 0.0f};
+        // (jitter_x_px, jitter_y_px, prev_jitter_x_px, prev_jitter_y_px).
+        std::array<float, 4> jitter_offset = {0.0f, 0.0f, 0.0f, 0.0f};
+        // Adaptive supersampling driven by last frame's 3x3 luma contrast.
+        // .x = enabled (0/1), .y = max_samples (float, 1..8),
+        // .z = contrast_threshold (e.g. 0.25), .w = feature_preservation (0..1).
+        std::array<float, 4> adaptive_params = {0.0f, 1.0f, 0.25f, 0.7f};
+    };
+
+    // CPU-side parameters fed into the TAA compute UBO each frame.
+    struct TaaUniformBlock
+    {
+        std::array<std::uint32_t, 4> extent = {0, 0, 0, 0};
+        std::array<float, 4> jitter = {0.0f, 0.0f, 0.0f, 0.0f};
+        // .x = history_valid, .y = variance_scale, .z = anti_sparkle, .w = history_blend_max
+        std::array<float, 4> params = {0.0f, 1.0f, 1.0f, 0.1f};
+        // .x = viz_mode (int cast to float), .yzw = reserved
+        std::array<float, 4> debug = {0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     void ResetAccumulationState();
@@ -263,6 +367,17 @@ private:
     void DestroyPipelineResources();
     bool EnsurePipelineResources();
     bool UpdateDescriptors();
+
+    // ---- TAA helpers ----
+    bool EnsureTaaResources();
+    bool UpdateTaaDescriptors();
+    void DestroyTaaResources();
+    // Compute and cache an updated previous-frame view*projection matrix
+    // from the current frame's inverses; updates the host UBO field.
+    void ComputePrevViewProjection(
+        const std::array<float, 16>& view_inverse,
+        const std::array<float, 16>& projection_inverse,
+        std::array<float, 16>& out_view_projection);
 
     VulkanContext* vulkan_context_ = nullptr;
     bool available_ = false;
@@ -296,6 +411,17 @@ private:
     GpuBuffer section_record_buffer_{};
     GpuBuffer material_record_buffer_{};
     GpuBuffer instance_buffer_{};
+    // Per-instance record buffer (current + previous transform),
+    // indexed by `gl_InstanceID` in the closest-hit shader. Rebuilt every
+    // UpdateScene call (every frame on dynamic scenes).
+    GpuBuffer instance_record_buffer_{};
+    std::vector<InstanceRecordGpu> instance_records_cpu_;
+    std::uint32_t instance_record_buffer_capacity_ = 0;
+    // Cache of the previous frame's transform per instance key. Looked up
+    // in UpdateScene to populate `InstanceRecordGpu::prev_transform`; new
+    // instances use their current transform as their first prev (so the
+    // first frame collapses motion to camera-only reprojection).
+    std::unordered_map<std::string, std::array<float, 16>> prev_instance_transforms_;
     VkImage fallback_texture_image_ = VK_NULL_HANDLE;
     VkDeviceMemory fallback_texture_memory_ = VK_NULL_HANDLE;
     VkImageView fallback_texture_view_ = VK_NULL_HANDLE;
@@ -370,4 +496,46 @@ private:
 
     // Guards vkUpdateDescriptorSets – set only when descriptor bindings actually change.
     bool descriptors_dirty_ = false;
+
+    // ---- TAA state ----
+    // Motion vector image: rg16f, written by the ray-gen shader, sampled
+    // (point) by the TAA compute pass.
+    VkImage motion_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory motion_memory_ = VK_NULL_HANDLE;
+    VkImageView motion_view_ = VK_NULL_HANDLE;
+    VkImageLayout motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Linear-depth G-buffer ping-pong (R32_SFLOAT). Each frame the rgen
+    // writes the primary-ray hit distance into `depth_images_[depth_slot_]`
+    // and the TAA compute pass reads the *other* slot as previous-frame
+    // depth for the 4-tap bilateral disocclusion test
+    // (`asvgf_temporal.comp:222`). On a miss the rgen writes 1e30 so sky->sky
+    // reprojections accept and sky->object reprojections reject.
+    VkImage depth_images_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory depth_memories_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView depth_views_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageLayout depth_layouts_[2] = {VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED};
+    // Ping-pong storage for the previous and current TAA results (PQ-encoded
+    // HDR). Index `taa_parity_` is the *current* output; the other slot is
+    // sampled as the "previous frame" input.
+    VkImage taa_images_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory taa_memories_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView taa_views_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageLayout taa_layouts_[2] = {VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkSampler taa_sampler_ = VK_NULL_HANDLE;
+    GpuBuffer taa_uniform_buffer_{};
+    VkDescriptorSetLayout taa_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout taa_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline taa_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet taa_descriptor_sets_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool taa_descriptors_dirty_ = false;
+    bool taa_enabled_ = false;
+    bool taa_history_valid_ = false;
+    std::uint32_t taa_parity_ = 0;
+    TaaDebugSettings taa_debug_{};
+    std::array<float, 16> prev_view_projection_ = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                   0.0f, 1.0f, 0.0f, 0.0f,
+                                                   0.0f, 0.0f, 1.0f, 0.0f,
+                                                   0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 2> taa_prev_jitter_px_ = {0.0f, 0.0f};
+    std::uint32_t taa_jitter_index_ = 0;
 };

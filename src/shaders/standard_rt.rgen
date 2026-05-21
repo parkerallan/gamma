@@ -6,11 +6,22 @@ struct PrimaryPayload
     vec4 color;
     float hit_distance;
     uint depth;
+    vec3 pos_ws_curr;
+    vec3 pos_ws_prev;
 };
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
 layout(set = 0, binding = 1, rgba8) uniform image2D output_image;
 layout(set = 0, binding = 7, rgba16f) uniform image2D history_image;
+layout(set = 0, binding = 9, rg16f) uniform image2D motion_image;
+// Linear-depth G-buffer for this frame. The TAA pass reads this (curr) and
+// the previous frame's slot to do per-tap bilateral disocclusion
+// (asvgf_temporal.comp:222). Distance-from-camera is used as the depth
+// scalar — it's continuous across the camera dolly (so static surfaces
+// don't false-reject) and discriminates surfaces in front of / behind one
+// another in world space (which is exactly the helmet-vs-fox disocclusion
+// case we're trying to gate).
+layout(set = 0, binding = 11, r32f) uniform image2D depth_image;
 
 layout(set = 0, binding = 2, std140) uniform SceneUniforms
 {
@@ -32,6 +43,11 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    mat4 prev_view_projection;
+    mat4 current_view_projection;
+    vec4 taa_params;       // .x = enabled, .y = variance, .z = anti_sparkle, .w = jitter_compensation
+    vec4 jitter_offset;    // .xy = current sub-pixel jitter (px), .zw = previous
+    vec4 adaptive_params;  // .x = enabled (0/1), .y = max_samples, .z = contrast_threshold, .w = reserved
 } scene_uniforms;
 
 layout(location = 0) rayPayloadEXT PrimaryPayload primary_payload;
@@ -193,6 +209,8 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
     primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);
     primary_payload.hit_distance = 1e30;
     primary_payload.depth = 0;
+    primary_payload.pos_ws_curr = vec3(0.0);
+    primary_payload.pos_ws_prev = vec3(0.0);
     traceRayEXT(
         top_level_as,
         gl_RayFlagsNoneEXT,
@@ -215,11 +233,163 @@ void main()
 {
     vec2 launch_size = vec2(gl_LaunchSizeEXT.xy);
     vec2 pixel_base = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    ivec2 ipos = ivec2(gl_LaunchIDEXT.xy);
 
-    // True no-AA baseline: pixel-center sample, no jitter, no temporal
-    // accumulation. frame_index / accumulation_data are intentionally unused.
-    vec3 current_color = trace_primary_sample(pixel_base, launch_size);
+    // Sub-pixel jitter (sourced from the host so the matrices and the jitter
+    // stay in lock-step). When TAA is off the host writes (0, 0) here.
+    vec2 jitter = scene_uniforms.jitter_offset.xy;
 
-    imageStore(history_image, ivec2(gl_LaunchIDEXT.xy), vec4(current_color, 1.0));
-    imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(linear_to_srgb(current_color), 1.0));
+    // ---- Adaptive supersampling -------------------------------------------
+    // Probe last frame's 1-spp result (history_image holds the rgen output
+    // from the previous frame at the start of THIS frame's launch) for local
+    // luma contrast. High contrast => the pixel is sitting on an undersampled
+    // feature (subpixel hair strand, thin specular highlight, alpha edge) and
+    // benefits from extra samples. The probe is read from the same image we
+    // are about to overwrite, but reads happen before writes so this is safe.
+    //
+    // 5-tap cross probe (center + 4 cardinals) instead of full 3x3: 5 image
+    // loads vs 9, ~45% fewer texcache requests on every pixel of the launch.
+    // The diagonals add very little additional discrimination for the strand
+    // case we actually care about.
+    //
+    // Gated on adaptive_params.y > 1 so when the user has max_samples=1 we
+    // skip the probe entirely and the launch is identical to the no-adaptive
+    // baseline (no perf cost when disabled).
+    int sample_count = 1;
+    if (scene_uniforms.adaptive_params.x > 0.5 && scene_uniforms.adaptive_params.y > 1.5)
+    {
+        ivec2 res = ivec2(gl_LaunchSizeEXT.xy);
+        float center_l = dot(imageLoad(history_image, ipos).rgb, vec3(0.2126, 0.7152, 0.0722));
+        float min_l = center_l;
+        float max_l = center_l;
+        const ivec2 kCross[4] = ivec2[4](ivec2( 1, 0), ivec2(-1, 0), ivec2(0,  1), ivec2(0, -1));
+        for (int i = 0; i < 4; ++i)
+        {
+            ivec2 q = clamp(ipos + kCross[i], ivec2(0), res - ivec2(1));
+            float l = dot(imageLoad(history_image, q).rgb, vec3(0.2126, 0.7152, 0.0722));
+            min_l = min(min_l, l);
+            max_l = max(max_l, l);
+        }
+        // Relative contrast: bright neighborhoods aren't penalized.
+        float contrast = (max_l - min_l) / max(max_l + min_l + 1e-3, 1e-3);
+        if (contrast > scene_uniforms.adaptive_params.z)
+        {
+            sample_count = int(clamp(scene_uniforms.adaptive_params.y, 1.0, 8.0));
+        }
+    }
+
+    // ---- Sample 0: canonical pre-jitter ray (drives motion vector) --------
+    vec2 pixel_sample = pixel_base + jitter;
+    vec3 accum = trace_primary_sample(pixel_sample, launch_size);
+
+    // Per-object motion vector (primary_rays.rgen):
+    //   pos_ws_curr = triangle.positions       * bary
+    //   pos_ws_prev = triangle.positions_prev  * bary
+    //   projection_view_to_screen(V      * pos_ws_curr, screen_pos_curr, ..., false);
+    //   projection_view_to_screen(V_prev * pos_ws_prev, screen_pos_prev, ..., true);
+    //   motion.xy = screen_pos_prev - screen_pos_curr;
+    // The V/P matrices are UNJITTERED -- jitter is applied only when generating
+    // the ray (the host writes `sub_pixel_jitter` and the rgen launches the ray
+    // through `pixel_center + jitter`). pos_ws_curr is the real 3D hit point;
+    // projecting it back through unjittered V*P recovers the jittered launch
+    // UV (since that's where the ray went). TAA samples history at
+    //   (ipos+0.5)/size + motion = unjittered_uv + (screen_pos_prev - screen_pos_curr)
+    // which is the unjittered pixel + the actual screen-space displacement of
+    // the surface point between frames.
+    vec2 motion = vec2(0.0);
+    if (primary_payload.hit_distance < 1e29)
+    {
+        vec4 clip_curr = scene_uniforms.current_view_projection * vec4(primary_payload.pos_ws_curr, 1.0);
+        vec4 clip_prev = scene_uniforms.prev_view_projection    * vec4(primary_payload.pos_ws_prev, 1.0);
+        if (clip_curr.w > 1e-5 && clip_prev.w > 1e-5)
+        {
+            vec2 uv_curr = (clip_curr.xy / clip_curr.w) * 0.5 + 0.5;
+            vec2 uv_prev = (clip_prev.xy / clip_prev.w) * 0.5 + 0.5;
+            // Live jitter-compensation diagnostic (SettingsPanel "Jitter compensation" slider).
+            //   0 = legacy motion vectors (no compensation; original behaviour, may shimmer).
+            //   1 = full subtraction of the current frame's sub-pixel jitter from uv_curr.
+            // Reasoning: the ray was launched through pixel_center + jitter_curr, and TAA
+            // samples history at (ipos+0.5)/size + motion (i.e. the unjittered pixel center).
+            // When `jitter_compensation` is 1.0 we add `-jitter_curr/size` to the motion so
+            // that history is fetched at the location the surface *actually was* at the
+            // pixel center, not at the jittered ray launch.
+            vec2 comp = (scene_uniforms.jitter_offset.xy / launch_size) * scene_uniforms.taa_params.w;
+            motion = (uv_prev - uv_curr) - comp;
+        }
+    }
+
+    imageStore(motion_image, ipos, vec4(motion, 0.0, 0.0));
+
+    // Persist this frame's primary-ray hit distance for the TAA bilateral
+    // disocclusion test. Misses are written as a very large value so
+    // sky->sky reprojections accept (rel diff = 0) and sky->object
+    // reprojections reject (rel diff ~ 1). This is what makes the
+    // helmet-pixel that was occluded by the fox last frame reject the
+    // fox-colored history and converge to the helmet color in a single
+    // frame rather than dragging the fox tint along for a dozen frames.
+    {
+        float linear_depth = (primary_payload.hit_distance < 1e29) ? primary_payload.hit_distance : 1e30;
+        imageStore(depth_image, ipos, vec4(linear_depth, 0.0, 0.0, 0.0));
+    }
+
+    // ---- Extra samples (supersampling): rotated-grid pattern within pixel.
+    // Sub-offsets are deterministic per supersample index so the average is
+    // stable across frames (no extra noise injected). Motion vector and
+    // hit/miss decisions stay tied to sample 0, the canonical pre-jitter ray.
+    //
+    // Combine rule (when sample_count > 1):
+    //   avg = sum(samples) / N        -- physically correct coverage average.
+    //   max_c = elementwise max       -- represents "the strand sample" when
+    //                                    one of N rays catches a subpixel
+    //                                    feature the others miss.
+    //   spread = luma(max_c - min_c)  -- large for subpixel strands /
+    //                                    specular spikes, small for smooth
+    //                                    surfaces.
+    //   bias = smoothstep(0.3, 1.5, spread) * preservation
+    //   result = mix(avg, max_c, bias)
+    //
+    // The preservation knob (adaptive_params.w) lets the user trade between:
+    //   0.0 -> pure average. Clean and stable but hair / thin highlights
+    //          look semi-transparent because the strand only covers a
+    //          fraction of the pixel footprint.
+    //   1.0 -> full max-bias on high-spread pixels. Hair stays at near-full
+    //          opacity because whenever the strand is anywhere in the pixel
+    //          footprint, at least one of N rays catches it and we keep
+    //          that bright value. Can amplify HDR fireflies on specular.
+    //   0.7 -> default; preserves features without obvious firefly cost.
+    vec3 current_color;
+    if (sample_count > 1)
+    {
+        vec3 min_c = accum;
+        vec3 max_c = accum;
+        // 8-tap rotated-grid pattern in [-0.5, +0.5] pixel space, excluding
+        // the origin (which is sample 0). Indices 0..6 cover up to 7 extras.
+        const vec2 kSubOffsets[7] = vec2[7](
+            vec2( 0.375, -0.125),
+            vec2(-0.125, -0.375),
+            vec2(-0.375,  0.125),
+            vec2( 0.125,  0.375),
+            vec2( 0.250,  0.250),
+            vec2(-0.250,  0.250),
+            vec2(-0.250, -0.250));
+        for (int s = 1; s < sample_count; ++s)
+        {
+            vec2 sub = kSubOffsets[(s - 1) % 7];
+            vec3 c = trace_primary_sample(pixel_base + jitter + sub, launch_size);
+            accum += c;
+            min_c = min(min_c, c);
+            max_c = max(max_c, c);
+        }
+        vec3 avg = accum / float(sample_count);
+        float spread = dot(max_c - min_c, vec3(0.2126, 0.7152, 0.0722));
+        float bias = smoothstep(0.3, 1.5, spread) * clamp(scene_uniforms.adaptive_params.w, 0.0, 1.0);
+        current_color = mix(avg, max_c, bias);
+    }
+    else
+    {
+        current_color = accum;
+    }
+
+    imageStore(history_image, ipos, vec4(current_color, 1.0));
+    imageStore(output_image, ipos, vec4(linear_to_srgb(current_color), 1.0));
 }

@@ -1,0 +1,520 @@
+#version 460
+
+// ============================================================================
+// Modified version of NVIDIA Q2RTX `asvgf_taau.comp` (GPL v2).
+//   Source: https://github.com/NVIDIA/Q2RTX/blob/master/src/refresh/vkpt/shader/asvgf_taau.comp
+//
+// The adaptations are mechanical, required by our engine layout:
+//   * Q2RTX descriptor names (TEX_FLAT_COLOR, IMG_TAA_OUTPUT, etc.) are
+//     replaced with our own bindings.
+//   * Q2RTX global_ubo fields are replaced by the equivalent fields in our
+//     TaaUniforms UBO. Same-resolution path: width == taa_output_width ==
+//     prev_taa_output_width, and inv_width == 1/width.
+//   * Checkerboard is unused in our path tracer (checkerboard_flags = 0).
+//   * Reference-mode (temporal_blend_factor) branch is omitted; we always
+//     run the regular TAA path.
+//   * Final IMG_TAA_OUTPUT store is sRGB-encoded because our display target
+//     is R8G8B8A8_UNORM
+// ============================================================================
+
+#define GROUP_SIZE 16
+#define FILTER_RADIUS 1
+#define SHARED_SIZE (GROUP_SIZE + FILTER_RADIUS * 3)
+
+layout(local_size_x = GROUP_SIZE, local_size_y = GROUP_SIZE, local_size_z = 1) in;
+
+// ---- Bindings ----
+layout(set = 0, binding = 0, rgba16f) uniform readonly  image2D   current_color_image; // TEX_FLAT_COLOR
+layout(set = 0, binding = 1, rg16f)   uniform readonly  image2D   motion_image;        // TEX_FLAT_MOTION
+layout(set = 0, binding = 2)          uniform           sampler2D prev_taa_image;      // TEX_ASVGF_TAA_B
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D   curr_taa_image;      // IMG_ASVGF_TAA_A
+layout(set = 0, binding = 4, rgba8)   uniform writeonly image2D   display_image;       // IMG_TAA_OUTPUT
+// depth disocclusion inputs. Both are linear "distance from
+// camera" written by the rgen shader. binding 6 holds this frame's depth
+// (parity-aligned with the curr_taa_image write target). binding 7 holds
+// last frame's depth at each pixel. We use these for a 4-tap bilateral
+// validation of the reprojected previous-frame sample location. Read as storage images to avoid
+// adding a per-frame layout transition on the depth resources.
+layout(set = 0, binding = 6, r32f)    uniform readonly  image2D   curr_depth_image;
+layout(set = 0, binding = 7, r32f)    uniform readonly  image2D   prev_depth_image;
+
+layout(set = 0, binding = 5, std140) uniform TaaUniforms
+{
+    // .xy = width/height (== taa_output_width/height == prev_taa_output_width/height
+    // in our same-resolution mode). .zw unused.
+    uvec4 extent;
+    // .xy = sub_pixel_jitter (pixels), .zw = previous jitter (unused; kept for layout compatibility).
+    vec4  jitter;
+    // .x = flt_taa (0 = AA_MODE_OFF / first frame skip, 1 = on)
+    // .y = flt_taa_variance
+    // .z = flt_taa_anti_sparkle
+    // .w = history_blend_max (max weight of current frame)
+    vec4  params;
+    // .x = viz_mode (0 = normal, 1 = motion vec, 2 = pixel weight,
+    //                3 = jitter, 4 = current only, 5 = history only)
+    // .yzw = reserved
+    vec4  debug;
+} taa;
+
+shared uvec2 s_color_pq[SHARED_SIZE][SHARED_SIZE];
+shared uint  s_motion  [SHARED_SIZE][SHARED_SIZE];
+
+const float pq_m1 = 0.1593017578125;
+const float pq_m2 = 78.84375;
+const float pq_c1 = 0.8359375;
+const float pq_c2 = 18.8515625;
+const float pq_c3 = 18.6875;
+const float pq_C  = 10000.0;
+
+vec3 PQDecode(vec3 image)
+{
+    vec3 Np = pow(max(image, 0.0), vec3(1.0 / pq_m2));
+
+    vec3 L = Np - pq_c1;
+    L = L / (pq_c2 - pq_c3 * Np);
+    L = pow(max(L, 0.0), vec3(1.0 / pq_m1));
+
+    return L * pq_C; // returns cd/m^2
+}
+
+vec3 PQEncode(vec3 image)
+{
+    vec3 L = image / pq_C;
+    vec3 Lm = pow(max(L, 0.0), vec3(pq_m1));
+    vec3 N = (pq_c1 + pq_c2 * Lm) / (1.0 + pq_c3 * Lm);
+    image = pow(N, vec3(pq_m2));
+
+    return clamp(image, vec3(0), vec3(1));
+}
+
+uvec2 packHalf4x16(vec4 v)
+{
+    return uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw));
+}
+
+vec4 unpackHalf4x16(uvec2 v)
+{
+    return vec4(unpackHalf2x16(v.x), unpackHalf2x16(v.y));
+}
+
+float linear_to_srgb(float linear)
+{
+    return (linear <= 0.0031308f)
+        ? linear * 12.92f
+        : pow(linear, (1.0f / 2.4f)) * (1.055f) - 0.055f;
+}
+
+vec3 linear_to_srgb(vec3 l)
+{
+    return vec3(
+        linear_to_srgb(l.x),
+        linear_to_srgb(l.y),
+        linear_to_srgb(l.z));
+}
+
+// Catmull-Rom filtering code from http://vec3.ca/bicubic-filtering-in-fewer-taps/
+void BicubicCatmullRom(vec2 UV, vec2 texSize, out vec2 Sample[3], out vec2 Weight[3])
+{
+    const vec2 invTexSize = 1.0 / texSize;
+
+    vec2 tc = floor( UV - 0.5 ) + 0.5;
+    vec2 f = UV - tc;
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+
+    vec2 w0 = f2 - 0.5 * (f3 + f);
+    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1;
+    vec2 w3 = 0.5 * (f3 - f2);
+    vec2 w2 = 1 - w0 - w1 - w3;
+
+    Weight[0] = w0;
+    Weight[1] = w1 + w2;
+    Weight[2] = w3;
+
+    Sample[0] = tc - 1;
+    Sample[1] = tc + w2 / Weight[1];
+    Sample[2] = tc + 2;
+
+    Sample[0] *= invTexSize;
+    Sample[1] *= invTexSize;
+    Sample[2] *= invTexSize;
+}
+
+/* uv is in pixel coordinates */
+vec4 sample_texture_catmull_rom(sampler2D tex, vec2 uv)
+{
+    vec4 sum = vec4(0);
+    vec2 sampleLoc[3], sampleWeight[3];
+    BicubicCatmullRom(uv, vec2(textureSize(tex, 0)), sampleLoc, sampleWeight);
+    for(int i = 0; i < 3; i++) {
+        for(int j = 0; j < 3; j++) {
+            vec2 uv2 = vec2(sampleLoc[j].x, sampleLoc[i].y);
+            vec4 c = textureLod(tex, uv2, 0);
+            sum += c * vec4(sampleWeight[j].x * sampleWeight[i].y);
+        }
+    }
+    return sum;
+}
+
+// Preload the color data into shared memory, convert to PQ space
+// Also preload the 2D motion vectors
+void preload(ivec2 group_base, ivec2 group_size)
+{
+    ivec2 preload_size = min(group_size + ivec2(FILTER_RADIUS * 3), SHARED_SIZE);
+
+    for(uint linear_idx = gl_LocalInvocationIndex; linear_idx < preload_size.x * preload_size.y; linear_idx += GROUP_SIZE * GROUP_SIZE)
+    {
+        // Convert the linear index to 2D index in a (preload_size x preload_size) virtual group
+        float t = (float(linear_idx) + 0.5) / float(preload_size.x);
+        int xx = int(floor(fract(t) * float(preload_size.x)));
+        int yy = int(floor(t));
+
+        // Load
+        ivec2 ipos = group_base + ivec2(xx, yy) - ivec2(FILTER_RADIUS);
+        ipos = clamp(ipos, ivec2(0), ivec2(int(taa.extent.x) - 1, int(taa.extent.y) - 1));
+        vec4 color = imageLoad(current_color_image, ipos);
+        vec3 color_pq = PQEncode(color.rgb);
+        vec2 motion = imageLoad(motion_image, ipos).xy;
+
+        // Store
+        s_color_pq[yy][xx] = packHalf4x16(vec4(color_pq, color.a));
+        s_motion[yy][xx]   = packHalf2x16(motion);
+    }
+}
+
+void get_shared_color(ivec2 pos, ivec2 group_base, out vec3 color_pq, out int checkerboard_flags)
+{
+    ivec2 addr = pos - group_base + ivec2(FILTER_RADIUS);
+
+    vec4 data = unpackHalf4x16(s_color_pq[addr.y][addr.x]);
+
+    color_pq = data.rgb;
+    checkerboard_flags = int(data.a);
+}
+
+vec2 get_shared_motion(ivec2 pos, ivec2 group_base)
+{
+    ivec2 addr = pos - group_base + ivec2(FILTER_RADIUS);
+
+    return unpackHalf2x16(s_motion[addr.y][addr.x]);
+}
+
+void get_moments(ivec2 pos, ivec2 group_base, int r, out vec3 mom1, out vec3 mom2)
+{
+    mom1 = vec3(0.0);
+    mom2 = vec3(0.0);
+
+    for(int yy = -r; yy <= r; yy++)
+    {
+        for(int xx = -r; xx <= r; xx++)
+        {
+            if(xx == 0 && yy == 0)
+                continue;
+
+            ivec2 p = pos + ivec2(xx, yy);
+            vec3 c;
+            int checkerboard_flags;
+            get_shared_color(p, group_base, c, checkerboard_flags);
+
+            mom1 += c.rgb;
+            mom2 += c.rgb * c.rgb;
+        }
+    }
+}
+
+float get_sample_weight(vec2 delta, float scale)
+{
+    return clamp(1 - scale * dot(delta, delta), 0, 1);
+}
+
+vec2 hires_to_lores(ivec2 ipos)
+{
+    vec2 input_size  = vec2(taa.extent.xy);
+    vec2 output_size = vec2(taa.extent.xy);
+
+    return (vec2(ipos) + vec2(0.5)) * (input_size / output_size) - vec2(0.5) - taa.jitter.xy;
+}
+
+void main()
+{
+    ivec2 ipos = ivec2(gl_GlobalInvocationID);
+
+    ivec2 group_base_hires = ivec2(gl_WorkGroupID) * GROUP_SIZE;
+    ivec2 group_base_lores = ivec2(hires_to_lores(group_base_hires));
+    ivec2 group_bottomright_hires = ivec2(gl_WorkGroupID) * GROUP_SIZE + ivec2(GROUP_SIZE - 1);
+    ivec2 group_bottomright_lores = ivec2(hires_to_lores(group_bottomright_hires));
+
+    preload(group_base_lores, group_bottomright_lores - group_base_lores + ivec2(1));
+    barrier();
+
+    const int taa_output_width  = int(taa.extent.x);
+    const int taa_output_height = int(taa.extent.y);
+    const int width             = int(taa.extent.x);
+    const int height            = int(taa.extent.y);
+    const float inv_width       = 1.0 / float(width);
+
+    if (ipos.x >= taa_output_width || ipos.y >= taa_output_height)
+    {
+        imageStore(curr_taa_image, ipos, vec4(0));
+        return;
+    }
+
+    // Calculate position in the render buffer (at the lower render resolution)
+    vec2 nearest_render_pos = hires_to_lores(ipos);
+    ivec2 int_render_pos = ivec2(round(nearest_render_pos.x), round(nearest_render_pos.y));
+    int_render_pos = clamp(int_render_pos, ivec2(0), ivec2(width - 1, height - 1));
+
+    vec3 color_center;
+    int checkerboard_flags;
+    get_shared_color(int_render_pos, group_base_lores, color_center, checkerboard_flags);
+
+    vec3 color_output = color_center;
+    vec3 linear_color_output;
+
+    // Diagnostic values exposed via the SettingsPanel "TAA debug" viz combo.
+    // viz_mode == 0 produces normal output; non-zero modes override the
+    // final display write to visualize internal signals.
+    vec3  viz_motion       = vec3(0.0);
+    vec3  viz_color_prev   = vec3(0.0);
+    float viz_pixel_weight = 0.0;
+
+    const float flt_taa                      = taa.params.x;
+    const float flt_taa_variance             = taa.params.y;
+    const float flt_taa_anti_sparkle         = taa.params.z;
+    const float flt_taa_history_blend        = max(taa.params.w, 0.0);
+    const int   flt_taa_viz_mode             = int(taa.debug.x + 0.5);
+    const float flt_taa_variance_moving      = taa.debug.y;
+
+    if(flt_taa != 0.0)
+    {
+        // Regular TAA/TAAU mode
+
+        vec3 mom1;
+        vec3 mom2;
+        int num_pix;
+
+        // Obtain the color moments for the surrounding pixels.
+        get_moments(int_render_pos, group_base_lores, FILTER_RADIUS, mom1, mom2);
+        num_pix = 9;
+
+        // Remove or reduce sparkles by clamping the color of the center pixel to its surroundings
+        if(flt_taa_anti_sparkle > 0)
+        {
+            // Custom curve to make perceived blurriness depend on the cvar in a roughly linear way
+            float scale = pow(min(1.0, flt_taa_anti_sparkle), -0.25);
+
+            color_center = min(color_center, scale * mom1 / (num_pix - 1));
+        }
+
+        mom1 += color_center;
+        mom2 += color_center * color_center;
+
+        mom1 /= float(num_pix);
+        mom2 /= float(num_pix);
+
+        // Find the longest motion vector in a 3x3 window
+        vec2 motion;
+        {
+            float len = -1;
+            const int r = 1;
+            for(int yy = -r; yy <= r; yy++) {
+                for(int xx = -r; xx <= r; xx++) {
+                    ivec2 p = int_render_pos + ivec2(xx, yy);
+                    vec2 m = get_shared_motion(p, group_base_lores);
+                    float l = dot(m, m);
+                    if(l > len) {
+                        len = l;
+                        motion = m;
+                    }
+
+                }
+            }
+        }
+
+        // Calculate the previous position, taking into account that the previous frame output can have different size from the current frame
+        vec2 pos_prev = ((vec2(ipos) + vec2(0.5)) / vec2(taa_output_width, taa_output_height) + motion.xy)
+            * vec2(taa_output_width, taa_output_height);
+
+        // Capture for debug viz (UV-space motion, before pixel-scale).
+        viz_motion = vec3(motion, 0.0);
+
+        // Scale the motion for the weight calculation below
+        motion *= vec2(taa_output_width, taa_output_height);
+
+        // Always run the TAA path — even when the reprojected position
+        // falls slightly outside the framebuffer. Hard-gating on
+        // in-bounds previously caused objects near the screen edge to
+        // fall back to `color_output = color_center` (raw single-spp
+        // RT noise) and read as a black halo. The sampler is
+        // CLAMP_TO_EDGE so a clamped pos_prev produces edge-extended
+        // history which NCC will fold into the local moments. Pixels
+        // whose reprojection is truly far off-screen will be detected
+        // by the depth disocclusion test and/or NCC clamp.
+        vec2 pos_prev_clamped = clamp(
+            pos_prev,
+            vec2(1.0),
+            vec2(taa_output_width, taa_output_height) - vec2(1.0));
+        bool reprojection_in_bounds =
+            all(greaterThanEqual(ivec2(pos_prev), ivec2(1))) &&
+            all(lessThan(ivec2(pos_prev), ivec2(taa_output_width, taa_output_height) - 1));
+        {
+            // ---- Surface-vs-surface depth disocclusion only.
+            //
+            // The depth value at a silhouette pixel alternates between
+            // "hit the surface" (e.g. 5.0) and "missed into sky" (1e30)
+            // across frames because the TAA sub-pixel jitter aims the
+            // primary ray at a slightly different sub-pixel each frame.
+            // ANY rejection scheme that includes the sky sentinel — even
+            // with min-pool over a small neighborhood — will fire on
+            // silhouette pixels every few frames and leave the
+            // un-accumulated single-spp RT noise visible as a black
+            // outline along every model boundary.
+            //
+            // The fix: only invoke the rejection test when *both*
+            // depths are real (sub-sky) values. This still catches the
+            // case we actually need to reject — surface A in front of
+            // surface B last frame, surface B exposed this frame
+            // (e.g. fox occluding helmet, then moving off; helmet
+            // disocclusion has two real depths that differ by far more
+            // than 10%). It leaves silhouettes against sky entirely to
+            // the NCC clamp + Catmull-Rom path, which is what handled
+            // them before this depth-disocclusion patch existed.
+            const float SKY_DEPTH_THRESHOLD = 1e29;
+
+            ivec2 prev_sample_px = clamp(
+                ivec2(floor(pos_prev)),
+                ivec2(0),
+                ivec2(taa_output_width - 1, taa_output_height - 1));
+            float depth_curr = imageLoad(curr_depth_image, int_render_pos).x;
+            float depth_prev = imageLoad(prev_depth_image, prev_sample_px).x;
+
+            // disoccluded == true when both sides are real surfaces with
+            // very different depths (e.g. fox at depth 3 → helmet at
+            // depth 5 underneath). When either side is sky-sentinel we
+            // treat as "not disoccluded" because TAA jitter alternates
+            // hit/miss at silhouettes and any rejection there leaves
+            // single-spp noise (visible as a black outline).
+            bool disoccluded = false;
+            if (depth_curr < SKY_DEPTH_THRESHOLD && depth_prev < SKY_DEPTH_THRESHOLD)
+            {
+                float den = max(max(depth_curr, depth_prev), 1e-3);
+                float rel = abs(depth_curr - depth_prev) / den;
+                disoccluded = (rel > 0.1);
+            }
+            // Treat off-screen reprojection as a disocclusion: the
+            // history sample is edge-extended and not semantically
+            // tied to this pixel, so NCC must clamp it aggressively
+            // and the blend must lean on the current frame.
+            if (!reprojection_in_bounds) disoccluded = true;
+
+            // Always run the Catmull-Rom + NCC path. If disoccluded,
+            // force a tight clamp width regardless of the user's
+            // variance scale so the previous-surface color (e.g. fox)
+            // gets clipped into this frame's neighborhood statistics
+            // (e.g. helmet) — kills cross-surface ghost without
+            // dropping temporal accumulation (which would have left a
+            // dark un-converged streak).
+            {
+                vec3 color_prev = sample_texture_catmull_rom(prev_taa_image, pos_prev_clamped).rgb;
+
+                if(!any(isnan(color_prev)))
+                {
+                    // Motion magnitude in PIXEL units (motion was scaled by output extent above).
+                    // Used both for variance-scale lerp and the history blend weight.
+                    float motion_weight = smoothstep(0, 1.0f, sqrt(dot(motion, motion)));
+
+                    // If enabled, apply neighbourhood color clamping (NCC).
+                    float effective_variance = flt_taa_variance;
+                    if (disoccluded)
+                    {
+                        // Tight clamp on disocclusion. 0.5 sigma is the
+                        // standard "aggressive" NCC width — wide enough
+                        // not to break edge antialiasing, narrow enough
+                        // to fully reject foreign-surface colors.
+                        effective_variance = min(effective_variance > 0 ? effective_variance : 1.0, 0.5);
+                    }
+                    if(effective_variance > 0)
+                    {
+                        // Lerp clamp width between static and moving values by the
+                        // motion magnitude. Tight clamp on movers kills directional
+                        // history streaks; wide clamp on static pixels preserves
+                        // smoothing of RT noise. (See SettingsPanel "Variance scale"
+                        // and "Variance scale (moving)" sliders.)
+                        float variance_scale = mix(effective_variance, flt_taa_variance_moving, motion_weight);
+                        if (disoccluded) variance_scale = min(variance_scale, 0.5);
+
+                        vec3 sigma = sqrt(max(vec3(0), mom2 - mom1 * mom1));
+                        vec3 mi = mom1 - sigma * variance_scale;
+                        vec3 ma = mom1 + sigma * variance_scale;
+
+                        color_prev = clamp(color_prev, mi, ma);
+                    }
+
+                    // Mix the new color with the clamped previous color
+                    float sample_weight = get_sample_weight(nearest_render_pos - int_render_pos, taa_output_width * inv_width);
+                    float pixel_weight = max(motion_weight, sample_weight) * flt_taa_history_blend;
+                    // On disocclusion, also boost the current-frame
+                    // weight so accumulation re-converges in a few
+                    // frames rather than ~10.
+                    if (disoccluded) pixel_weight = max(pixel_weight, 0.5);
+                    pixel_weight = clamp(pixel_weight, 0, 1);
+                    color_output = mix(color_prev, color_center, pixel_weight);
+
+                    // Capture for debug viz.
+                    viz_color_prev   = color_prev;
+                    viz_pixel_weight = pixel_weight;
+                }
+            }
+        }
+
+        linear_color_output = PQDecode(color_output);
+    }
+    else
+    {
+        linear_color_output = PQDecode(color_output);
+    }
+
+    imageStore(curr_taa_image, ipos, vec4(color_output, 0));
+    // Our display target is R8G8B8A8_UNORM, so we apply
+    // the sRGB OETF here. This is the only output-stage adaptation.
+    vec3 display_color = linear_to_srgb(linear_color_output);
+
+    // SettingsPanel "Visualization" combo. viz_mode 0 = normal output;
+    // higher modes replace the display image with diagnostic colors so the
+    // user can see what TAA is doing internally.
+    if (flt_taa_viz_mode == 1)
+    {
+        // Motion vectors as color, scaled to a useful UV range.
+        // R = +x, G = +y, B = magnitude of negative components.
+        float scale = 50.0;
+        vec2 mv = viz_motion.xy * scale;
+        display_color = vec3(
+            clamp( mv.x, 0.0, 1.0),
+            clamp( mv.y, 0.0, 1.0),
+            clamp(-min(mv.x, mv.y), 0.0, 1.0));
+    }
+    else if (flt_taa_viz_mode == 2)
+    {
+        // Pixel weight (0 = pure history, 1 = pure current). Goal during
+        // tuning is to see how much of each frame is bleeding into history.
+        display_color = vec3(viz_pixel_weight);
+    }
+    else if (flt_taa_viz_mode == 3)
+    {
+        // Sub-pixel jitter offset (constant per-frame across the image).
+        // Visible as a flat tint that flickers each frame if jitter is active.
+        display_color = vec3(taa.jitter.x + 0.5, taa.jitter.y + 0.5, 0.0);
+    }
+    else if (flt_taa_viz_mode == 4)
+    {
+        // Current sample only (no temporal blend).
+        display_color = linear_to_srgb(PQDecode(color_center));
+    }
+    else if (flt_taa_viz_mode == 5)
+    {
+        // Raw history sample (no clamp, no blend).
+        display_color = linear_to_srgb(PQDecode(viz_color_prev));
+    }
+
+    imageStore(display_image,  ipos, vec4(display_color, 1));
+}

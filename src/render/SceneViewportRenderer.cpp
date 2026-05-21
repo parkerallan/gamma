@@ -2331,6 +2331,7 @@ bool SceneViewportRenderer::Initialize(VulkanContext* context)
 {
     vulkan_context_ = context;
     ray_tracing_.Initialize(context);
+    ray_tracing_.SetTAAEnabled(true);
     scene_2d_renderer_.Initialize(context);
     video_playback_manager_.Initialize(&scene_2d_renderer_);
     scene_2d_renderer_.SetVideoPlaybackManager(&video_playback_manager_);
@@ -2718,6 +2719,22 @@ void SceneViewportRenderer::RenderUi(
     const SceneViewportModelResolver& resolve_model_asset,
     SceneViewportCameraState& camera_state)
 {
+    // Push the editor-tunable TAA debug knobs into the RT subsystem every
+    // frame so SettingsPanel sliders are reflected immediately.
+    ray_tracing_.SetTAAEnabled(state.taa_enabled);
+    RayTracing::TaaDebugSettings taa_dbg{};
+    taa_dbg.viz_mode = state.taa_viz_mode;
+    taa_dbg.variance_scale = state.taa_variance_scale;
+    taa_dbg.variance_scale_moving = state.taa_variance_scale_moving;
+    taa_dbg.anti_sparkle = state.taa_anti_sparkle;
+    taa_dbg.history_blend = state.taa_history_blend;
+    taa_dbg.jitter_compensation = state.taa_jitter_compensation;
+    taa_dbg.adaptive_enabled = state.taa_adaptive_enabled;
+    taa_dbg.adaptive_max_samples = state.taa_adaptive_max_samples;
+    taa_dbg.adaptive_threshold = state.taa_adaptive_threshold;
+    taa_dbg.adaptive_preservation = state.taa_adaptive_preservation;
+    ray_tracing_.SetTaaDebugSettings(taa_dbg);
+
     constexpr const char* kBuildButtonLabel = ICON_CI_RUN_WITH_DEPS;
     constexpr const char* kStopBuildButtonLabel = ICON_CI_STOP_CIRCLE;
     constexpr const char* kPlayButtonLabel = ICON_CI_PLAY;

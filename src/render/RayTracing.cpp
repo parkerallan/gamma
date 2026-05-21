@@ -90,6 +90,77 @@ std::filesystem::path ResolveShaderPath(const char* file_name)
     return base_path / "shaders" / file_name;
 }
 
+// --- 4x4 matrix helpers (column-major layout matching GLSL std140 mat4) ---
+// out = a * b. Index convention: m[col*4 + row].
+void Multiply4x4(
+    const std::array<float, 16>& a,
+    const std::array<float, 16>& b,
+    std::array<float, 16>& out)
+{
+    std::array<float, 16> tmp{};
+    for (int col = 0; col < 4; ++col)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            float v = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+                v += a[k * 4 + row] * b[col * 4 + k];
+            }
+            tmp[col * 4 + row] = v;
+        }
+    }
+    out = tmp;
+}
+
+// Cofactor-based 4x4 inverse. Returns false if the matrix is singular, in
+// which case `out` is left undefined.
+bool Invert4x4(const std::array<float, 16>& m, std::array<float, 16>& out)
+{
+    std::array<float, 16> inv{};
+    inv[0]  =  m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4]  = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8]  =  m[4] * m[9]  * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9]  * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1]  = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5]  =  m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9]  = -m[0] * m[9]  * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] =  m[0] * m[9]  * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2]  =  m[1] * m[6]  * m[15] - m[1] * m[7]  * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7]  - m[13] * m[3] * m[6];
+    inv[6]  = -m[0] * m[6]  * m[15] + m[0] * m[7]  * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7]  + m[12] * m[3] * m[6];
+    inv[10] =  m[0] * m[5]  * m[15] - m[0] * m[7]  * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7]  - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5]  * m[14] + m[0] * m[6]  * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6]  + m[12] * m[2] * m[5];
+    inv[3]  = -m[1] * m[6]  * m[11] + m[1] * m[7]  * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9]  * m[2] * m[7]  + m[9]  * m[3] * m[6];
+    inv[7]  =  m[0] * m[6]  * m[11] - m[0] * m[7]  * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8]  * m[2] * m[7]  - m[8]  * m[3] * m[6];
+    inv[11] = -m[0] * m[5]  * m[11] + m[0] * m[7]  * m[9]  + m[4] * m[1] * m[11] - m[4] * m[3] * m[9]  - m[8]  * m[1] * m[7]  + m[8]  * m[3] * m[5];
+    inv[15] =  m[0] * m[5]  * m[10] - m[0] * m[6]  * m[9]  - m[4] * m[1] * m[10] + m[4] * m[2] * m[9]  + m[8]  * m[1] * m[6]  - m[8]  * m[2] * m[5];
+    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (std::abs(det) < 1e-12f)
+    {
+        return false;
+    }
+    const float inv_det = 1.0f / det;
+    for (float& v : inv) { v *= inv_det; }
+    out = inv;
+    return true;
+}
+
+// Halton(2, 3) low-discrepancy sequence used to generate the per-frame
+// sub-pixel jitter offset (in pixels) for TAA. Matches the convention used
+// by the ray-gen shader (output in [-0.5, +0.5]).
+float HaltonSample(std::uint32_t index, std::uint32_t base)
+{
+    float result = 0.0f;
+    float fraction = 1.0f;
+    while (index > 0u)
+    {
+        fraction /= static_cast<float>(base);
+        result += fraction * static_cast<float>(index % base);
+        index /= base;
+    }
+    return result;
+}
+
 std::vector<std::uint8_t> ReadBinaryFile(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
@@ -866,6 +937,7 @@ bool RayTracing::Initialize(VulkanContext* context)
 
 void RayTracing::Shutdown()
 {
+    DestroyTaaResources();
     DestroyOutputResources();
     DestroyPipelineResources();
     DestroySceneResources();
@@ -882,7 +954,7 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
         return false;
     }
 
-    if (output_image_ != VK_NULL_HANDLE && history_image_ != VK_NULL_HANDLE && output_width_ == width && output_height_ == height)
+    if (output_image_ != VK_NULL_HANDLE && history_image_ != VK_NULL_HANDLE && motion_image_ != VK_NULL_HANDLE && output_width_ == width && output_height_ == height)
     {
         return true;
     }
@@ -1004,6 +1076,50 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
 
     history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    if (!CreateVulkanImage(
+            vulkan_context_->GetPhysicalDevice(),
+            device,
+            allocator,
+            width,
+            height,
+            VK_FORMAT_R16G16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            motion_image_,
+            motion_memory_,
+            motion_view_))
+    {
+        status_message_ = "Failed to create viewport RT motion vector image";
+        DestroyOutputResources();
+        return false;
+    }
+    motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Linear-depth ping-pong (R32_SFLOAT). Created here because they share
+    // the viewport's resolution. Used by `taa.comp` for 
+    // bilateral history validation (depth disocclusion).
+    for (int slot = 0; slot < 2; ++slot)
+    {
+        if (!CreateVulkanImage(
+                vulkan_context_->GetPhysicalDevice(),
+                device,
+                allocator,
+                width,
+                height,
+                VK_FORMAT_R32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                depth_images_[slot],
+                depth_memories_[slot],
+                depth_views_[slot]))
+        {
+            status_message_ = "Failed to create viewport RT depth image";
+            DestroyOutputResources();
+            return false;
+        }
+        depth_layouts_[slot] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
     ResetAccumulationState();
     return true;
 }
@@ -1057,6 +1173,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         MeshRecordGpu mesh_record{};
         mesh_record.vertex_buffer_address = mesh.vertex_device_address;
         mesh_record.index_buffer_address = mesh.index_device_address;
+        mesh_record.prev_position_buffer_address = mesh.prev_position_device_address;
         mesh_record.vertex_count = mesh.vertex_count;
         mesh_record.vertex_stride = mesh.vertex_stride;
         mesh_record.index_count = mesh.index_count;
@@ -1285,8 +1402,15 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     }
 
     // Build the instance list (BLAS references + per-instance transforms).
+    // In parallel, build the per-instance motion-vector record
+    // array. The two arrays share index ordering (entry N corresponds to
+    // `gl_InstanceID == N` in the closest-hit shader).
     std::vector<VkAccelerationStructureInstanceKHR> new_instances;
     new_instances.reserve(instances.size());
+    std::vector<InstanceRecordGpu> new_instance_records;
+    new_instance_records.reserve(instances.size());
+    std::vector<std::pair<std::string, std::array<float, 16>>> instance_curr_for_cache;
+    instance_curr_for_cache.reserve(instances.size());
     for (const InstanceInput& instance : instances)
     {
         const auto mesh_it = bottom_level_cache_.find(instance.mesh_key);
@@ -1306,6 +1430,23 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         acceleration_instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         acceleration_instance.accelerationStructureReference = mesh_it->second.acceleration_structure.device_address;
         new_instances.push_back(acceleration_instance);
+
+        // Resolve previous-frame transform: caller override -> cached value
+        // from the last UpdateScene -> fall back to current (no motion).
+        InstanceRecordGpu record{};
+        record.current_transform = instance.transform;
+        if (instance.has_prev_transform)
+        {
+            record.prev_transform = instance.prev_transform;
+        }
+        else
+        {
+            const auto cached = prev_instance_transforms_.find(instance.key);
+            record.prev_transform =
+                (cached != prev_instance_transforms_.end()) ? cached->second : instance.transform;
+        }
+        new_instance_records.push_back(record);
+        instance_curr_for_cache.emplace_back(instance.key, instance.transform);
     }
 
     if (new_instances.empty())
@@ -1347,6 +1488,21 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     // Store the prepared instances; actual GPU work is deferred to RenderFrame where it
     // can be recorded directly into the render command buffer, avoiding an extra queue stall.
     pending_acceleration_instances_ = std::move(new_instances);
+    instance_records_cpu_           = std::move(new_instance_records);
+
+    // Refresh the previous-transform cache so the *next* UpdateScene call sees
+    // this frame's transforms as "prev". Keys not present in the current set are
+    // dropped (instance no longer exists). This must happen after the records
+    // are built (which consumed the old cache values).
+    {
+        std::unordered_map<std::string, std::array<float, 16>> next_prev;
+        next_prev.reserve(instance_curr_for_cache.size());
+        for (const auto& kv : instance_curr_for_cache)
+        {
+            next_prev.emplace(kv.first, kv.second);
+        }
+        prev_instance_transforms_ = std::move(next_prev);
+    }
 
     if (topology_changed)
     {
@@ -1372,7 +1528,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 void RayTracing::DestroyOutputResources()
 {
     if (vulkan_context_ != nullptr &&
-        (output_descriptor_set_ != VK_NULL_HANDLE || output_view_ != VK_NULL_HANDLE || output_image_ != VK_NULL_HANDLE || history_view_ != VK_NULL_HANDLE || history_image_ != VK_NULL_HANDLE))
+        (output_descriptor_set_ != VK_NULL_HANDLE || output_view_ != VK_NULL_HANDLE || output_image_ != VK_NULL_HANDLE || history_view_ != VK_NULL_HANDLE || history_image_ != VK_NULL_HANDLE || motion_view_ != VK_NULL_HANDLE || motion_image_ != VK_NULL_HANDLE))
     {
         // The previous UI frame can still be sampling the old viewport image when a resize triggers reallocation.
         vulkan_context_->WaitIdle();
@@ -1382,7 +1538,9 @@ void RayTracing::DestroyOutputResources()
     output_height_ = 0;
     output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     ResetAccumulationState();
+    taa_history_valid_ = false;
 
         // Mark descriptors dirty so they're rebuilt with new image views on next frame
         descriptors_dirty_ = true;
@@ -1401,6 +1559,16 @@ void RayTracing::DestroyOutputResources()
         history_image_ = VK_NULL_HANDLE;
         history_memory_ = VK_NULL_HANDLE;
         history_view_ = VK_NULL_HANDLE;
+        motion_image_ = VK_NULL_HANDLE;
+        motion_memory_ = VK_NULL_HANDLE;
+        motion_view_ = VK_NULL_HANDLE;
+        for (int i = 0; i < 2; ++i)
+        {
+            depth_images_[i] = VK_NULL_HANDLE;
+            depth_memories_[i] = VK_NULL_HANDLE;
+            depth_views_[i] = VK_NULL_HANDLE;
+            depth_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        }
         return;
     }
 
@@ -1436,6 +1604,42 @@ void RayTracing::DestroyOutputResources()
         vkFreeMemory(device, history_memory_, allocator);
         history_memory_ = VK_NULL_HANDLE;
     }
+    if (motion_view_ != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, motion_view_, allocator);
+        motion_view_ = VK_NULL_HANDLE;
+    }
+    if (motion_image_ != VK_NULL_HANDLE)
+    {
+        vkDestroyImage(device, motion_image_, allocator);
+        motion_image_ = VK_NULL_HANDLE;
+    }
+    if (motion_memory_ != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(device, motion_memory_, allocator);
+        motion_memory_ = VK_NULL_HANDLE;
+    }
+
+    // TAA ping-pong images are sized to the viewport, so destroy them here
+    // and let EnsureTaaResources re-allocate them at the new size. The
+    // pipeline / descriptor layout / sampler / UBO survive the resize.
+    for (int i = 0; i < 2; ++i)
+    {
+        if (taa_views_[i] != VK_NULL_HANDLE) { vkDestroyImageView(device, taa_views_[i], allocator); taa_views_[i] = VK_NULL_HANDLE; }
+        if (taa_images_[i] != VK_NULL_HANDLE) { vkDestroyImage(device, taa_images_[i], allocator); taa_images_[i] = VK_NULL_HANDLE; }
+        if (taa_memories_[i] != VK_NULL_HANDLE) { vkFreeMemory(device, taa_memories_[i], allocator); taa_memories_[i] = VK_NULL_HANDLE; }
+        taa_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    // Depth ping-pong is also viewport-sized — destroy with the other
+    // resolution-dependent images.
+    for (int i = 0; i < 2; ++i)
+    {
+        if (depth_views_[i] != VK_NULL_HANDLE) { vkDestroyImageView(device, depth_views_[i], allocator); depth_views_[i] = VK_NULL_HANDLE; }
+        if (depth_images_[i] != VK_NULL_HANDLE) { vkDestroyImage(device, depth_images_[i], allocator); depth_images_[i] = VK_NULL_HANDLE; }
+        if (depth_memories_[i] != VK_NULL_HANDLE) { vkFreeMemory(device, depth_memories_[i], allocator); depth_memories_[i] = VK_NULL_HANDLE; }
+        depth_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    taa_descriptors_dirty_ = true;
 }
 
 void RayTracing::DestroyFrameResources()
@@ -1482,6 +1686,10 @@ void RayTracing::DestroySceneResources()
 {
     DestroyAccelerationStructure(vulkan_context_, top_level_as_);
     DestroyGpuBuffer(vulkan_context_, instance_buffer_);
+    DestroyGpuBuffer(vulkan_context_, instance_record_buffer_);
+    instance_record_buffer_capacity_ = 0;
+    instance_records_cpu_.clear();
+    prev_instance_transforms_.clear();
     DestroyGpuBuffer(vulkan_context_, tlas_scratch_buffer_);
     DestroyGpuBuffer(vulkan_context_, uniform_buffer_);
     DestroyGpuBuffer(vulkan_context_, mesh_record_buffer_);
@@ -1688,7 +1896,7 @@ bool RayTracing::EnsurePipelineResources()
 
     if (descriptor_set_layout_ == VK_NULL_HANDLE)
     {
-        std::array<VkDescriptorSetLayoutBinding, 9> bindings = {};
+        std::array<VkDescriptorSetLayoutBinding, 12> bindings = {};
         bindings[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, nullptr};
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
         bindings[2] = {
@@ -1706,6 +1914,17 @@ bool RayTracing::EnsurePipelineResources()
         bindings[6] = {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxTextures, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR, nullptr};
         bindings[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
         bindings[8] = {8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_MISS_BIT_KHR, nullptr};
+        bindings[9] = {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
+        // Per-instance motion-vector records (current + previous transform).
+        // Read by the closest-hit shader to compute per-object
+        // screen-space motion vectors.
+        bindings[10] = {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, nullptr};
+        // Linear-depth output for the current frame. Storage image written
+        // by the ray-gen shader from the primary-ray hit distance; read by
+        // taa.comp as the bilateral disocclusion signal. Bound to the
+        // current ping-pong slot every frame (descriptor refreshed in
+        // UpdateDescriptors via depth_slot_).
+        bindings[11] = {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
 
         VkDescriptorSetLayoutCreateInfo layout_info = {};
         layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1924,7 +2143,11 @@ bool RayTracing::UpdateDescriptors()
         return false;
     }
 
-    if (output_view_ == VK_NULL_HANDLE || history_view_ == VK_NULL_HANDLE || uniform_buffer_.buffer == VK_NULL_HANDLE || fallback_texture_view_ == VK_NULL_HANDLE)
+    if (output_view_ == VK_NULL_HANDLE || history_view_ == VK_NULL_HANDLE || motion_view_ == VK_NULL_HANDLE || uniform_buffer_.buffer == VK_NULL_HANDLE || fallback_texture_view_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+    if (depth_views_[taa_parity_] == VK_NULL_HANDLE)
     {
         return false;
     }
@@ -1976,7 +2199,22 @@ bool RayTracing::UpdateDescriptors()
     material_info.buffer = material_record_buffer_.buffer;
     material_info.range = material_record_buffer_.size;
 
-    std::array<VkWriteDescriptorSet, 9> writes = {};
+    VkDescriptorImageInfo motion_image_info = {};
+    motion_image_info.imageView = motion_view_;
+    motion_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorBufferInfo instance_record_info = {};
+    instance_record_info.buffer = instance_record_buffer_.buffer;
+    instance_record_info.range = instance_record_buffer_.size;
+
+    // Current-frame depth slot. Mirrors `taa_parity_`. Flipped post-submit
+    // so the *other* slot (now holding the just-written depth) becomes the
+    // "previous frame" sampled by taa.comp on the next frame.
+    VkDescriptorImageInfo depth_image_info = {};
+    depth_image_info.imageView = depth_views_[taa_parity_];
+    depth_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    std::array<VkWriteDescriptorSet, 12> writes = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     writes[0].pNext = &acceleration_write;
     writes[0].dstSet = descriptor_set_;
@@ -2040,6 +2278,27 @@ bool RayTracing::UpdateDescriptors()
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[8].pImageInfo = &skybox_image_info;
 
+    writes[9] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[9].dstSet = descriptor_set_;
+    writes[9].dstBinding = 9;
+    writes[9].descriptorCount = 1;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[9].pImageInfo = &motion_image_info;
+
+    writes[10] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[10].dstSet = descriptor_set_;
+    writes[10].dstBinding = 10;
+    writes[10].descriptorCount = 1;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[10].pBufferInfo = &instance_record_info;
+
+    writes[11] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[11].dstSet = descriptor_set_;
+    writes[11].dstBinding = 11;
+    writes[11].descriptorCount = 1;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[11].pImageInfo = &depth_image_info;
+
     vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
     return true;
@@ -2066,6 +2325,335 @@ void RayTracing::SetSkyboxRotation(float rotation_degrees)
 
     skybox_rotation_degrees_ = rotation_degrees;
     ResetAccumulationState();
+}
+
+void RayTracing::SetTAAEnabled(bool enabled)
+{
+    if (taa_enabled_ == enabled)
+    {
+        return;
+    }
+    taa_enabled_ = enabled;
+    // Drop the temporal history so the first TAA frame after re-enable does
+    // not blend against a stale image from before the toggle.
+    taa_history_valid_ = false;
+}
+
+void RayTracing::ComputePrevViewProjection(
+    const std::array<float, 16>& view_inverse,
+    const std::array<float, 16>& projection_inverse,
+    std::array<float, 16>& out_view_projection)
+{
+    std::array<float, 16> view{};
+    std::array<float, 16> projection{};
+    if (!Invert4x4(view_inverse, view) || !Invert4x4(projection_inverse, projection))
+    {
+        // Identity fallback; the resulting motion vectors will collapse to
+        // (0, 0) which is the correct behaviour for a singular camera.
+        out_view_projection = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
+        return;
+    }
+    Multiply4x4(projection, view, out_view_projection);
+}
+
+bool RayTracing::EnsureTaaResources()
+{
+    if (!available_ || vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+    if (output_width_ == 0 || output_height_ == 0)
+    {
+        return false;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    // Ping-pong TAA images (PQ-encoded HDR, R16G16B16A16_SFLOAT). Recreated
+    // when the viewport size changes.
+    for (int i = 0; i < 2; ++i)
+    {
+        if (taa_images_[i] != VK_NULL_HANDLE)
+        {
+            continue;
+        }
+        if (!CreateVulkanImage(
+                vulkan_context_->GetPhysicalDevice(),
+                device,
+                allocator,
+                output_width_,
+                output_height_,
+                VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                taa_images_[i],
+                taa_memories_[i],
+                taa_views_[i]))
+        {
+            status_message_ = "Failed to create TAA history image";
+            return false;
+        }
+        taa_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
+    if (taa_sampler_ == VK_NULL_HANDLE)
+    {
+        VkSamplerCreateInfo info = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        info.magFilter = VK_FILTER_LINEAR;
+        info.minFilter = VK_FILTER_LINEAR;
+        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.maxLod = 0.0f;
+        VkResult result = vkCreateSampler(device, &info, allocator, &taa_sampler_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to create TAA sampler";
+            return false;
+        }
+    }
+
+    if (taa_uniform_buffer_.buffer == VK_NULL_HANDLE)
+    {
+        if (!CreateGpuBuffer(
+                *vulkan_context_,
+                sizeof(TaaUniformBlock),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                taa_uniform_buffer_))
+        {
+            status_message_ = "Failed to create TAA uniform buffer";
+            return false;
+        }
+    }
+
+    if (taa_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        // binding 0: current frame color (storage, readonly)
+        // binding 1: motion vectors (storage, readonly)
+        // binding 2: previous TAA result (combined image sampler)
+        // binding 3: current TAA result (storage, writeonly)
+        // binding 4: display sRGB output (storage, writeonly)
+        // binding 5: TAA uniforms
+        // binding 6: current-frame linear depth (storage, readonly)
+        // binding 7: previous-frame linear depth (storage, readonly)
+        std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[2] = {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[5] = {5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+
+        VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &info, allocator, &taa_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to create TAA descriptor set layout";
+            return false;
+        }
+    }
+
+    if (taa_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        info.setLayoutCount = 1;
+        info.pSetLayouts = &taa_descriptor_set_layout_;
+        VkResult result = vkCreatePipelineLayout(device, &info, allocator, &taa_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to create TAA pipeline layout";
+            return false;
+        }
+    }
+
+    if (taa_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule module = LoadShaderModule(device, ResolveShaderPath("taa.comp.spv"));
+        if (module == VK_NULL_HANDLE)
+        {
+            status_message_ = "Failed to load taa.comp shader module";
+            return false;
+        }
+        VkPipelineShaderStageCreateInfo stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";
+
+        VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = stage;
+        info.layout = taa_pipeline_layout_;
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &info, allocator, &taa_pipeline_);
+        vkDestroyShaderModule(device, module, allocator);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            taa_pipeline_ = VK_NULL_HANDLE;
+            status_message_ = "Failed to create TAA compute pipeline";
+            return false;
+        }
+    }
+
+    for (int i = 0; i < 2; ++i)
+    {
+        if (taa_descriptor_sets_[i] != VK_NULL_HANDLE)
+        {
+            continue;
+        }
+        VkDescriptorSetAllocateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &taa_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &info, &taa_descriptor_sets_[i]);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            taa_descriptor_sets_[i] = VK_NULL_HANDLE;
+            status_message_ = "Failed to allocate TAA descriptor set";
+            return false;
+        }
+        taa_descriptors_dirty_ = true;
+    }
+
+    if (taa_descriptors_dirty_)
+    {
+        if (!UpdateTaaDescriptors())
+        {
+            return false;
+        }
+        taa_descriptors_dirty_ = false;
+    }
+    return true;
+}
+
+bool RayTracing::UpdateTaaDescriptors()
+{
+    if (vulkan_context_ == nullptr ||
+        history_view_ == VK_NULL_HANDLE ||
+        motion_view_ == VK_NULL_HANDLE ||
+        output_view_ == VK_NULL_HANDLE ||
+        taa_views_[0] == VK_NULL_HANDLE ||
+        taa_views_[1] == VK_NULL_HANDLE ||
+        depth_views_[0] == VK_NULL_HANDLE ||
+        depth_views_[1] == VK_NULL_HANDLE ||
+        taa_sampler_ == VK_NULL_HANDLE ||
+        taa_uniform_buffer_.buffer == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    for (int parity = 0; parity < 2; ++parity)
+    {
+        if (taa_descriptor_sets_[parity] == VK_NULL_HANDLE)
+        {
+            continue;
+        }
+        const int prev = 1 - parity;
+
+        VkDescriptorImageInfo current_color = {};
+        current_color.imageView = history_view_;
+        current_color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo motion = {};
+        motion.imageView = motion_view_;
+        motion.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo prev_taa = {};
+        prev_taa.sampler = taa_sampler_;
+        prev_taa.imageView = taa_views_[prev];
+        prev_taa.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkDescriptorImageInfo curr_taa = {};
+        curr_taa.imageView = taa_views_[parity];
+        curr_taa.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo display = {};
+        display.imageView = output_view_;
+        display.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorBufferInfo ubo = {};
+        ubo.buffer = taa_uniform_buffer_.buffer;
+        ubo.range = sizeof(TaaUniformBlock);
+
+        // Depth slots align with the same parity used for the color
+        // ping-pong: when `taa_parity_ == parity`, the rgen wrote to
+        // depth_views_[parity] and the previous frame's depth lives in
+        // depth_views_[1 - parity].
+        VkDescriptorImageInfo curr_depth = {};
+        curr_depth.imageView = depth_views_[parity];
+        curr_depth.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo prev_depth = {};
+        prev_depth.imageView = depth_views_[prev];
+        prev_depth.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        std::array<VkWriteDescriptorSet, 8> writes{};
+        for (auto& w : writes)
+        {
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = taa_descriptor_sets_[parity];
+            w.descriptorCount = 1;
+        }
+        writes[0].dstBinding = 0; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            writes[0].pImageInfo = &current_color;
+        writes[1].dstBinding = 1; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            writes[1].pImageInfo = &motion;
+        writes[2].dstBinding = 2; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;   writes[2].pImageInfo = &prev_taa;
+        writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            writes[3].pImageInfo = &curr_taa;
+        writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            writes[4].pImageInfo = &display;
+        writes[5].dstBinding = 5; writes[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;           writes[5].pBufferInfo = &ubo;
+        writes[6].dstBinding = 6; writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            writes[6].pImageInfo = &curr_depth;
+        writes[7].dstBinding = 7; writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            writes[7].pImageInfo = &prev_depth;
+
+        vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
+    return true;
+}
+
+void RayTracing::DestroyTaaResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            taa_images_[i] = VK_NULL_HANDLE;
+            taa_memories_[i] = VK_NULL_HANDLE;
+            taa_views_[i] = VK_NULL_HANDLE;
+            taa_descriptor_sets_[i] = VK_NULL_HANDLE;
+        }
+        taa_sampler_ = VK_NULL_HANDLE;
+        taa_uniform_buffer_ = {};
+        taa_descriptor_set_layout_ = VK_NULL_HANDLE;
+        taa_pipeline_layout_ = VK_NULL_HANDLE;
+        taa_pipeline_ = VK_NULL_HANDLE;
+        return;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    for (int i = 0; i < 2; ++i)
+    {
+        if (taa_views_[i] != VK_NULL_HANDLE) { vkDestroyImageView(device, taa_views_[i], allocator); taa_views_[i] = VK_NULL_HANDLE; }
+        if (taa_images_[i] != VK_NULL_HANDLE) { vkDestroyImage(device, taa_images_[i], allocator); taa_images_[i] = VK_NULL_HANDLE; }
+        if (taa_memories_[i] != VK_NULL_HANDLE) { vkFreeMemory(device, taa_memories_[i], allocator); taa_memories_[i] = VK_NULL_HANDLE; }
+        taa_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Descriptor sets are returned to the pool implicitly when the pool
+        // is reset / destroyed; we just drop the handles here.
+        taa_descriptor_sets_[i] = VK_NULL_HANDLE;
+    }
+    if (taa_sampler_ != VK_NULL_HANDLE) { vkDestroySampler(device, taa_sampler_, allocator); taa_sampler_ = VK_NULL_HANDLE; }
+    DestroyGpuBuffer(vulkan_context_, taa_uniform_buffer_);
+    if (taa_pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, taa_pipeline_, allocator); taa_pipeline_ = VK_NULL_HANDLE; }
+    if (taa_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, taa_pipeline_layout_, allocator); taa_pipeline_layout_ = VK_NULL_HANDLE; }
+    if (taa_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, taa_descriptor_set_layout_, allocator); taa_descriptor_set_layout_ = VK_NULL_HANDLE; }
+    taa_history_valid_ = false;
 }
 
 void RayTracing::EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch)
@@ -2153,6 +2741,51 @@ bool RayTracing::RenderFrame(
     if (result != VK_SUCCESS)
     {
         return false;
+    }
+
+    // --- Per-frame upload of instance motion-vector records ---
+    // Sized to match `pending_acceleration_instances_`; both arrays are
+    // ordered so that index N == `gl_InstanceID == N`. This upload is
+    // UNCONDITIONAL (not gated by tlas_rebuild_pending_/tlas_refit_pending_)
+    // because the CPU rebuilds `instance_records_cpu_` every UpdateScene with
+    // a fresh prev_transform snapshot, and the GPU must always see the
+    // current (prev, curr) pair -- otherwise stale records produce phantom
+    // motion vectors as soon as an object stops moving and the TLAS signature
+    // stabilizes (rebuild/refit no longer fires).
+    if (!instance_records_cpu_.empty())
+    {
+        const std::uint32_t record_count =
+            static_cast<std::uint32_t>(instance_records_cpu_.size());
+        const VkDeviceSize record_size =
+            static_cast<VkDeviceSize>(record_count * sizeof(InstanceRecordGpu));
+
+        if (record_count > instance_record_buffer_capacity_)
+        {
+            DestroyGpuBuffer(vulkan_context_, instance_record_buffer_);
+            instance_record_buffer_capacity_ = 0;
+            if (!CreateGpuBuffer(
+                    *vulkan_context_,
+                    record_size,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    instance_record_buffer_))
+            {
+                status_message_ = "Failed to create viewport RT instance record buffer";
+                return false;
+            }
+            instance_record_buffer_capacity_ = record_count;
+            descriptors_dirty_ = true;
+        }
+
+        if (!UploadGpuBuffer(
+                *vulkan_context_,
+                instance_record_buffer_,
+                instance_records_cpu_.data(),
+                static_cast<std::size_t>(record_size)))
+        {
+            status_message_ = "Failed to upload viewport RT instance record buffer";
+            return false;
+        }
     }
 
     // --- Handle pending TLAS work (after fence ensures the previous frame is done) ---
@@ -2379,6 +3012,22 @@ bool RayTracing::RenderFrame(
                 b.offset = 0;
                 b.size = VK_WHOLE_SIZE;
                 skinning_to_blas_barriers.push_back(b);
+
+                // prev-position buffer written by the same dispatch.
+                // The closest-hit shader reads it via buffer_reference, so it
+                // needs the same compute-shader-write -> rt-shader-read sync.
+                if (dispatch.prev_position_buffer != VK_NULL_HANDLE)
+                {
+                    VkBufferMemoryBarrier pp = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                    pp.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    pp.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    pp.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    pp.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    pp.buffer = dispatch.prev_position_buffer;
+                    pp.offset = 0;
+                    pp.size = VK_WHOLE_SIZE;
+                    skinning_to_blas_barriers.push_back(pp);
+                }
             }
 
             const bool has_skinning = !pending_skinning_dispatches_.empty();
@@ -2653,10 +3302,60 @@ bool RayTracing::RenderFrame(
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     history_layout_ = VK_IMAGE_LAYOUT_GENERAL;
 
+    if (motion_image_ != VK_NULL_HANDLE)
+    {
+        TransitionImageLayout(
+            command_buffer_,
+            motion_image_,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            motion_layout_,
+            VK_IMAGE_LAYOUT_GENERAL,
+            motion_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            motion_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT);
+        motion_layout_ = VK_IMAGE_LAYOUT_GENERAL;
+    }
+
+    // Depth ping-pong images. The slot indexed by `taa_parity_` is the
+    // current-frame write target (raygen writes), bound at RT descriptor
+    // binding 11 and at TAA binding 6. The other slot holds last frame's
+    // depth and is sampled by TAA at binding 7. Both are kept in GENERAL
+    // (storage image) across stages — the TAA pass uses `imageLoad` on
+    // both to avoid layout shuffles between the RT and compute dispatches.
+    for (int slot = 0; slot < 2; ++slot)
+    {
+        if (depth_images_[slot] == VK_NULL_HANDLE)
+        {
+            continue;
+        }
+        // Stage selection: the prev slot is read by last frame's TAA
+        // (compute), the curr slot is written by this frame's rgen (RT).
+        // Either way we want GENERAL by the time the RT dispatch starts.
+        const VkPipelineStageFlags src_stage = (depth_layouts_[slot] == VK_IMAGE_LAYOUT_UNDEFINED)
+            ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        const VkAccessFlags src_access = (depth_layouts_[slot] == VK_IMAGE_LAYOUT_UNDEFINED)
+            ? 0
+            : VK_ACCESS_SHADER_READ_BIT;
+        TransitionImageLayout(
+            command_buffer_,
+            depth_images_[slot],
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            depth_layouts_[slot],
+            VK_IMAGE_LAYOUT_GENERAL,
+            src_stage,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            src_access,
+            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
+        depth_layouts_[slot] = VK_IMAGE_LAYOUT_GENERAL;
+    }
+
     if (top_level_as_.handle == VK_NULL_HANDLE ||
         mesh_record_buffer_.buffer == VK_NULL_HANDLE ||
         section_record_buffer_.buffer == VK_NULL_HANDLE ||
-        material_record_buffer_.buffer == VK_NULL_HANDLE)
+        material_record_buffer_.buffer == VK_NULL_HANDLE ||
+        instance_record_buffer_.buffer == VK_NULL_HANDLE)
     {
         ResetAccumulationState();
         VkClearColorValue clear_value = {};
@@ -2705,8 +3404,50 @@ bool RayTracing::RenderFrame(
     uniforms.section_count = static_cast<std::uint32_t>(section_records_cpu_.size());
     uniforms.texture_count = static_cast<std::uint32_t>(texture_descriptors_cpu_.size());
 
+    // --- TAA per-frame state ---
+    uniforms.prev_view_projection = prev_view_projection_;
+    // motion vector convention requires the *current* view*projection
+    // to project pos_ws_curr to screen space (alongside prev_view_projection
+    // for pos_ws_prev). The CPU-side view/projection are stored as their
+    // *inverses*; invert and multiply to obtain V*P used in the rgen shader.
+    {
+        std::array<float, 16> view{};
+        std::array<float, 16> projection{};
+        if (Invert4x4(view_inverse, view) && Invert4x4(projection_inverse, projection))
+        {
+            Multiply4x4(projection, view, uniforms.current_view_projection);
+        }
+    }
+    float jitter_x_px = 0.0f;
+    float jitter_y_px = 0.0f;
+    if (taa_enabled_)
+    {
+        // Halton(2,3) sequence, period 16 in [-0.5, +0.5] px.
+        const std::uint32_t seq_index = (taa_jitter_index_ % 16u) + 1u;
+        jitter_x_px = HaltonSample(seq_index, 2u) - 0.5f;
+        jitter_y_px = HaltonSample(seq_index, 3u) - 0.5f;
+    }
+    uniforms.jitter_offset = {jitter_x_px, jitter_y_px, taa_prev_jitter_px_[0], taa_prev_jitter_px_[1]};
+    uniforms.taa_params = {
+        (taa_enabled_ && taa_history_valid_) ? 1.0f : 0.0f,
+        taa_debug_.variance_scale,
+        taa_debug_.anti_sparkle,
+        taa_debug_.jitter_compensation};
+    uniforms.adaptive_params = {
+        (taa_debug_.adaptive_enabled && taa_history_valid_) ? 1.0f : 0.0f,
+        static_cast<float>(taa_debug_.adaptive_max_samples),
+        taa_debug_.adaptive_threshold,
+        taa_debug_.adaptive_preservation};
+
     UniformBlock accumulation_reference = uniforms;
     accumulation_reference.accumulation_data = {0, 0, 0, 0};
+    // The TAA fields change every frame by design; zero them out before the
+    // accumulation comparison so they do not falsely trigger a reset.
+    accumulation_reference.prev_view_projection = {};
+    accumulation_reference.current_view_projection = {};
+    accumulation_reference.taa_params = {};
+    accumulation_reference.jitter_offset = {};
+    accumulation_reference.adaptive_params = {};
     const bool accumulation_reset =
         accumulation_reset_requested_ ||
         dynamic_geometry_present_ ||
@@ -2773,8 +3514,124 @@ bool RayTracing::RenderFrame(
         output_height_,
         1);
 
+    // --------------------------------------------------------------
+    // TAA post-pass: temporally accumulate the freshly traced frame.
+    // --------------------------------------------------------------
+    bool taa_dispatched = false;
+    if (taa_enabled_ && EnsureTaaResources())
+    {
+        // Make the ray-gen writes visible to the compute shader.
+        VkMemoryBarrier rt_to_compute = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        rt_to_compute.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rt_to_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &rt_to_compute,
+            0, nullptr,
+            0, nullptr);
+
+        const int curr_parity = taa_parity_;
+        const int prev_parity = 1 - curr_parity;
+
+        // Transition the previous TAA image to SHADER_READ_ONLY_OPTIMAL so
+        // it can be sampled with the linear sampler. Current TAA image
+        // becomes a storage write target.
+        TransitionImageLayout(
+            command_buffer_,
+            taa_images_[prev_parity],
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            taa_layouts_[prev_parity],
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            taa_layouts_[prev_parity] == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            taa_layouts_[prev_parity] == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+        taa_layouts_[prev_parity] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        TransitionImageLayout(
+            command_buffer_,
+            taa_images_[curr_parity],
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            taa_layouts_[curr_parity],
+            VK_IMAGE_LAYOUT_GENERAL,
+            taa_layouts_[curr_parity] == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            taa_layouts_[curr_parity] == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT);
+        taa_layouts_[curr_parity] = VK_IMAGE_LAYOUT_GENERAL;
+
+        // Upload TAA uniforms.
+        TaaUniformBlock taa_uniforms{};
+        taa_uniforms.extent = {output_width_, output_height_, 0u, 0u};
+        taa_uniforms.jitter = {jitter_x_px, jitter_y_px, taa_prev_jitter_px_[0], taa_prev_jitter_px_[1]};
+        // .x = history_valid, .y = variance_scale, .z = anti_sparkle, .w = history_blend_max.
+        // (uniforms.taa_params.w carries jitter_compensation for the rgen shader, not for TAA.)
+        taa_uniforms.params = {
+            uniforms.taa_params[0],
+            taa_debug_.variance_scale,
+            taa_debug_.anti_sparkle,
+            taa_debug_.history_blend};
+        taa_uniforms.debug = {
+            static_cast<float>(taa_debug_.viz_mode),
+            taa_debug_.variance_scale_moving,
+            0.0f,
+            0.0f};
+        if (!UploadGpuBuffer(*vulkan_context_, taa_uniform_buffer_, &taa_uniforms, sizeof(taa_uniforms)))
+        {
+            status_message_ = "Failed to upload TAA uniforms";
+        }
+        else
+        {
+            // Per-parity descriptors point at the current ping-pong target
+            // and the previous sampled image; refresh in case the views
+            // changed.
+            UpdateTaaDescriptors();
+
+            vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, taa_pipeline_);
+            vkCmdBindDescriptorSets(
+                command_buffer_,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                taa_pipeline_layout_,
+                0, 1, &taa_descriptor_sets_[curr_parity],
+                0, nullptr);
+            const std::uint32_t gx = (output_width_ + 15u) / 16u;
+            const std::uint32_t gy = (output_height_ + 15u) / 16u;
+            vkCmdDispatch(command_buffer_, gx, gy, 1);
+            taa_dispatched = true;
+        }
+    }
+
     accumulation_reference_uniforms_ = accumulation_reference;
     accumulation_reference_uniforms_valid_ = true;
+
+    // Cache the current view-projection for next frame's motion vector
+    // re-projection. We always update this so motion vectors are valid the
+    // first frame after TAA is enabled.
+    ComputePrevViewProjection(view_inverse, projection_inverse, prev_view_projection_);
+    if (taa_dispatched)
+    {
+        taa_prev_jitter_px_[0] = jitter_x_px;
+        taa_prev_jitter_px_[1] = jitter_y_px;
+        taa_jitter_index_ = (taa_jitter_index_ + 1u) % 16u;
+        taa_parity_ ^= 1;
+        taa_history_valid_ = true;
+        // The depth ping-pong slot is bound at RT descriptor binding 11
+        // and is selected via `taa_parity_`; flipping the parity requires
+        // the RT descriptor write to be refreshed so the rgen targets
+        // the new current slot next frame (and the *other* slot — which
+        // now holds the just-written depth — becomes the previous-frame
+        // input sampled by the next TAA dispatch).
+        descriptors_dirty_ = true;
+    }
+    else if (!taa_enabled_)
+    {
+        taa_prev_jitter_px_[0] = 0.0f;
+        taa_prev_jitter_px_[1] = 0.0f;
+        taa_history_valid_ = false;
+    }
 
     status_message_ = "Viewport RT frame traced";
     const bool submitted = finalize_and_submit();

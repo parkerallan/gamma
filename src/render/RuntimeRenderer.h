@@ -50,6 +50,12 @@ public:
         std::string* error_message = nullptr);
     bool RenderFrame(std::uint32_t target_width, std::uint32_t target_height, std::string* error_message = nullptr);
 
+    // Push editor-tunable TAA debug knobs into the runtime RT subsystem so
+    // SettingsPanel sliders take effect during play-mode (mirrors the
+    // SceneViewportRenderer wiring used in the editor viewport).
+    void SetTAAEnabled(bool enabled) { ray_tracing_.SetTAAEnabled(enabled); }
+    void SetTaaDebugSettings(const RayTracing::TaaDebugSettings& settings) { ray_tracing_.SetTaaDebugSettings(settings); }
+
     // Editor->runtime hand-off: pre-populate caches so the first runtime frame
     // doesn't pay the Assimp + scene-text parse cost again. Call AFTER
     // StartSession() (which clears these caches for the incoming scene path).
@@ -145,6 +151,14 @@ public:
         GpuBuffer bind_pose_buffer{};   // SceneGpuVertex layout, uploaded once
         GpuBuffer influence_buffer{};   // (uvec4 + vec4) per vertex, uploaded once
         GpuBuffer palette_buffer{};     // mat4 * bone_count, host-coherent, written every frame
+        // per-vertex previous-frame skinned object-space positions
+        // (3 floats per vertex). Written by the skinning compute pass at the
+        // start of each frame (it copies the *previous* frame's output_vertices
+        // position into here before overwriting it with the new skinned
+        // position). Surfaced to the RT closest-hit via `MeshRecord` so the
+        // primary motion-vector pass can compute `pos_obj_prev` for skinned
+        // meshes.
+        GpuBuffer prev_position_buffer{};
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         bool ready = false;
     };

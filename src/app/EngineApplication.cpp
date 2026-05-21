@@ -1039,6 +1039,24 @@ void EngineApplication::RenderRuntimeWindow()
     }
 
     std::string runtime_error;
+    // Mirror the editor's TAA debug-knob plumbing so SettingsPanel sliders
+    // affect play-mode TAA as well (SceneViewportRenderer wires the same set
+    // for the editor viewport).
+    runtime_renderer_.SetTAAEnabled(state_.taa_enabled);
+    {
+        RayTracing::TaaDebugSettings taa_dbg{};
+        taa_dbg.viz_mode             = state_.taa_viz_mode;
+        taa_dbg.variance_scale       = state_.taa_variance_scale;
+        taa_dbg.variance_scale_moving= state_.taa_variance_scale_moving;
+        taa_dbg.anti_sparkle         = state_.taa_anti_sparkle;
+        taa_dbg.history_blend        = state_.taa_history_blend;
+        taa_dbg.jitter_compensation  = state_.taa_jitter_compensation;
+        taa_dbg.adaptive_enabled     = state_.taa_adaptive_enabled;
+        taa_dbg.adaptive_max_samples = state_.taa_adaptive_max_samples;
+        taa_dbg.adaptive_threshold   = state_.taa_adaptive_threshold;
+        taa_dbg.adaptive_preservation= state_.taa_adaptive_preservation;
+        runtime_renderer_.SetTaaDebugSettings(taa_dbg);
+    }
     if (!runtime_renderer_.RenderFrame(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), &runtime_error))
     {
         state_.SetPlayError(runtime_error.empty() ? "Runtime frame render failed" : runtime_error);

@@ -92,7 +92,7 @@ void VulkanContext::CheckVkResult(VkResult err)
     SDL_Log("Vulkan error: VkResult = %d", static_cast<int>(err));
 }
 
-bool VulkanContext::Initialize(SDL_Window* window)
+bool VulkanContext::Initialize(SDL_Window* window, bool prefer_low_latency)
 {
     if (window == nullptr)
     {
@@ -110,7 +110,7 @@ bool VulkanContext::Initialize(SDL_Window* window)
     // compiles on every run, so don't fail Initialize if it can't be made.
     CreatePipelineCache();
 
-    SetupWindowData(window);
+    SetupWindowData(window, prefer_low_latency);
     return main_window_data_.Surface != VK_NULL_HANDLE && main_window_data_.RenderPass != VK_NULL_HANDLE;
 }
 
@@ -521,9 +521,9 @@ bool VulkanContext::CreateSurface(SDL_Window* window, ImGui_ImplVulkanH_Window& 
     return true;
 }
 
-void VulkanContext::SetupWindowData(SDL_Window* window)
+void VulkanContext::SetupWindowData(SDL_Window* window, bool prefer_low_latency)
 {
-    SetupWindowData(window, main_window_data_);
+    SetupWindowData(window, main_window_data_, prefer_low_latency);
 }
 
 void VulkanContext::SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window& window_data, bool prefer_low_latency)

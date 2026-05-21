@@ -27,6 +27,10 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    mat4 prev_view_projection;
+    mat4 current_view_projection;
+    vec4 taa_params;
+    vec4 jitter_offset;
 } scene_uniforms;
 
 struct SceneVertex
@@ -48,10 +52,19 @@ layout(buffer_reference, scalar) readonly buffer IndexBuffer
     uint indices[];
 };
 
+// Forward-declared so the MeshRecord struct layout matches the closest-hit
+// shader byte-for-byte (the any-hit doesn't read prev positions, but the
+// SSBO is shared with the rchit and the host MeshRecordGpu).
+layout(buffer_reference, scalar) readonly buffer PrevPositionBuffer
+{
+    vec3 positions[];
+};
+
 struct MeshRecord
 {
     VertexBuffer vertex_buffer;
     IndexBuffer index_buffer;
+    PrevPositionBuffer prev_position_buffer;
     uint vertex_count;
     uint vertex_stride;
     uint index_count;

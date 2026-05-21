@@ -102,6 +102,71 @@ void SettingsPanel::Render(EngineState& state)
         }
     }
 
+    static bool show_debug_options = false;
+    ImGui::Checkbox("Show Debug Options", &show_debug_options);
+
+    if (show_debug_options && ImGui::CollapsingHeader("Temporal AA (debug)", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        settings_changed |= ImGui::Checkbox("Enable TAA", &state.taa_enabled);
+
+        static const char* kVizModes[] = {
+            "0 - Normal output",
+            "1 - Motion vectors (color)",
+            "2 - Pixel weight (gray)",
+            "3 - Jitter offset (color)",
+            "4 - Current frame only",
+            "5 - History only",
+        };
+        const int viz_count = static_cast<int>(sizeof(kVizModes) / sizeof(kVizModes[0]));
+        if (state.taa_viz_mode < 0) state.taa_viz_mode = 0;
+        if (state.taa_viz_mode >= viz_count) state.taa_viz_mode = viz_count - 1;
+        settings_changed |= ImGui::Combo("Visualization", &state.taa_viz_mode, kVizModes, viz_count);
+
+        settings_changed |= ImGui::SliderFloat("Variance scale", &state.taa_variance_scale, 0.0f, 4.0f, "%.3f");
+        ImGui::TextDisabled("3x3 NCC clamp width on static pixels. Lower = tighter (less ghosting, more flicker).");
+
+        settings_changed |= ImGui::SliderFloat("Variance scale (moving)", &state.taa_variance_scale_moving, 0.0f, 4.0f, "%.3f");
+        ImGui::TextDisabled("Clamp width on fast-moving pixels. Lerped via motion weight. Lower = kills directional flow.");
+
+        settings_changed |= ImGui::SliderFloat("Anti-sparkle", &state.taa_anti_sparkle, 0.0f, 1.0f, "%.3f");
+        ImGui::TextDisabled("Per-pixel firefly clamp (flt_taa_anti_sparkle).");
+
+        settings_changed |= ImGui::SliderFloat("History blend (max)", &state.taa_history_blend, 0.0f, 1.0f, "%.3f");
+        ImGui::TextDisabled("Max weight of current frame into history (default 0.10 = 10%% current).");
+
+        settings_changed |= ImGui::SliderFloat("Jitter compensation", &state.taa_jitter_compensation, 0.0f, 1.0f, "%.3f");
+        ImGui::TextDisabled("0 = legacy motion vectors. 1 = subtract jitter_curr from current UV (live diagnose).");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Adaptive supersampling (undersampled-pixel fix)");
+        settings_changed |= ImGui::Checkbox("Enable adaptive sampling", &state.taa_adaptive_enabled);
+        ImGui::TextDisabled("Probes 5-tap luma contrast of last frame; high-contrast pixels get extra rays.");
+        settings_changed |= ImGui::SliderInt("Max samples per pixel", &state.taa_adaptive_max_samples, 1, 8);
+        ImGui::TextDisabled("Each extra sample is a full primary ray (shading + shadows). 2 is usually enough.");
+        settings_changed |= ImGui::SliderFloat("Contrast threshold", &state.taa_adaptive_threshold, 0.01f, 1.0f, "%.3f");
+        ImGui::TextDisabled("Higher => fewer pixels qualify (cheaper). 0.25 default. Drop to 0.15 if shimmer remains.");
+        settings_changed |= ImGui::SliderFloat("Feature preservation", &state.taa_adaptive_preservation, 0.0f, 1.0f, "%.3f");
+        ImGui::TextDisabled("0 = pure average (clean, but subpixel strands look semi-transparent).\n1 = bias toward brightest sample where samples disagree (keeps hair opaque, may amplify HDR fireflies).");
+
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Revert TAA defaults"))
+        {
+            state.taa_enabled = true;
+            state.taa_viz_mode = 0;
+            state.taa_variance_scale = 1.25f;
+            state.taa_variance_scale_moving = 0.75f;
+            state.taa_anti_sparkle = 0.25f;
+            state.taa_history_blend = 0.1f;
+            state.taa_jitter_compensation = 0.0f;
+            state.taa_adaptive_enabled = false;
+            state.taa_adaptive_max_samples = 2;
+            state.taa_adaptive_threshold = 0.25f;
+            state.taa_adaptive_preservation = 0.7f;
+            settings_changed = true;
+        }
+    }
+
     if (ImGui::CollapsingHeader("Session", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::Text("Open file: %s", state.HasOpenFile() ? state.GetOpenFileDisplayPath().c_str() : "None");
