@@ -277,6 +277,12 @@ void main()
     vec3  viz_motion       = vec3(0.0);
     vec3  viz_color_prev   = vec3(0.0);
     float viz_pixel_weight = 0.0;
+    // Diagnostic decomposition of pixel_weight. Captured below as the
+    // disocclusion / motion / sample paths run. Visualized in viz_mode == 6
+    // as R = disoccluded, G = motion_weight, B = sample_weight.
+    float viz_disoccluded  = 0.0;
+    float viz_motion_w     = 0.0;
+    float viz_sample_w     = 0.0;
 
     const float flt_taa                      = taa.params.x;
     const float flt_taa_variance             = taa.params.y;
@@ -385,8 +391,37 @@ void main()
                 ivec2(floor(pos_prev)),
                 ivec2(0),
                 ivec2(taa_output_width - 1, taa_output_height - 1));
-            float depth_curr = imageLoad(curr_depth_image, int_render_pos).x;
-            float depth_prev = imageLoad(prev_depth_image, prev_sample_px).x;
+
+            // 3x3 nearest-real-surface (min depth, sky-sentinel taps
+            // skipped) on both frames. Required because a single-tap
+            // comparison fires false disocclusions at every static
+            // silhouette where two real surfaces overlap (player in
+            // front of grid, hair card in front of hair card): sub-pixel
+            // jitter in the rgen makes the center primary ray hit the
+            // foreground one frame and the back surface the next, so
+            // depth_curr / depth_prev flip between e.g. 3 m and 5 m and
+            // the relative-difference test trips every frame. Pooling
+            // resolves to the same nearest real surface in the
+            // neighborhood on both frames, so the test only fires for
+            // genuine reveals where the foreground actually moves off
+            // and a different surface is exposed.
+            float depth_curr = 1e30;
+            float depth_prev = 1e30;
+            {
+                const ivec2 extent_minus_one = ivec2(taa_output_width - 1, taa_output_height - 1);
+                for (int yy = -1; yy <= 1; ++yy)
+                {
+                    for (int xx = -1; xx <= 1; ++xx)
+                    {
+                        ivec2 pc = clamp(int_render_pos + ivec2(xx, yy), ivec2(0), extent_minus_one);
+                        ivec2 pp = clamp(prev_sample_px + ivec2(xx, yy), ivec2(0), extent_minus_one);
+                        float dc = imageLoad(curr_depth_image, pc).x;
+                        float dp = imageLoad(prev_depth_image, pp).x;
+                        if (dc < SKY_DEPTH_THRESHOLD) depth_curr = min(depth_curr, dc);
+                        if (dp < SKY_DEPTH_THRESHOLD) depth_prev = min(depth_prev, dp);
+                    }
+                }
+            }
 
             // disoccluded == true when both sides are real surfaces with
             // very different depths (e.g. fox at depth 3 → helmet at
@@ -395,7 +430,19 @@ void main()
             // hit/miss at silhouettes and any rejection there leaves
             // single-spp noise (visible as a black outline).
             bool disoccluded = false;
-            if (depth_curr < SKY_DEPTH_THRESHOLD && depth_prev < SKY_DEPTH_THRESHOLD)
+            // Gate the depth disocclusion test on motion magnitude. The
+            // test exists to catch genuine reveals (object moves out of
+            // the way, exposing a different surface behind it). Those
+            // events ONLY happen when something is moving. For a static
+            // scene the jitter-compensation motion is always ~|jitter|
+            // pixels, well under 1 px. Firing the test on static
+            // silhouettes is a pure false positive (single-pixel-wide
+            // features like hair strands cannot be saved by neighborhood
+            // pooling — the entire 3x3 can be background when jitter
+            // flips the center). 1.5 px threshold = jitter ceiling + safety.
+            float motion_px_mag = sqrt(dot(motion, motion));
+            bool depth_test_enabled = motion_px_mag > 1.5;
+            if (depth_test_enabled && depth_curr < SKY_DEPTH_THRESHOLD && depth_prev < SKY_DEPTH_THRESHOLD)
             {
                 float den = max(max(depth_curr, depth_prev), 1e-3);
                 float rel = abs(depth_curr - depth_prev) / den;
@@ -406,6 +453,7 @@ void main()
             // tied to this pixel, so NCC must clamp it aggressively
             // and the blend must lean on the current frame.
             if (!reprojection_in_bounds) disoccluded = true;
+            viz_disoccluded = disoccluded ? 1.0 : 0.0;
 
             // Always run the Catmull-Rom + NCC path. If disoccluded,
             // force a tight clamp width regardless of the user's
@@ -453,6 +501,8 @@ void main()
                     // Mix the new color with the clamped previous color
                     float sample_weight = get_sample_weight(nearest_render_pos - int_render_pos, taa_output_width * inv_width);
                     float pixel_weight = max(motion_weight, sample_weight) * flt_taa_history_blend;
+                    viz_motion_w = motion_weight;
+                    viz_sample_w = sample_weight;
                     // On disocclusion, also boost the current-frame
                     // weight so accumulation re-converges in a few
                     // frames rather than ~10.
@@ -514,6 +564,15 @@ void main()
     {
         // Raw history sample (no clamp, no blend).
         display_color = linear_to_srgb(PQDecode(viz_color_prev));
+    }
+    else if (flt_taa_viz_mode == 6)
+    {
+        // Decomposition of pixel_weight sources.
+        //   R = disocclusion fired (depth or off-screen).
+        //   G = motion_weight (smoothstep of |motion| in pixels).
+        //   B = sample_weight (sub-pixel residual from jitter).
+        // Use this to identify WHY pixel_weight is high at a given pixel.
+        display_color = vec3(viz_disoccluded, viz_motion_w, viz_sample_w);
     }
 
     imageStore(display_image,  ipos, vec4(display_color, 1));

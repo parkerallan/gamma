@@ -116,6 +116,7 @@ void SettingsPanel::Render(EngineState& state)
             "3 - Jitter offset (color)",
             "4 - Current frame only",
             "5 - History only",
+            "6 - Weight decomposition (R=disocc, G=motion, B=sample)",
         };
         const int viz_count = static_cast<int>(sizeof(kVizModes) / sizeof(kVizModes[0]));
         if (state.taa_viz_mode < 0) state.taa_viz_mode = 0;
