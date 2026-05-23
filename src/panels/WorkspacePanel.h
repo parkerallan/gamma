@@ -17,6 +17,13 @@ struct CachedModelAssetEntry
 {
     std::filesystem::file_time_type write_time{};
     ModelAsset asset{};
+    // When a fresh model is referenced mid-edit (e.g. user drag-drops a glTF
+    // onto a scene object in the Info panel), the load runs on a worker
+    // thread and the asset stays in its empty/unloaded state until the
+    // future resolves. The viewport renderer already skips entries with
+    // `asset.loaded == false`, so the UI stays responsive while parsing.
+    std::shared_future<ModelAsset> pending_load;
+    bool load_in_flight = false;
 };
 
 class WorkspacePanel

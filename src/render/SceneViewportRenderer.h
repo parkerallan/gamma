@@ -164,11 +164,11 @@ private:
     bool gizmo_preview_write_rotation_ = false;
     bool gizmo_preview_write_scale_ = false;
 
-    // Deferred 2D overlay commit state for Text2D/Image2D drag/resize.
+    // Deferred 2D overlay commit state for 2D attribute drag/resize.
     bool overlay_preview_active_ = false;
     std::string overlay_preview_object_name_;
     std::size_t overlay_preview_attribute_index_ = 0;
-    bool overlay_preview_is_text_ = false;
+    SceneObjectAttributeKind overlay_preview_kind_ = SceneObjectAttributeKind::None;
     float overlay_preview_x_ = 0.0f;
     float overlay_preview_y_ = 0.0f;
     float overlay_preview_w_ = 1.0f;

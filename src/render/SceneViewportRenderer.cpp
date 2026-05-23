@@ -2993,7 +2993,7 @@ void SceneViewportRenderer::RenderUi(
             overlay_preview_attribute_index_ < preview_object_it->attributes.size())
         {
             SceneObjectAttribute& preview_attribute = preview_object_it->attributes[overlay_preview_attribute_index_];
-            if (overlay_preview_is_text_ && preview_attribute.kind == SceneObjectAttributeKind::Text2D)
+            if (overlay_preview_kind_ == SceneObjectAttributeKind::Text2D && preview_attribute.kind == SceneObjectAttributeKind::Text2D)
             {
                 if (overlay_preview_write_position_)
                 {
@@ -3006,7 +3006,7 @@ void SceneViewportRenderer::RenderUi(
                     preview_attribute.text_2d.height = overlay_preview_h_;
                 }
             }
-            else if (!overlay_preview_is_text_ && preview_attribute.kind == SceneObjectAttributeKind::Image2D)
+            else if (overlay_preview_kind_ == SceneObjectAttributeKind::Image2D && preview_attribute.kind == SceneObjectAttributeKind::Image2D)
             {
                 if (overlay_preview_write_position_)
                 {
@@ -3019,10 +3019,24 @@ void SceneViewportRenderer::RenderUi(
                     preview_attribute.image_2d.height = overlay_preview_h_;
                 }
             }
+            else if (overlay_preview_kind_ == SceneObjectAttributeKind::Color2D && preview_attribute.kind == SceneObjectAttributeKind::Color2D)
+            {
+                if (overlay_preview_write_position_)
+                {
+                    preview_attribute.color_2d.x = overlay_preview_x_;
+                    preview_attribute.color_2d.y = overlay_preview_y_;
+                }
+                if (overlay_preview_write_size_)
+                {
+                    preview_attribute.color_2d.width = overlay_preview_w_;
+                    preview_attribute.color_2d.height = overlay_preview_h_;
+                }
+            }
             else
             {
                 overlay_preview_active_ = false;
                 overlay_preview_object_name_.clear();
+                overlay_preview_kind_ = SceneObjectAttributeKind::None;
                 overlay_preview_write_position_ = false;
                 overlay_preview_write_size_ = false;
             }
@@ -3031,6 +3045,7 @@ void SceneViewportRenderer::RenderUi(
         {
             overlay_preview_active_ = false;
             overlay_preview_object_name_.clear();
+            overlay_preview_kind_ = SceneObjectAttributeKind::None;
             overlay_preview_write_position_ = false;
             overlay_preview_write_size_ = false;
         }
@@ -3473,16 +3488,18 @@ void SceneViewportRenderer::RenderUi(
         for (const SceneObjectAttribute& attribute : object.attributes)
         {
             if (attribute.kind != SceneObjectAttributeKind::Text2D &&
-                attribute.kind != SceneObjectAttributeKind::Image2D)
+                attribute.kind != SceneObjectAttributeKind::Image2D &&
+                attribute.kind != SceneObjectAttributeKind::Color2D)
             {
                 continue;
             }
 
             const bool is_text_overlay = attribute.kind == SceneObjectAttributeKind::Text2D;
-            const float attr_x = is_text_overlay ? attribute.text_2d.x : attribute.image_2d.x;
-            const float attr_y = is_text_overlay ? attribute.text_2d.y : attribute.image_2d.y;
-            float attr_w = is_text_overlay ? attribute.text_2d.width : attribute.image_2d.width;
-            float attr_h = is_text_overlay ? attribute.text_2d.height : attribute.image_2d.height;
+            const bool is_color_overlay = attribute.kind == SceneObjectAttributeKind::Color2D;
+            const float attr_x = is_text_overlay ? attribute.text_2d.x : (is_color_overlay ? attribute.color_2d.x : attribute.image_2d.x);
+            const float attr_y = is_text_overlay ? attribute.text_2d.y : (is_color_overlay ? attribute.color_2d.y : attribute.image_2d.y);
+            float attr_w = is_text_overlay ? attribute.text_2d.width : (is_color_overlay ? attribute.color_2d.width : attribute.image_2d.width);
+            float attr_h = is_text_overlay ? attribute.text_2d.height : (is_color_overlay ? attribute.color_2d.height : attribute.image_2d.height);
             if (is_text_overlay)
             {
                 scene_2d_renderer_.GetText2DRenderSize(state.project_root, attribute.text_2d, attr_w, attr_h);
@@ -3521,7 +3538,9 @@ void SceneViewportRenderer::RenderUi(
         for (std::size_t attribute_index = 0; attribute_index < selected_scene_object_metadata->attributes.size(); ++attribute_index)
         {
             const SceneObjectAttribute& attribute = selected_scene_object_metadata->attributes[attribute_index];
-            if (attribute.kind == SceneObjectAttributeKind::Text2D || attribute.kind == SceneObjectAttributeKind::Image2D)
+            if (attribute.kind == SceneObjectAttributeKind::Text2D ||
+                attribute.kind == SceneObjectAttributeKind::Image2D ||
+                attribute.kind == SceneObjectAttributeKind::Color2D)
             {
                 selected_overlay_attribute = &attribute;
                 selected_overlay_attribute_index = attribute_index;
@@ -3541,17 +3560,20 @@ void SceneViewportRenderer::RenderUi(
             static float overlay_h = 1.0f;
 
             const bool is_text_overlay = selected_overlay_attribute->kind == SceneObjectAttributeKind::Text2D;
-            const float attr_x = is_text_overlay ? selected_overlay_attribute->text_2d.x : selected_overlay_attribute->image_2d.x;
-            const float attr_y = is_text_overlay ? selected_overlay_attribute->text_2d.y : selected_overlay_attribute->image_2d.y;
-            float attr_w = is_text_overlay ? selected_overlay_attribute->text_2d.width : selected_overlay_attribute->image_2d.width;
-            float attr_h = is_text_overlay ? selected_overlay_attribute->text_2d.height : selected_overlay_attribute->image_2d.height;
+            const bool is_color_overlay = selected_overlay_attribute->kind == SceneObjectAttributeKind::Color2D;
+            const float attr_x = is_text_overlay ? selected_overlay_attribute->text_2d.x : (is_color_overlay ? selected_overlay_attribute->color_2d.x : selected_overlay_attribute->image_2d.x);
+            const float attr_y = is_text_overlay ? selected_overlay_attribute->text_2d.y : (is_color_overlay ? selected_overlay_attribute->color_2d.y : selected_overlay_attribute->image_2d.y);
+            float attr_w = is_text_overlay ? selected_overlay_attribute->text_2d.width : (is_color_overlay ? selected_overlay_attribute->color_2d.width : selected_overlay_attribute->image_2d.width);
+            float attr_h = is_text_overlay ? selected_overlay_attribute->text_2d.height : (is_color_overlay ? selected_overlay_attribute->color_2d.height : selected_overlay_attribute->image_2d.height);
             if (is_text_overlay)
             {
                 scene_2d_renderer_.GetText2DRenderSize(state.project_root, selected_overlay_attribute->text_2d, attr_w, attr_h);
             }
             const bool lock_aspect_ratio = is_text_overlay
                 ? selected_overlay_attribute->text_2d.lock_aspect_ratio
-                : selected_overlay_attribute->image_2d.lock_aspect_ratio;
+                : (is_color_overlay
+                    ? selected_overlay_attribute->color_2d.lock_aspect_ratio
+                    : selected_overlay_attribute->image_2d.lock_aspect_ratio);
 
             const bool same_overlay_target =
                 active_overlay_object_name == selected_scene_object_metadata->name &&
@@ -3649,6 +3671,27 @@ void SceneViewportRenderer::RenderUi(
                             overlay_h);
                     }
                 }
+                else if (is_color_overlay)
+                {
+                    if (overlay_dragging)
+                    {
+                        committed = SetSceneObjectAttributeColor2DPosition(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_x,
+                            overlay_y);
+                    }
+                    else if (overlay_resizing)
+                    {
+                        committed = SetSceneObjectAttributeColor2DSize(
+                            state.active_scene_path,
+                            selected_scene_object_metadata->name,
+                            selected_overlay_attribute_index,
+                            overlay_w,
+                            overlay_h);
+                    }
+                }
                 else
                 {
                     if (overlay_dragging)
@@ -3680,6 +3723,7 @@ void SceneViewportRenderer::RenderUi(
                 overlay_resizing = false;
                 overlay_preview_active_ = false;
                 overlay_preview_object_name_.clear();
+                overlay_preview_kind_ = SceneObjectAttributeKind::None;
                 overlay_preview_write_position_ = false;
                 overlay_preview_write_size_ = false;
                 overlay_gizmo_interaction_consumed = true;
@@ -3688,6 +3732,7 @@ void SceneViewportRenderer::RenderUi(
             {
                 overlay_preview_active_ = false;
                 overlay_preview_object_name_.clear();
+                overlay_preview_kind_ = SceneObjectAttributeKind::None;
                 overlay_preview_write_position_ = false;
                 overlay_preview_write_size_ = false;
             }
@@ -3730,7 +3775,7 @@ void SceneViewportRenderer::RenderUi(
                 overlay_preview_active_ = true;
                 overlay_preview_object_name_ = selected_scene_object_metadata->name;
                 overlay_preview_attribute_index_ = selected_overlay_attribute_index;
-                overlay_preview_is_text_ = is_text_overlay;
+                overlay_preview_kind_ = selected_overlay_attribute->kind;
                 overlay_preview_x_ = overlay_x;
                 overlay_preview_y_ = overlay_y;
                 overlay_preview_w_ = overlay_w;
@@ -4009,12 +4054,15 @@ void SceneViewportRenderer::RenderGpu()
     // Editor preview: pass dt=0 so the manager only decodes the first frame
     // (and any subsequent frame after a video path/play-mode change). The
     // editor does not advance video playback time.
-    video_playback_manager_.Update(0.0f, pending_scene_metadata_, pending_project_root_);
-    scene_2d_renderer_.CompositeOverlay(
-        pending_scene_metadata_,
-        pending_project_root_,
-        ray_tracing_.GetOutputImage(),
-        ray_tracing_.GetOutputImageView(),
-        ray_tracing_.GetOutputWidth(),
-        ray_tracing_.GetOutputHeight());
+    if (ray_tracing_.WasFrameSubmittedLastCall())
+    {
+        video_playback_manager_.Update(0.0f, pending_scene_metadata_, pending_project_root_);
+        scene_2d_renderer_.CompositeOverlay(
+            pending_scene_metadata_,
+            pending_project_root_,
+            ray_tracing_.GetOutputImage(),
+            ray_tracing_.GetOutputImageView(),
+            ray_tracing_.GetOutputWidth(),
+            ray_tracing_.GetOutputHeight());
+    }
 }

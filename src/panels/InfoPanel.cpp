@@ -153,6 +153,14 @@ SceneVector3 SnapPositionToGrid(const SceneVector3& value, const EngineState& st
 
     return snapped;
 }
+
+bool HasSceneObjectAttributeKind(const SceneObjectMetadata& object, SceneObjectAttributeKind kind)
+{
+    return std::any_of(object.attributes.begin(), object.attributes.end(), [kind](const SceneObjectAttribute& attribute)
+    {
+        return attribute.kind == kind;
+    });
+}
 }
 
 InfoPanel::~InfoPanel()
@@ -649,7 +657,13 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
 
     ImGui::Spacing();
 
-    if (!selected_object.model_path.empty())
+    const bool model_attribute_handles_attachment =
+        HasSceneObjectAttributeKind(selected_object, SceneObjectAttributeKind::Model) ||
+        HasSceneObjectAttributeKind(selected_object, SceneObjectAttributeKind::Shape3D);
+    const bool script_attribute_handles_attachments = HasSceneObjectAttributeKind(selected_object, SceneObjectAttributeKind::Script);
+    const bool graph_attribute_handles_attachments = HasSceneObjectAttributeKind(selected_object, SceneObjectAttributeKind::Graph);
+
+    if (!model_attribute_handles_attachment && !selected_object.model_path.empty())
     {
         ImGui::PushID("Model");
         bool keep_model_attachment = true;
@@ -701,62 +715,68 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         ImGui::PopID();
     }
 
-    for (std::size_t script_index = 0; script_index < selected_object.script_paths.size(); ++script_index)
+    if (!script_attribute_handles_attachments)
     {
-        const std::string& script_path = selected_object.script_paths[script_index];
-        ImGui::PushID(static_cast<int>(10000 + script_index));
-        bool keep_script_attachment = true;
-        if (ImGui::CollapsingHeader(script_path.c_str(), &keep_script_attachment, ImGuiTreeNodeFlags_DefaultOpen))
+        for (std::size_t script_index = 0; script_index < selected_object.script_paths.size(); ++script_index)
         {
-            ImGui::Spacing();
-            ImGui::TextUnformatted("Settings");
-            ImGui::TextDisabled("Execution order follows list order.");
-        }
-        if (!keep_script_attachment)
-        {
-            if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
+            const std::string& script_path = selected_object.script_paths[script_index];
+            ImGui::PushID(static_cast<int>(10000 + script_index));
+            bool keep_script_attachment = true;
+            if (ImGui::CollapsingHeader(script_path.c_str(), &keep_script_attachment, ImGuiTreeNodeFlags_DefaultOpen))
             {
-                state.AddLog("Save the open scene before removing an object script");
+                ImGui::Spacing();
+                ImGui::TextUnformatted("Settings");
+                ImGui::TextDisabled("Execution order follows list order.");
             }
-            else if (RemoveSceneObjectScript(state.selected_item_path, selected_object.name, state.project_root, state.project_root / script_path))
+            if (!keep_script_attachment)
             {
-                state.AddLog("Removed script from object: " + selected_object.name);
-                state.OpenTextFile(state.selected_item_path);
-                has_cached_scene_metadata_ = false;
-                ImGui::PopID();
-                return;
+                if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
+                {
+                    state.AddLog("Save the open scene before removing an object script");
+                }
+                else if (RemoveSceneObjectScript(state.selected_item_path, selected_object.name, state.project_root, state.project_root / script_path))
+                {
+                    state.AddLog("Removed script from object: " + selected_object.name);
+                    state.OpenTextFile(state.selected_item_path);
+                    has_cached_scene_metadata_ = false;
+                    ImGui::PopID();
+                    return;
+                }
             }
+            ImGui::PopID();
         }
-        ImGui::PopID();
     }
 
-    for (std::size_t graph_index = 0; graph_index < selected_object.graph_paths.size(); ++graph_index)
+    if (!graph_attribute_handles_attachments)
     {
-        const std::string& graph_path = selected_object.graph_paths[graph_index];
-        ImGui::PushID(static_cast<int>(20000 + graph_index));
-        bool keep_graph_attachment = true;
-        if (ImGui::CollapsingHeader(graph_path.c_str(), &keep_graph_attachment, ImGuiTreeNodeFlags_DefaultOpen))
+        for (std::size_t graph_index = 0; graph_index < selected_object.graph_paths.size(); ++graph_index)
         {
-            ImGui::Spacing();
-            ImGui::TextUnformatted("Settings");
-            ImGui::TextDisabled("Graph assets are loaded on demand.");
-        }
-        if (!keep_graph_attachment)
-        {
-            if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
+            const std::string& graph_path = selected_object.graph_paths[graph_index];
+            ImGui::PushID(static_cast<int>(20000 + graph_index));
+            bool keep_graph_attachment = true;
+            if (ImGui::CollapsingHeader(graph_path.c_str(), &keep_graph_attachment, ImGuiTreeNodeFlags_DefaultOpen))
             {
-                state.AddLog("Save the open scene before removing an object graph");
+                ImGui::Spacing();
+                ImGui::TextUnformatted("Settings");
+                ImGui::TextDisabled("Graph assets are loaded on demand.");
             }
-            else if (RemoveSceneObjectGraph(state.selected_item_path, selected_object.name, state.project_root, state.project_root / graph_path))
+            if (!keep_graph_attachment)
             {
-                state.AddLog("Removed graph from object: " + selected_object.name);
-                state.OpenTextFile(state.selected_item_path);
-                has_cached_scene_metadata_ = false;
-                ImGui::PopID();
-                return;
+                if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
+                {
+                    state.AddLog("Save the open scene before removing an object graph");
+                }
+                else if (RemoveSceneObjectGraph(state.selected_item_path, selected_object.name, state.project_root, state.project_root / graph_path))
+                {
+                    state.AddLog("Removed graph from object: " + selected_object.name);
+                    state.OpenTextFile(state.selected_item_path);
+                    has_cached_scene_metadata_ = false;
+                    ImGui::PopID();
+                    return;
+                }
             }
+            ImGui::PopID();
         }
-        ImGui::PopID();
     }
 
     ImGui::InvisibleButton("##ObjectAttachmentDropTarget", ImVec2(-FLT_MIN, ImGui::GetContentRegionAvail().y));

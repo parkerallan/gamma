@@ -217,6 +217,7 @@ public:
     // Wall-clock GPU time for the most recently completed RT submit (ms).
     // Returns 0 until at least one frame has been submitted and read back.
     float GetLastGpuTimeMs() const { return last_gpu_time_ms_; }
+    bool WasFrameSubmittedLastCall() const { return frame_submitted_last_call_; }
     VkImage GetOutputImage() const { return output_image_; }
     VkImageView GetOutputImageView() const { return output_view_; }
     std::uint32_t GetOutputWidth() const { return output_width_; }
@@ -530,6 +531,7 @@ private:
     bool taa_descriptors_dirty_ = false;
     bool taa_enabled_ = false;
     bool taa_history_valid_ = false;
+    bool frame_submitted_last_call_ = false;
     std::uint32_t taa_parity_ = 0;
     TaaDebugSettings taa_debug_{};
     std::array<float, 16> prev_view_projection_ = {1.0f, 0.0f, 0.0f, 0.0f,

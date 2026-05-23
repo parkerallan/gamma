@@ -484,6 +484,8 @@ void Scene2DRenderer::Shutdown()
     }
     font_atlas_cache_.clear();
 
+    ReleaseGpuTexture(solid_color_texture_);
+
     font_cache_.clear();
 
     ClearFramebufferCache();
@@ -918,14 +920,17 @@ bool Scene2DRenderer::EnsurePipeline()
     ms_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms_ci.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    // Alpha blending: src_alpha * src + (1 - src_alpha) * dst
+    // Alpha blending: src_alpha * src + (1 - src_alpha) * dst.
+    // Preserve the destination alpha written by the scene/TAA pass; the
+    // output image is displayed as an opaque scene target, not as a UI layer
+    // with meaningful transparency.
     VkPipelineColorBlendAttachmentState blend_attachment = {};
     blend_attachment.blendEnable = VK_TRUE;
     blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
     blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
-    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
     blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
     blend_attachment.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -1431,6 +1436,17 @@ bool Scene2DRenderer::UpdateTexture(
     return true;
 }
 
+bool Scene2DRenderer::EnsureSolidColorTexture()
+{
+    if (solid_color_texture_.descriptor_set != VK_NULL_HANDLE)
+    {
+        return true;
+    }
+
+    const unsigned char white_pixel[4] = {255, 255, 255, 255};
+    return UploadTexture(white_pixel, 1, 1, false, solid_color_texture_);
+}
+
 Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesystem::path& path, bool use_pak_streaming)
 {
     const std::string mode_prefix = use_pak_streaming ? "pak:" : "fs:";
@@ -1732,21 +1748,25 @@ void Scene2DRenderer::CompositeOverlay(
         return;
     }
 
-    // Collect 2D draw commands from scene
+    // Check whether there is any 2D work, and whether Color2D needs the shared solid texture.
     bool has_any = false;
+    bool has_color_2d = false;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
         for (const SceneObjectAttribute& attr : object.attributes)
         {
+            if (attr.kind == SceneObjectAttributeKind::Color2D)
+            {
+                has_color_2d = true;
+            }
             if (attr.kind == SceneObjectAttributeKind::Text2D ||
                 attr.kind == SceneObjectAttributeKind::Image2D ||
+                attr.kind == SceneObjectAttributeKind::Color2D ||
                 attr.kind == SceneObjectAttributeKind::Video2D)
             {
                 has_any = true;
-                break;
             }
         }
-        if (has_any) break;
     }
 
     if (!has_any)
@@ -1755,6 +1775,10 @@ void Scene2DRenderer::CompositeOverlay(
     }
 
     if (!EnsurePipeline() || !EnsureVertexIndexBuffers())
+    {
+        return;
+    }
+    if (has_color_2d && !EnsureSolidColorTexture())
     {
         return;
     }
@@ -1872,7 +1896,7 @@ void Scene2DRenderer::CompositeOverlay(
     const float scale_y = static_cast<float>(height) / safe_ref_height;
     const float overlay_size_scale = (std::min)(scale_x, scale_y);
 
-    // Collect overlays (Text2D and Image2D) with their priorities, then sort by priority (lower priority first = render in front)
+    // Collect overlays with their priorities, then sort by priority (lower priority first = render in front)
     struct OverlayEntry
     {
         std::size_t object_index;
@@ -1900,6 +1924,11 @@ void Scene2DRenderer::CompositeOverlay(
                     continue;
                 }
                 overlay_entries.push_back({obj_idx, attr_idx, img.priority});
+            }
+            else if (attr.kind == SceneObjectAttributeKind::Color2D)
+            {
+                const SceneObjectColor2DAttributes& color = attr.color_2d;
+                overlay_entries.push_back({obj_idx, attr_idx, color.priority});
             }
             else if (attr.kind == SceneObjectAttributeKind::Video2D)
             {
@@ -2034,6 +2063,35 @@ void Scene2DRenderer::CompositeOverlay(
                     quad_index,
                     norm_x, norm_y, norm_w, norm_h,
                     img.tint[0], img.tint[1], img.tint[2], img.alpha);
+                ++quad_index;
+            }
+            else if (attr.kind == SceneObjectAttributeKind::Color2D)
+            {
+                const SceneObjectColor2DAttributes& color = attr.color_2d;
+                if (color.alpha <= 0.0f || color.width <= 0.0f || color.height <= 0.0f || solid_color_texture_.descriptor_set == VK_NULL_HANDLE)
+                {
+                    continue;
+                }
+
+                const float draw_width = (std::max)(1.0f, color.width);
+                const float draw_height = (std::max)(1.0f, color.height);
+                const float screen_w = draw_width * overlay_size_scale;
+                const float screen_h = draw_height * overlay_size_scale;
+                const float reference_range_x = (std::max)(safe_ref_width - draw_width, 1.0f);
+                const float reference_range_y = (std::max)(safe_ref_height - draw_height, 1.0f);
+                const float screen_range_x = (std::max)(static_cast<float>(width) - screen_w, 0.0f);
+                const float screen_range_y = (std::max)(static_cast<float>(height) - screen_h, 0.0f);
+                const float screen_x = (color.x / reference_range_x) * screen_range_x;
+                const float screen_y = (color.y / reference_range_y) * screen_range_y;
+                const float norm_x = screen_x / static_cast<float>((std::max)(1u, width));
+                const float norm_y = screen_y / static_cast<float>((std::max)(1u, height));
+                const float norm_w = screen_w / static_cast<float>((std::max)(1u, width));
+                const float norm_h = screen_h / static_cast<float>((std::max)(1u, height));
+
+                DrawQuad(cmd, solid_color_texture_,
+                    quad_index,
+                    norm_x, norm_y, norm_w, norm_h,
+                    color.color[0], color.color[1], color.color[2], std::clamp(color.alpha, 0.0f, 1.0f));
                 ++quad_index;
             }
             else if (attr.kind == SceneObjectAttributeKind::Video2D)

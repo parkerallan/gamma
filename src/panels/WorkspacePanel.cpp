@@ -35,10 +35,29 @@ const CachedModelAssetEntry& WorkspacePanel::GetModelAssetEntry(const std::files
     std::error_code error;
     const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(path, error);
     CachedModelAssetEntry& cache_entry = model_asset_cache_[path];
-    if (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded)
+
+    // Drain any in-flight async load without blocking. A model attached via
+    // drag-drop in the Info panel (or any newly-referenced model after a
+    // scene edit) parses on a worker thread; the UI thread polls each frame
+    // and consumes the result when ready instead of waiting for Assimp.
+    if (cache_entry.load_in_flight && cache_entry.pending_load.valid()
+        && cache_entry.pending_load.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+    {
+        cache_entry.asset = cache_entry.pending_load.get();
+        cache_entry.pending_load = {};
+        cache_entry.load_in_flight = false;
+    }
+
+    const bool needs_load = !cache_entry.load_in_flight
+        && (error || cache_entry.write_time != write_time || !cache_entry.asset.loaded);
+    if (needs_load)
     {
         cache_entry.write_time = error ? std::filesystem::file_time_type::min() : write_time;
-        cache_entry.asset = LoadModelAsset(path);
+        cache_entry.load_in_flight = true;
+        cache_entry.pending_load = std::async(std::launch::async, [path]() -> ModelAsset
+        {
+            return LoadModelAsset(path);
+        }).share();
     }
 
     return cache_entry;
@@ -316,21 +335,33 @@ const SceneMetadata* WorkspacePanel::TryGetCachedSceneMetadata(const std::filesy
 
 void WorkspacePanel::WaitForPendingViewportLoad(EngineState& state)
 {
-    if (!viewport_load_in_progress_ || !pending_viewport_load_.valid())
+    if (viewport_load_in_progress_ && pending_viewport_load_.valid())
     {
-        return;
+        // Snapshot the pending key BEFORE TryConsumeAsyncViewportLoad clears
+        // pending_viewport_scene_path_ — the consume helper compares its incoming
+        // params against the future's result, but it also resets pending_*
+        // before that comparison, so passing them by reference would compare
+        // against an emptied value.
+        const std::filesystem::path snapshot_path = pending_viewport_scene_path_;
+        const std::filesystem::file_time_type snapshot_time = pending_viewport_scene_write_time_;
+
+        pending_viewport_load_.wait();
+        TryConsumeAsyncViewportLoad(state, snapshot_path, snapshot_time);
     }
 
-    // Snapshot the pending key BEFORE TryConsumeAsyncViewportLoad clears
-    // pending_viewport_scene_path_ — the consume helper compares its incoming
-    // params against the future's result, but it also resets pending_*
-    // before that comparison, so passing them by reference would compare
-    // against an emptied value.
-    const std::filesystem::path snapshot_path = pending_viewport_scene_path_;
-    const std::filesystem::file_time_type snapshot_time = pending_viewport_scene_write_time_;
-
-    pending_viewport_load_.wait();
-    TryConsumeAsyncViewportLoad(state, snapshot_path, snapshot_time);
+    // Drain any per-model async loads kicked off mid-edit (drag-drop
+    // attachments) so the Play hand-off receives fully-parsed assets.
+    for (auto& cache_kv : model_asset_cache_)
+    {
+        CachedModelAssetEntry& entry = cache_kv.second;
+        if (entry.load_in_flight && entry.pending_load.valid())
+        {
+            entry.pending_load.wait();
+            entry.asset = entry.pending_load.get();
+            entry.pending_load = {};
+            entry.load_in_flight = false;
+        }
+    }
 }
 
 void WorkspacePanel::Render(EngineState& state)
@@ -535,13 +566,13 @@ void WorkspacePanel::RenderSceneViewport(EngineState& state)
 
     scene_view_renderer_.RenderUi(state, scene_metadata, [this](const std::filesystem::path& path) -> SceneViewportResolvedModel
     {
-        const auto cache_it = model_asset_cache_.find(path);
-        if (cache_it == model_asset_cache_.end())
-        {
-            return SceneViewportResolvedModel{};
-        }
-
-        return SceneViewportResolvedModel{&cache_it->second.asset, cache_it->second.write_time};
+        // Resolve through GetModelAssetEntry so an in-flight async load is
+        // polled (and kicked off, if the model was just attached and the
+        // path isn't in the cache yet). The entry stays with
+        // `asset.loaded == false` until the worker thread finishes; the
+        // viewport renderer skips unloaded entries so the UI keeps drawing.
+        const CachedModelAssetEntry& entry = GetModelAssetEntry(path);
+        return SceneViewportResolvedModel{&entry.asset, entry.write_time};
     }, scene_view_camera_);
 }
 

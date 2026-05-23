@@ -1287,6 +1287,28 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     const bool geometry_changed = !geometry_signature_valid_ || geometry_signature_ != new_geometry_sig;
     if (geometry_changed)
     {
+        // The previous viewport RT dispatch may still be reading the mesh / section /
+        // material SSBOs and texture descriptors that a topology edit is about to
+        // replace. Model removal hits this path especially often: the UI updates
+        // scene metadata, UpdateScene rebuilds the CPU records, then the old GPU
+        // frame can still be in flight. Wait for that frame before destroying or
+        // reallocating any resources referenced by the current descriptor set.
+        if (render_fence_ != VK_NULL_HANDLE)
+        {
+            const VkDevice device = vulkan_context_->GetDevice();
+            VkResult fence_status = vkGetFenceStatus(device, render_fence_);
+            if (fence_status == VK_NOT_READY)
+            {
+                fence_status = vkWaitForFences(device, 1, &render_fence_, VK_TRUE, UINT64_MAX);
+            }
+            VulkanContext::CheckVkResult(fence_status);
+            if (fence_status != VK_SUCCESS)
+            {
+                status_message_ = "Failed to wait for viewport RT frame before scene update";
+                return false;
+            }
+        }
+
         mesh_records_cpu_      = std::move(new_mesh_records);
         section_records_cpu_   = std::move(new_section_records);
         material_records_cpu_  = std::move(new_material_records);
@@ -2682,6 +2704,8 @@ bool RayTracing::RenderFrame(
     float grid_origin_z,
     float grid_extent)
 {
+    frame_submitted_last_call_ = false;
+
     if (!available_ ||
         vulkan_context_ == nullptr ||
         output_image_ == VK_NULL_HANDLE ||
@@ -3274,6 +3298,8 @@ bool RayTracing::RenderFrame(
         {
             timestamp_pending_ = true;
         }
+
+        frame_submitted_last_call_ = true;
 
         return true;
     };

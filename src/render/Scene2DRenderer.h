@@ -223,6 +223,7 @@ private:
     std::unordered_map<FontAtlasKey, FontAtlas, FontAtlasKeyHash> font_atlas_cache_;
     std::unordered_map<std::string, GpuTexture> image_cache_;
     std::unordered_map<TextCacheKey, TextLayoutCacheEntry, TextCacheKeyHash> text_layout_cache_;
+    GpuTexture solid_color_texture_{};
 
     VideoPlaybackManager* video_playback_manager_ = nullptr;
 
@@ -233,6 +234,7 @@ private:
 
     bool EnsurePipeline();
     bool EnsureVertexIndexBuffers();
+    bool EnsureSolidColorTexture();
 
     const std::vector<unsigned char>* GetOrLoadFontBytes(
         const std::filesystem::path& path,

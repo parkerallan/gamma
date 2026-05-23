@@ -13,6 +13,10 @@
 namespace
 {
 constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
+    SceneObjectAttributeKind::Model,
+    SceneObjectAttributeKind::Script,
+    SceneObjectAttributeKind::Graph,
+    SceneObjectAttributeKind::Shape3D,
     SceneObjectAttributeKind::EnvironmentLight,
     SceneObjectAttributeKind::DirectionalLight,
     SceneObjectAttributeKind::PointLight,
@@ -23,12 +27,26 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Animator,
     SceneObjectAttributeKind::Text2D,
     SceneObjectAttributeKind::Image2D,
+    SceneObjectAttributeKind::Color2D,
     SceneObjectAttributeKind::Video2D,
     SceneObjectAttributeKind::Skybox,
     SceneObjectAttributeKind::Audio,
 };
 
 constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
+
+struct Shape3DOption
+{
+    const char* label;
+    const char* file_name;
+};
+
+constexpr Shape3DOption kShape3DOptions[] = {
+    {"Cube", "cube.glb"},
+    {"Cylinder", "cylinder.glb"},
+    {"Plane", "plane.glb"},
+    {"Sphere", "sphere.glb"},
+};
 
 std::string ToLowerAscii(std::string value)
 {
@@ -50,6 +68,40 @@ bool HasAnyExtension(const std::filesystem::path& path, const std::initializer_l
         }
     }
     return false;
+}
+
+std::filesystem::path GetBuiltInShapePath(const char* file_name)
+{
+    return std::filesystem::path(__FILE__).parent_path().parent_path() / "shapes" / file_name;
+}
+
+int FindSelectedShape3DIndex(const SceneObjectMetadata& object)
+{
+    const std::string selected_file_name = ToLowerAscii(std::filesystem::path(object.model_path).filename().string());
+    for (int index = 0; index < static_cast<int>(std::size(kShape3DOptions)); ++index)
+    {
+        if (selected_file_name == kShape3DOptions[index].file_name)
+        {
+            return index;
+        }
+    }
+
+    return 0;
+}
+
+std::filesystem::path GetDragDroppedPath()
+{
+    const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload);
+    if (payload == nullptr)
+    {
+        return {};
+    }
+
+    const char* payload_text = static_cast<const char*>(payload->Data);
+    const std::size_t payload_size = payload->DataSize > 0
+        ? static_cast<std::size_t>(payload->DataSize - 1)
+        : 0;
+    return std::filesystem::path(std::string(payload_text, payload_size));
 }
 
 std::string NormalizeAssetPath(const EngineState& state, const std::filesystem::path& absolute_or_relative)
@@ -125,7 +177,21 @@ bool AddAttributeAttachment(EngineState& state, const SceneObjectMetadata& objec
 {
     return SaveSceneObjectAttributeEdit(state, object, "attributes", [&]() 
     {
-        return AddSceneObjectAttribute(state.selected_item_path, object.name, kind);
+        if (!AddSceneObjectAttribute(state.selected_item_path, object.name, kind))
+        {
+            return false;
+        }
+
+        if (kind == SceneObjectAttributeKind::Shape3D)
+        {
+            return SetSceneObjectModel(
+                state.selected_item_path,
+                object.name,
+                state.project_root,
+                GetBuiltInShapePath(kShape3DOptions[0].file_name));
+        }
+
+        return true;
     });
 }
 
@@ -133,7 +199,42 @@ bool RemoveAttributeAttachment(EngineState& state, const SceneObjectMetadata& ob
 {
     return SaveSceneObjectAttributeEdit(state, object, "attributes", [&]()
     {
-        return RemoveSceneObjectAttribute(state.selected_item_path, object.name, attribute_index);
+        if (attribute_index >= object.attributes.size())
+        {
+            return false;
+        }
+
+        const SceneObjectAttributeKind removed_kind = object.attributes[attribute_index].kind;
+        bool updated = RemoveSceneObjectAttribute(state.selected_item_path, object.name, attribute_index);
+        if (!updated)
+        {
+            return false;
+        }
+
+        if (removed_kind == SceneObjectAttributeKind::Model)
+        {
+            updated = ClearSceneObjectModel(state.selected_item_path, object.name) && updated;
+        }
+        else if (removed_kind == SceneObjectAttributeKind::Shape3D)
+        {
+            updated = ClearSceneObjectModel(state.selected_item_path, object.name) && updated;
+        }
+        else if (removed_kind == SceneObjectAttributeKind::Script)
+        {
+            for (const std::string& script_path : object.script_paths)
+            {
+                updated = RemoveSceneObjectScript(state.selected_item_path, object.name, state.project_root, state.project_root / script_path) && updated;
+            }
+        }
+        else if (removed_kind == SceneObjectAttributeKind::Graph)
+        {
+            for (const std::string& graph_path : object.graph_paths)
+            {
+                updated = RemoveSceneObjectGraph(state.selected_item_path, object.name, state.project_root, state.project_root / graph_path) && updated;
+            }
+        }
+
+        return updated;
     });
 }
 
@@ -242,9 +343,14 @@ bool RenderAttributeSection(
     {
         if (attribute.kind != SceneObjectAttributeKind::Rigidbody &&
             attribute.kind != SceneObjectAttributeKind::TriggerVolume &&
+            attribute.kind != SceneObjectAttributeKind::Model &&
+            attribute.kind != SceneObjectAttributeKind::Script &&
+            attribute.kind != SceneObjectAttributeKind::Graph &&
+            attribute.kind != SceneObjectAttributeKind::Shape3D &&
             attribute.kind != SceneObjectAttributeKind::Animator &&
             attribute.kind != SceneObjectAttributeKind::Text2D &&
             attribute.kind != SceneObjectAttributeKind::Image2D &&
+            attribute.kind != SceneObjectAttributeKind::Color2D &&
             attribute.kind != SceneObjectAttributeKind::Video2D &&
             attribute.kind != SceneObjectAttributeKind::Skybox)
         {
@@ -258,6 +364,245 @@ bool RenderAttributeSection(
         bool changed = false;
         switch (attribute.kind)
         {
+        case SceneObjectAttributeKind::Model:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_model_label = object.model_path.empty()
+                ? std::string("Drop Model Here")
+                : std::filesystem::path(object.model_path).filename().string();
+            ImGui::Button(current_model_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                const std::filesystem::path dropped_path = GetDragDroppedPath();
+                if (!dropped_path.empty())
+                {
+                    if (HasAnyExtension(dropped_path, {".fbx", ".glb", ".gltf"}))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "model", [&]()
+                        {
+                            return SetSceneObjectModel(state.selected_item_path, object.name, state.project_root, dropped_path);
+                        }) || changed;
+                    }
+                    else
+                    {
+                        state.AddLog("Drop a supported model: .fbx, .glb, or .gltf");
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            if (!object.model_path.empty())
+            {
+                ImGui::TextWrapped("Path: %s", object.model_path.c_str());
+
+                float model_visual_offset[3] = {
+                    object.model_visual_offset[0],
+                    object.model_visual_offset[1],
+                    object.model_visual_offset[2],
+                };
+                if (ImGui::DragFloat3("Visual Offset", model_visual_offset, 0.01f))
+                {
+                    const SceneVector3 updated_model_visual_offset = {
+                        model_visual_offset[0],
+                        model_visual_offset[1],
+                        model_visual_offset[2]};
+                    changed = SaveSceneObjectAttributeEdit(state, object, "model visual offset", [&]()
+                    {
+                        return SetSceneObjectModelVisualOffset(state.selected_item_path, object.name, updated_model_visual_offset);
+                    }) || changed;
+                }
+
+                ImGui::TextDisabled("Applies to rendering only. Rigidbody collisions use object transform.");
+                if (ImGui::Button("Remove Model"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "model", [&]()
+                    {
+                        return ClearSceneObjectModel(state.selected_item_path, object.name);
+                    }) || changed;
+                }
+            }
+            break;
+        }
+
+        case SceneObjectAttributeKind::Script:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            ImGui::Button("Drop Lua Script Here", ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                const std::filesystem::path dropped_path = GetDragDroppedPath();
+                if (!dropped_path.empty())
+                {
+                    if (HasAnyExtension(dropped_path, {".lua"}))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "script", [&]()
+                        {
+                            return AddSceneObjectScript(state.selected_item_path, object.name, state.project_root, dropped_path);
+                        }) || changed;
+                    }
+                    else
+                    {
+                        state.AddLog("Drop a supported script: .lua");
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            if (!object.script_paths.empty())
+            {
+                ImGui::Text("Attached scripts: %zu", object.script_paths.size());
+                for (std::size_t script_index = 0; script_index < object.script_paths.size(); ++script_index)
+                {
+                    const std::string& script_path = object.script_paths[script_index];
+                    ImGui::PushID(static_cast<int>(script_index));
+                    ImGui::TextWrapped("%s", script_path.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Remove"))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "script", [&]()
+                        {
+                            return RemoveSceneObjectScript(state.selected_item_path, object.name, state.project_root, state.project_root / script_path);
+                        }) || changed;
+                    }
+                    ImGui::PopID();
+                    if (changed)
+                    {
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+
+        case SceneObjectAttributeKind::Graph:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            ImGui::Button("Drop Graph Here", ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                const std::filesystem::path dropped_path = GetDragDroppedPath();
+                if (!dropped_path.empty())
+                {
+                    if (HasAnyExtension(dropped_path, {".graph"}))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "graph", [&]()
+                        {
+                            return AddSceneObjectGraph(state.selected_item_path, object.name, state.project_root, dropped_path);
+                        }) || changed;
+                    }
+                    else
+                    {
+                        state.AddLog("Drop a supported graph: .graph");
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            if (!object.graph_paths.empty())
+            {
+                ImGui::Text("Attached graphs: %zu", object.graph_paths.size());
+                for (std::size_t graph_index = 0; graph_index < object.graph_paths.size(); ++graph_index)
+                {
+                    const std::string& graph_path = object.graph_paths[graph_index];
+                    ImGui::PushID(static_cast<int>(graph_index));
+                    ImGui::TextWrapped("%s", graph_path.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Remove"))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "graph", [&]()
+                        {
+                            return RemoveSceneObjectGraph(state.selected_item_path, object.name, state.project_root, state.project_root / graph_path);
+                        }) || changed;
+                    }
+                    ImGui::PopID();
+                    if (changed)
+                    {
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+
+        case SceneObjectAttributeKind::Shape3D:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            int selected_shape_index = FindSelectedShape3DIndex(object);
+            if (ImGui::BeginCombo("Shape", kShape3DOptions[selected_shape_index].label))
+            {
+                for (int shape_index = 0; shape_index < static_cast<int>(std::size(kShape3DOptions)); ++shape_index)
+                {
+                    const bool selected = shape_index == selected_shape_index;
+                    if (ImGui::Selectable(kShape3DOptions[shape_index].label, selected))
+                    {
+                        selected_shape_index = shape_index;
+                        changed = SaveSceneObjectAttributeEdit(state, object, "3D shape", [&]()
+                        {
+                            return SetSceneObjectModel(
+                                state.selected_item_path,
+                                object.name,
+                                state.project_root,
+                                GetBuiltInShapePath(kShape3DOptions[shape_index].file_name));
+                        }) || changed;
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            if (object.model_path.empty())
+            {
+                if (ImGui::Button("Add Shape", ImVec2(-1.0f, 0.0f)))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "3D shape", [&]()
+                    {
+                        return SetSceneObjectModel(
+                            state.selected_item_path,
+                            object.name,
+                            state.project_root,
+                            GetBuiltInShapePath(kShape3DOptions[selected_shape_index].file_name));
+                    }) || changed;
+                }
+            }
+            else
+            {
+                float model_visual_offset[3] = {
+                    object.model_visual_offset[0],
+                    object.model_visual_offset[1],
+                    object.model_visual_offset[2],
+                };
+                if (ImGui::DragFloat3("Visual Offset", model_visual_offset, 0.01f))
+                {
+                    const SceneVector3 updated_model_visual_offset = {
+                        model_visual_offset[0],
+                        model_visual_offset[1],
+                        model_visual_offset[2]};
+                    changed = SaveSceneObjectAttributeEdit(state, object, "shape visual offset", [&]()
+                    {
+                        return SetSceneObjectModelVisualOffset(state.selected_item_path, object.name, updated_model_visual_offset);
+                    }) || changed;
+                }
+
+                if (ImGui::Button("Remove Shape"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "3D shape", [&]()
+                    {
+                        return ClearSceneObjectModel(state.selected_item_path, object.name);
+                    }) || changed;
+                }
+            }
+            break;
+        }
+
         case SceneObjectAttributeKind::EnvironmentLight:
             ImGui::Spacing();
             ImGui::TextUnformatted("Settings");
@@ -913,6 +1258,100 @@ bool RenderAttributeSection(
                 changed = SaveSceneObjectAttributeEdit(state, object, "image 2D priority", [&]()
                 {
                     return SetSceneObjectAttributeImage2DPriority(state.selected_item_path, object.name, attribute_index, priority_image);
+                }) || changed;
+            }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Color2D:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            float position[2] = {attribute.color_2d.x, attribute.color_2d.y};
+            if (ImGui::DragFloat2("Position", position, 1.0f, -100000.0f, 100000.0f, "%.1f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "2D color position", [&]()
+                {
+                    return SetSceneObjectAttributeColor2DPosition(state.selected_item_path, object.name, attribute_index, position[0], position[1]);
+                }) || changed;
+            }
+
+            if (attribute.color_2d.lock_aspect_ratio)
+            {
+                const float safe_height = (std::max)(1.0f, attribute.color_2d.height);
+                const float aspect = (std::max)(attribute.color_2d.width / safe_height, 0.0001f);
+                float width_locked = attribute.color_2d.width;
+                if (ImGui::DragFloat("Size", &width_locked, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    const float clamped_width = (std::max)(1.0f, width_locked);
+                    const float clamped_height = (std::max)(1.0f, clamped_width / aspect);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "2D color size", [&]()
+                    {
+                        return SetSceneObjectAttributeColor2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            clamped_width,
+                            clamped_height);
+                    }) || changed;
+                }
+            }
+            else
+            {
+                float size[2] = {attribute.color_2d.width, attribute.color_2d.height};
+                if (ImGui::DragFloat2("Size", size, 1.0f, 1.0f, 100000.0f, "%.1f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "2D color size", [&]()
+                    {
+                        return SetSceneObjectAttributeColor2DSize(
+                            state.selected_item_path,
+                            object.name,
+                            attribute_index,
+                            (std::max)(1.0f, size[0]),
+                            (std::max)(1.0f, size[1]));
+                    }) || changed;
+                }
+            }
+
+            float color[3] = {
+                attribute.color_2d.color[0],
+                attribute.color_2d.color[1],
+                attribute.color_2d.color[2]};
+            if (ImGui::ColorEdit3("Color", color))
+            {
+                const SceneColor3 next_color = {color[0], color[1], color[2]};
+                changed = SaveSceneObjectAttributeEdit(state, object, "2D color", [&]()
+                {
+                    return SetSceneObjectAttributeColor2DColor(state.selected_item_path, object.name, attribute_index, next_color);
+                }) || changed;
+            }
+
+            float alpha = attribute.color_2d.alpha;
+            if (ImGui::DragFloat("Alpha", &alpha, 0.01f, 0.0f, 1.0f, "%.2f"))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "2D color alpha", [&]()
+                {
+                    return SetSceneObjectAttributeColor2DAlpha(state.selected_item_path, object.name, attribute_index, std::clamp(alpha, 0.0f, 1.0f));
+                }) || changed;
+            }
+
+            bool lock_aspect_ratio = attribute.color_2d.lock_aspect_ratio;
+            if (ImGui::Checkbox("Lock Aspect Ratio", &lock_aspect_ratio))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "2D color lock aspect ratio", [&]()
+                {
+                    return SetSceneObjectAttributeColor2DLockAspectRatio(state.selected_item_path, object.name, attribute_index, lock_aspect_ratio);
+                }) || changed;
+            }
+
+            int priority_color = attribute.color_2d.priority;
+            if (ImGui::DragInt("Priority", &priority_color))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "2D color priority", [&]()
+                {
+                    return SetSceneObjectAttributeColor2DPriority(state.selected_item_path, object.name, attribute_index, priority_color);
                 }) || changed;
             }
 

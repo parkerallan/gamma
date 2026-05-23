@@ -201,13 +201,17 @@ void main()
             ignoreIntersectionEXT;
         }
     }
-    else // BLEND: ignore fragments whose contribution would be imperceptible.
+    else // BLEND: cull alpha-filter edge halo entirely.
     {
-        // A higher cutoff than 0.001 trades a barely-visible edge of hair fuzz
-        // against not consuming the recursion budget on texels that contribute
-        // <2% to the final blend. The rchit caps continuation recursion depth
-        // so stacked hair cards stay bounded in cost.
-        if (alpha < 0.02)
+        // Hair-card / foliage PNGs are authored with a non-black (usually white)
+        // background. Bilinear/mip filtering across the alpha boundary produces
+        // a fringe of texels with low alpha (~0.05..0.4) AND bright matte-
+        // contaminated RGB. A near-zero cutoff (0.02) lets those texels through
+        // and the closest-hit then composites them as a light halo around every
+        // strand. Treat BLEND like an aggressive MASK at primary visibility:
+        // any texel below the cutoff is ignored, so the silhouette is defined
+        // by texels with substantial coverage instead of by filter ramps.
+        if (alpha < 0.5)
         {
             ignoreIntersectionEXT;
         }

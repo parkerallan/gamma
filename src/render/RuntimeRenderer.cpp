@@ -5897,6 +5897,7 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     const std::uint64_t overlay_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     float overlay_gpu_wait_ms = 0.0f;
     float video_update_ms = 0.0f;
+    if (ray_tracing_.WasFrameSubmittedLastCall())
     {
         const std::uint64_t now_perf_ticks = overlay_start_ticks;
         const std::uint64_t perf_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
@@ -5915,14 +5916,17 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
             static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
     }
     performance_stats_.video_time_ms = video_update_ms;
-    scene_2d_renderer_.CompositeOverlay(
-        scene_metadata,
-        project_root_,
-        ray_tracing_.GetOutputImage(),
-        ray_tracing_.GetOutputImageView(),
-        ray_tracing_.GetOutputWidth(),
-        ray_tracing_.GetOutputHeight(),
-        &overlay_gpu_wait_ms);
+    if (ray_tracing_.WasFrameSubmittedLastCall())
+    {
+        scene_2d_renderer_.CompositeOverlay(
+            scene_metadata,
+            project_root_,
+            ray_tracing_.GetOutputImage(),
+            ray_tracing_.GetOutputImageView(),
+            ray_tracing_.GetOutputWidth(),
+            ray_tracing_.GetOutputHeight(),
+            &overlay_gpu_wait_ms);
+    }
 
     const float overlay_total_ms = TicksToMilliseconds(
         overlay_start_ticks,

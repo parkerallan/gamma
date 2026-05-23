@@ -547,6 +547,14 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeImage2DAlpha:") ||
     StartsWith(line, "AttributeImage2DLockAspectRatio:") ||
     StartsWith(line, "AttributeImage2DPriority:") ||
+    StartsWith(line, "AttributeColor2DX:") ||
+    StartsWith(line, "AttributeColor2DY:") ||
+    StartsWith(line, "AttributeColor2DWidth:") ||
+    StartsWith(line, "AttributeColor2DHeight:") ||
+    StartsWith(line, "AttributeColor2DColor:") ||
+    StartsWith(line, "AttributeColor2DAlpha:") ||
+    StartsWith(line, "AttributeColor2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeColor2DPriority:") ||
     StartsWith(line, "AttributeSkyboxImagePath:") ||
     StartsWith(line, "AttributeSkyboxRotation:") ||
     StartsWith(line, "AttributeAudioClipPath:") ||
@@ -1102,6 +1110,14 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
 {
     switch (kind)
     {
+    case SceneObjectAttributeKind::Model:
+        return "Model";
+    case SceneObjectAttributeKind::Script:
+        return "Script";
+    case SceneObjectAttributeKind::Graph:
+        return "Graph";
+    case SceneObjectAttributeKind::Shape3D:
+        return "3D Shape";
     case SceneObjectAttributeKind::EnvironmentLight:
         return "Environment Light";
     case SceneObjectAttributeKind::DirectionalLight:
@@ -1122,6 +1138,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Text 2D";
     case SceneObjectAttributeKind::Image2D:
         return "Image 2D";
+    case SceneObjectAttributeKind::Color2D:
+        return "Color 2D";
     case SceneObjectAttributeKind::Skybox:
         return "Skybox";
     case SceneObjectAttributeKind::Audio:
@@ -1138,6 +1156,14 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
 {
     switch (kind)
     {
+    case SceneObjectAttributeKind::Model:
+        return "Model";
+    case SceneObjectAttributeKind::Script:
+        return "Script";
+    case SceneObjectAttributeKind::Graph:
+        return "Graph";
+    case SceneObjectAttributeKind::Shape3D:
+        return "Shape3D";
     case SceneObjectAttributeKind::EnvironmentLight:
         return "EnvironmentLight";
     case SceneObjectAttributeKind::DirectionalLight:
@@ -1158,6 +1184,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Text2D";
     case SceneObjectAttributeKind::Image2D:
         return "Image2D";
+    case SceneObjectAttributeKind::Color2D:
+        return "Color2D";
     case SceneObjectAttributeKind::Skybox:
         return "Skybox";
     case SceneObjectAttributeKind::Audio:
@@ -1173,6 +1201,22 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
 SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
 {
     const std::string trimmed = TrimCopy(std::string(value));
+    if (trimmed == "Model")
+    {
+        return SceneObjectAttributeKind::Model;
+    }
+    if (trimmed == "Script")
+    {
+        return SceneObjectAttributeKind::Script;
+    }
+    if (trimmed == "Graph")
+    {
+        return SceneObjectAttributeKind::Graph;
+    }
+    if (trimmed == "Shape3D")
+    {
+        return SceneObjectAttributeKind::Shape3D;
+    }
     if (trimmed == "EnvironmentLight")
     {
         return SceneObjectAttributeKind::EnvironmentLight;
@@ -1212,6 +1256,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Image2D")
     {
         return SceneObjectAttributeKind::Image2D;
+    }
+    if (trimmed == "Color2D")
+    {
+        return SceneObjectAttributeKind::Color2D;
     }
     if (trimmed == "Skybox")
     {
@@ -1902,6 +1950,38 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeImage2DPriority:") && current_attribute != nullptr)
         {
             ParseInteger(ExtractValue(trimmed, "AttributeImage2DPriority:"), current_attribute->image_2d.priority);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DX:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeColor2DX:"), current_attribute->color_2d.x);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DY:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeColor2DY:"), current_attribute->color_2d.y);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DWidth:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeColor2DWidth:"), current_attribute->color_2d.width);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DHeight:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeColor2DHeight:"), current_attribute->color_2d.height);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DColor:") && current_attribute != nullptr)
+        {
+            ParseColor3(ExtractValue(trimmed, "AttributeColor2DColor:"), current_attribute->color_2d.color);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DAlpha:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeColor2DAlpha:"), current_attribute->color_2d.alpha);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DLockAspectRatio:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeColor2DLockAspectRatio:"), current_attribute->color_2d.lock_aspect_ratio);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DPriority:") && current_attribute != nullptr)
+        {
+            ParseInteger(ExtractValue(trimmed, "AttributeColor2DPriority:"), current_attribute->color_2d.priority);
         }
         else if (StartsWith(trimmed, "AttributeSkyboxImagePath:") && current_attribute != nullptr)
         {
@@ -2805,6 +2885,76 @@ bool SetSceneObjectAttributeImage2DPriority(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
 {
     return SetSceneObjectAttributeBoolean("AttributeImage2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
+}
+
+bool SetSceneObjectAttributeColor2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
+{
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeColor2DX",
+        "AttributeColor2DY",
+        scene_path,
+        object_name,
+        attribute_index,
+        x,
+        y);
+}
+
+bool SetSceneObjectAttributeColor2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height)
+{
+    return SetSceneObjectAttributeFloat2Value(
+        "AttributeColor2DWidth",
+        "AttributeColor2DHeight",
+        scene_path,
+        object_name,
+        attribute_index,
+        width,
+        height);
+}
+
+bool SetSceneObjectAttributeColor2DColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color)
+{
+    return SetSceneObjectAttributeColorValue("AttributeColor2DColor", scene_path, object_name, attribute_index, color);
+}
+
+bool SetSceneObjectAttributeColor2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha)
+{
+    return SetSceneObjectAttributeScalar("AttributeColor2DAlpha", scene_path, object_name, attribute_index, alpha);
+}
+
+bool SetSceneObjectAttributeColor2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
+{
+    return SetSceneObjectAttributeBoolean("AttributeColor2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
+}
+
+bool SetSceneObjectAttributeColor2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority)
+{
+    bool updated = false;
+    const bool rewrite_succeeded = RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::size_t attribute_start = 0;
+        std::size_t attribute_end = 0;
+        if (!FindSceneObjectAttributeBlock(lines, object_start, object_end, attribute_index, attribute_start, attribute_end))
+        {
+            return;
+        }
+
+        const std::string key_prefix = std::string("AttributeColor2DPriority") + ":";
+        const std::string new_line = std::string("AttributeColor2DPriority") + ": " + FormatInteger(priority);
+        for (std::size_t index = attribute_start + 1; index < attribute_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                lines[index] = new_line;
+                updated = true;
+                return;
+            }
+        }
+
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(attribute_end), new_line);
+        updated = true;
+    });
+
+    return rewrite_succeeded && updated;
 }
 
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path)
