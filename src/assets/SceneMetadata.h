@@ -221,6 +221,7 @@ struct SceneObjectMetadata
 {
     std::string name;
     std::string parent_name;
+    bool enabled = true;
     SceneVector3 position = {0.0f, 0.0f, 0.0f};
     SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
     SceneVector3 scale = {1.0f, 1.0f, 1.0f};
@@ -268,6 +269,7 @@ struct ActiveSceneCameraSelection
 
 SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path);
 ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_metadata);
+bool IsSceneObjectEnabledInHierarchy(const SceneMetadata& scene_metadata, const std::string& object_name);
 const char* ToDisplayName(SceneObjectAttributeKind kind);
 const char* ToStorageName(SceneObjectAttributeKind kind);
 SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value);
@@ -276,6 +278,7 @@ bool RenameSceneObject(const std::filesystem::path& scene_path, const std::strin
 bool DuplicateSceneObject(const std::filesystem::path& scene_path, const std::string& object_name, std::string* duplicated_root_name = nullptr);
 bool DeleteSceneObject(const std::filesystem::path& scene_path, const std::string& object_name);
 bool SetSceneObjectParent(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& parent_name);
+bool SetSceneObjectEnabled(const std::filesystem::path& scene_path, const std::string& object_name, bool enabled);
 bool SetSceneObjectPosition(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& position);
 bool SetSceneObjectRotation(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& rotation);
 bool SetSceneObjectScale(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& scale);

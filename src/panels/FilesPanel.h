@@ -22,6 +22,7 @@ struct FileTreeNode
     bool is_scene_object = false;
     bool has_camera_attribute = false;
     bool is_active_camera = false;
+    bool enabled_in_hierarchy = true;
     std::vector<FileTreeNode> children;
 };
 

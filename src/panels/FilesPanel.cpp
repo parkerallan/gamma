@@ -441,6 +441,7 @@ std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesyste
             object_node.path = scene_path;
             object_node.label = object.name;
             object_node.is_scene_object = true;
+            object_node.enabled_in_hierarchy = IsSceneObjectEnabledInHierarchy(scene_metadata, object.name);
             object_node.has_camera_attribute = std::any_of(object.attributes.begin(), object.attributes.end(), [](const SceneObjectAttribute& attribute)
             {
                 return attribute.kind == SceneObjectAttributeKind::Camera;
@@ -505,7 +506,12 @@ void FilesPanel::RenderNode(
     }
 
     const bool show_active_camera_indicator = node.is_scene_object && node.is_active_camera;
-    if (show_active_camera_indicator)
+    const bool show_disabled_indicator = node.is_scene_object && !node.enabled_in_hierarchy;
+    if (show_disabled_indicator)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.28f, 0.28f, 1.0f));
+    }
+    else if (show_active_camera_indicator)
     {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.30f, 0.86f, 0.42f, 1.0f));
     }
@@ -515,13 +521,19 @@ void FilesPanel::RenderNode(
     }
 
     const ImVec2 node_pos = ImGui::GetCursorScreenPos();
-    const std::string display_label = show_active_camera_indicator
-        ? std::string(ICON_CI_DEVICE_CAMERA_VIDEO) + " " + node.label
-        : node.label;
+    std::string display_label = node.label;
+    if (show_active_camera_indicator)
+    {
+        display_label = std::string(ICON_CI_DEVICE_CAMERA_VIDEO) + " " + display_label;
+    }
+    if (show_disabled_indicator)
+    {
+        display_label = std::string(ICON_CI_EYE_CLOSED) + " " + display_label;
+    }
     const bool opened = ImGui::TreeNodeEx(tree_id.c_str(), flags, "%s", display_label.c_str());
     DrawHierarchyGuides(node_pos.x, depth, ancestor_has_next, is_last_sibling);
 
-    if (show_active_camera_indicator || (is_scene_file && !state.IsActiveScene(node.path) && !is_selected))
+    if (show_disabled_indicator || show_active_camera_indicator || (is_scene_file && !state.IsActiveScene(node.path) && !is_selected))
     {
         ImGui::PopStyleColor();
     }

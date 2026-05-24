@@ -359,6 +359,11 @@ void PhysicsWorld::BuildFromScene(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         if (object.physics_shape == SceneObjectPhysicsShape::None)
         {
             continue;

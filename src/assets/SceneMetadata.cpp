@@ -1640,6 +1640,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             current_object->parent_name = ExtractValue(trimmed, "Parent:");
         }
+        else if (StartsWith(trimmed, "Enabled:"))
+        {
+            ParseBool(ExtractValue(trimmed, "Enabled:"), current_object->enabled);
+        }
         else if (StartsWith(trimmed, "Position:"))
         {
             ParseVector3(ExtractValue(trimmed, "Position:"), current_object->position);
@@ -2125,6 +2129,37 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
     return metadata;
 }
 
+bool IsSceneObjectEnabledInHierarchy(const SceneMetadata& scene_metadata, const std::string& object_name)
+{
+    std::vector<std::string> visited_names;
+    std::string current_name = object_name;
+    while (!current_name.empty())
+    {
+        if (std::find(visited_names.begin(), visited_names.end(), current_name) != visited_names.end())
+        {
+            return true;
+        }
+        visited_names.push_back(current_name);
+
+        const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
+        {
+            return object.name == current_name;
+        });
+        if (object_it == scene_metadata.objects.end())
+        {
+            return true;
+        }
+        if (!object_it->enabled)
+        {
+            return false;
+        }
+
+        current_name = object_it->parent_name;
+    }
+
+    return true;
+}
+
 ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_metadata)
 {
     ActiveSceneCameraSelection selection;
@@ -2135,6 +2170,11 @@ ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_meta
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
         {
             const SceneObjectAttribute& attribute = object.attributes[attribute_index];
@@ -2153,6 +2193,11 @@ ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_meta
     }
 
     return selection;
+}
+
+bool SetSceneObjectEnabled(const std::filesystem::path& scene_path, const std::string& object_name, bool enabled)
+{
+    return SetSceneObjectBoolean(scene_path, object_name, "Enabled", enabled);
 }
 
 bool SetSceneObjectPosition(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& position)

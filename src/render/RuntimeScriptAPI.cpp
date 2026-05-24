@@ -1320,6 +1320,11 @@ int RuntimeRenderer::LuaWorldSpawnFromObject(lua_State* lua_state)
     {
         for (const SceneObjectMetadata& scene_object : renderer->cached_scene_metadata_.objects)
         {
+            if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, scene_object.name))
+            {
+                continue;
+            }
+
             if (scene_object.name != source_name)
             {
                 continue;
@@ -1403,6 +1408,11 @@ int RuntimeRenderer::LuaWorldDestroyByPrefix(lua_State* lua_state)
 
     for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         maybe_collect(object.name);
     }
 
@@ -1446,6 +1456,11 @@ int RuntimeRenderer::LuaWorldGetAll(lua_State* lua_state)
 
     for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (renderer->runtime_destroyed_objects_.find(object.name) == renderer->runtime_destroyed_objects_.end())
         {
             names.push_back(object.name);
@@ -1498,6 +1513,11 @@ int RuntimeRenderer::LuaWorldFindByPrefix(lua_State* lua_state)
 
     for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (renderer->runtime_destroyed_objects_.find(object.name) != renderer->runtime_destroyed_objects_.end())
         {
             continue;

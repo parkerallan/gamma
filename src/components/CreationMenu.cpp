@@ -102,6 +102,7 @@ std::string BuildSceneStub(const std::string& scene_name)
 std::string BuildObjectStub(const std::string& object_name)
 {
     return "\nObject: " + object_name + "\n"
+        "Enabled: true\n"
         "Position: 0, 0, 0\n"
         "Rotation: 0, 0, 0\n"
         "Scale: 1, 1, 1\n";

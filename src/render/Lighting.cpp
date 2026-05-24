@@ -157,6 +157,10 @@ void ResolvePreferredDirectLights(
     {
         return;
     }
+    if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object_it->name))
+    {
+        return;
+    }
 
     const auto pose_it = resolved_poses.find(object_it->name);
     if (pose_it == resolved_poses.end())
@@ -201,6 +205,11 @@ ResolvedSceneLighting ResolveSceneLighting(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         const auto pose_it = resolved_poses.find(object.name);
         if (pose_it == resolved_poses.end())
         {

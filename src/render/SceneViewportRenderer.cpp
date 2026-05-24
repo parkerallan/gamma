@@ -546,6 +546,11 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_me
     std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         objects_by_name[object.name] = &object;
     }
 
@@ -600,6 +605,11 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_me
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         resolve_pose(object.name);
     }
 
@@ -967,6 +977,11 @@ void DrawPhysicsColliderGizmos(
 {
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         if (object.physics_shape == SceneObjectPhysicsShape::None)
         {
             continue;
@@ -3074,6 +3089,11 @@ void SceneViewportRenderer::RenderUi(
     queued_objects_.clear();
     for (const SceneObjectMetadata& object : active_scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(active_scene_metadata, object.name))
+        {
+            continue;
+        }
+
         QueuedSceneObject queued_object;
         queued_object.name = object.name;
         queued_object.model_visual_offset = object.model_visual_offset;
@@ -3484,6 +3504,11 @@ void SceneViewportRenderer::RenderUi(
     for (auto object_it = active_scene_metadata.objects.rbegin(); object_it != active_scene_metadata.objects.rend(); ++object_it)
     {
         const SceneObjectMetadata& object = *object_it;
+        if (!IsSceneObjectEnabledInHierarchy(active_scene_metadata, object.name))
+        {
+            continue;
+        }
+
         bool hit = false;
         for (const SceneObjectAttribute& attribute : object.attributes)
         {
@@ -3940,6 +3965,11 @@ void SceneViewportRenderer::RenderCameraPreview(
     queued_objects_.clear();
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         if (object.model_path.empty())
         {
             continue;

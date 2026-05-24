@@ -511,6 +511,11 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(
     std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         objects_by_name[object.name] = &object;
     }
 
@@ -619,6 +624,11 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         resolve_pose(object.name);
     }
 
@@ -3204,6 +3214,11 @@ void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& sce
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
         {
             const SceneObjectAttribute& attribute = object.attributes[attribute_index];
@@ -4495,6 +4510,11 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
     trigger_objects.reserve(cached_scene_metadata_.objects.size());
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (!object.physics_is_trigger)
         {
             continue;
@@ -4854,6 +4874,11 @@ bool RuntimeRenderer::RuntimeObjectExists(const std::string& object_name) const
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name == object_name)
         {
             return true;
@@ -4922,6 +4947,11 @@ bool RuntimeRenderer::TryGetScriptObjectRotation(const std::string& object_name,
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name != object_name)
         {
             continue;
@@ -4948,6 +4978,11 @@ bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, Sc
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name != object_name)
         {
             continue;
@@ -4969,6 +5004,11 @@ RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimatorState
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name != object_name)
         {
             continue;
@@ -5010,6 +5050,11 @@ RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::EnsureRuntimeAnimatorSta
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name != object_name)
         {
             continue;
@@ -5232,6 +5277,11 @@ const SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name != object_name)
         {
             continue;
@@ -5270,6 +5320,11 @@ const RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimato
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        {
+            continue;
+        }
+
         if (object.name != object_name)
         {
             continue;
@@ -5374,6 +5429,11 @@ bool RuntimeRenderer::BuildQueuedScene(
     std::size_t queued_scan_count = 0;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         if ((queued_scan_count++ & 31u) == 0u)
         {
             // Prevent Windows from flagging the app as hung during heavy first-frame loads.
@@ -5729,6 +5789,11 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         world_matrices.reserve(scene_metadata.objects.size());
         for (const SceneObjectMetadata& object : scene_metadata.objects)
         {
+            if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+            {
+                continue;
+            }
+
             const auto pose_it = resolved_object_poses.find(object.name);
             if (pose_it != resolved_object_poses.end())
             {
@@ -6598,6 +6663,11 @@ void RuntimeRenderer::UpdateAudioSourcesForFrame(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        {
+            continue;
+        }
+
         for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
         {
             const SceneObjectAttribute& attribute = object.attributes[attribute_index];

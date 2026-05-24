@@ -138,6 +138,18 @@ void UpdateCachedSceneObjectVector3(
     }
 }
 
+void UpdateCachedSceneObjectEnabled(SceneMetadata& scene_metadata, const std::string& object_name, bool enabled)
+{
+    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](SceneObjectMetadata& object)
+    {
+        return object.name == object_name;
+    });
+    if (object_it != scene_metadata.objects.end())
+    {
+        object_it->enabled = enabled;
+    }
+}
+
 SceneVector3 SnapPositionToGrid(const SceneVector3& value, const EngineState& state)
 {
     if (!state.snap_to_grid || state.grid_size <= 0.0f)
@@ -397,6 +409,11 @@ void InfoPanel::RenderCameraAttributePreview(
     bool any_model_loading = false;
     for (const SceneObjectMetadata& scene_object : scene_metadata.objects)
     {
+        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, scene_object.name))
+        {
+            continue;
+        }
+
         if (scene_object.model_path.empty())
         {
             continue;
@@ -605,7 +622,29 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     }
 
     ImGui::SeparatorText("Object");
-    ImGui::Text("Name: %s", selected_object.name.c_str());
+
+    bool enabled = selected_object.enabled;
+    ImGui::PushID("ObjectEnabled");
+    if (ImGui::Checkbox("##Enabled", &enabled))
+    {
+        if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
+        {
+            state.AddLog("Save the open scene before toggling object enabled state");
+        }
+        else if (SetSceneObjectEnabled(state.selected_item_path, selected_object.name, enabled))
+        {
+            selected_object.enabled = enabled;
+            UpdateCachedSceneObjectEnabled(cached_scene_metadata_, selected_object.name, enabled);
+            if (state.HasOpenFile() && state.open_file_path == state.selected_item_path)
+            {
+                state.OpenTextFile(state.selected_item_path);
+            }
+            state.AddLog(std::string(enabled ? "Enabled object: " : "Disabled object: ") + selected_object.name);
+        }
+    }
+    ImGui::PopID();
+    ImGui::SameLine();
+    ImGui::TextUnformatted(selected_object.name.c_str());
 
     ImGui::Spacing();
     ImGui::SeparatorText("Transform");
