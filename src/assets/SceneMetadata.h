@@ -54,6 +54,13 @@ enum class SceneObjectVideoPlayMode
     Loop,
 };
 
+enum class SceneObjectImagePlayMode
+{
+    Off,
+    PlayOnce,
+    Loop,
+};
+
 struct SceneObjectEnvironmentLightAttributes
 {
     SceneColor3 color = {1.0f, 1.0f, 1.0f};
@@ -147,6 +154,8 @@ struct SceneObjectImage2DAttributes
     SceneColor3 tint = {1.0f, 1.0f, 1.0f};
     float alpha = 1.0f;
     bool lock_aspect_ratio = false;
+    bool stretch_to_screen = false;
+    SceneObjectImagePlayMode play_mode = SceneObjectImagePlayMode::Loop;
     int priority = 1;
 };
 
@@ -159,6 +168,7 @@ struct SceneObjectColor2DAttributes
     SceneColor3 color = {1.0f, 1.0f, 1.0f};
     float alpha = 1.0f;
     bool lock_aspect_ratio = false;
+    bool stretch_to_screen = false;
     int priority = 1;
 };
 
@@ -349,12 +359,15 @@ bool SetSceneObjectAttributeImage2DTint(const std::filesystem::path& scene_path,
 bool SetSceneObjectAttributeImage2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
 bool SetSceneObjectAttributeImage2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority);
 bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
+bool SetSceneObjectAttributeImage2DStretchToScreen(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool stretch_to_screen);
+bool SetSceneObjectAttributeImage2DPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectImagePlayMode play_mode);
 bool SetSceneObjectAttributeColor2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y);
 bool SetSceneObjectAttributeColor2DSize(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float width, float height);
 bool SetSceneObjectAttributeColor2DColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color);
 bool SetSceneObjectAttributeColor2DAlpha(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float alpha);
 bool SetSceneObjectAttributeColor2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority);
 bool SetSceneObjectAttributeColor2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio);
+bool SetSceneObjectAttributeColor2DStretchToScreen(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool stretch_to_screen);
 bool SetSceneObjectAttributeSkyboxImagePath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& image_path);
 bool SetSceneObjectAttributeSkyboxRotation(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float rotation_degrees);
 bool SetSceneObjectAttributeAudioClipPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& clip_path);

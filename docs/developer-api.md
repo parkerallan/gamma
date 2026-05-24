@@ -120,15 +120,17 @@ Methods: `HalfExtent(name[, x, y, z])`
 Methods: `FontPath(name[, path])`, `Text(name[, text])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `FontSize(name[, value])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
 
 #### `Engine.Image2DAttr`
-Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
+Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `StretchToScreen(name[, enabled])`, `PlayMode(name[, value])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
+
+For `.gif` image paths, `PlayMode` uses the strings `"Loop"`, `"PlayOnce"`, and `"Off"`. GIFs use their embedded frame delays; `"Off"` shows the first frame without advancing.
 
 #### `Engine.Color2DAttr`
-Methods: `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
+Methods: `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `StretchToScreen(name[, enabled])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
 
 #### `Engine.Video2DAttr`
 Methods: `VideoPath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `StretchToScreen(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`, `PlayMode(name[, value])`, `Volume(name[, value])`, `Muted(name[, enabled])`
 
-`PlayMode` uses the strings `"Loop"`, `"PlayOnce"`, and `"Off"`. Setting it to `"Off"` stops playback and releases the decoder; switching to `"Loop"` or `"PlayOnce"` (re)starts the stream. `StretchToScreen` overrides `Position`/`Size` and renders the video full-viewport. Audio plays only when `PlayMode` is `"Loop"` or `"PlayOnce"`.
+`PlayMode` uses the strings `"Loop"`, `"PlayOnce"`, and `"Off"`. Setting it to `"Off"` stops playback and releases the decoder; switching to `"Loop"` or `"PlayOnce"` (re)starts the stream. `StretchToScreen` overrides `Position`/`Size` and renders the 2D image, color, or video full-viewport. Audio plays only when `PlayMode` is `"Loop"` or `"PlayOnce"`.
 
 #### `Engine.SkyboxAttr`
 Methods: `ImagePath(name[, path])`, `Rotation(name[, value])`

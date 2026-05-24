@@ -594,6 +594,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeImage2DTint:") ||
     StartsWith(line, "AttributeImage2DAlpha:") ||
     StartsWith(line, "AttributeImage2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeImage2DStretchToScreen:") ||
+    StartsWith(line, "AttributeImage2DPlayMode:") ||
     StartsWith(line, "AttributeImage2DPriority:") ||
     StartsWith(line, "AttributeColor2DX:") ||
     StartsWith(line, "AttributeColor2DY:") ||
@@ -602,6 +604,7 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeColor2DColor:") ||
     StartsWith(line, "AttributeColor2DAlpha:") ||
     StartsWith(line, "AttributeColor2DLockAspectRatio:") ||
+    StartsWith(line, "AttributeColor2DStretchToScreen:") ||
     StartsWith(line, "AttributeColor2DPriority:") ||
     StartsWith(line, "AttributeSkyboxImagePath:") ||
     StartsWith(line, "AttributeSkyboxRotation:") ||
@@ -1999,6 +2002,26 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseBool(ExtractValue(trimmed, "AttributeImage2DLockAspectRatio:"), current_attribute->image_2d.lock_aspect_ratio);
         }
+        else if (StartsWith(trimmed, "AttributeImage2DStretchToScreen:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeImage2DStretchToScreen:"), current_attribute->image_2d.stretch_to_screen);
+        }
+        else if (StartsWith(trimmed, "AttributeImage2DPlayMode:") && current_attribute != nullptr)
+        {
+            const std::string mode = TrimCopy(ExtractValue(trimmed, "AttributeImage2DPlayMode:"));
+            if (mode == "Loop")
+            {
+                current_attribute->image_2d.play_mode = SceneObjectImagePlayMode::Loop;
+            }
+            else if (mode == "PlayOnce" || mode == "On")
+            {
+                current_attribute->image_2d.play_mode = SceneObjectImagePlayMode::PlayOnce;
+            }
+            else
+            {
+                current_attribute->image_2d.play_mode = SceneObjectImagePlayMode::Off;
+            }
+        }
         else if (StartsWith(trimmed, "AttributeImage2DPriority:") && current_attribute != nullptr)
         {
             ParseInteger(ExtractValue(trimmed, "AttributeImage2DPriority:"), current_attribute->image_2d.priority);
@@ -2030,6 +2053,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeColor2DLockAspectRatio:") && current_attribute != nullptr)
         {
             ParseBool(ExtractValue(trimmed, "AttributeColor2DLockAspectRatio:"), current_attribute->color_2d.lock_aspect_ratio);
+        }
+        else if (StartsWith(trimmed, "AttributeColor2DStretchToScreen:") && current_attribute != nullptr)
+        {
+            ParseBool(ExtractValue(trimmed, "AttributeColor2DStretchToScreen:"), current_attribute->color_2d.stretch_to_screen);
         }
         else if (StartsWith(trimmed, "AttributeColor2DPriority:") && current_attribute != nullptr)
         {
@@ -2964,6 +2991,19 @@ bool SetSceneObjectAttributeImage2DLockAspectRatio(const std::filesystem::path& 
     return SetSceneObjectAttributeBoolean("AttributeImage2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
 }
 
+bool SetSceneObjectAttributeImage2DStretchToScreen(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool stretch_to_screen)
+{
+    return SetSceneObjectAttributeBoolean("AttributeImage2DStretchToScreen", scene_path, object_name, attribute_index, stretch_to_screen);
+}
+
+bool SetSceneObjectAttributeImage2DPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectImagePlayMode play_mode)
+{
+    const std::string value = (play_mode == SceneObjectImagePlayMode::Loop) ? "Loop"
+        : (play_mode == SceneObjectImagePlayMode::PlayOnce) ? "PlayOnce"
+        : "Off";
+    return SetSceneObjectAttributeStringValue("AttributeImage2DPlayMode", scene_path, object_name, attribute_index, value);
+}
+
 bool SetSceneObjectAttributeColor2DPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float x, float y)
 {
     return SetSceneObjectAttributeFloat2Value(
@@ -3001,6 +3041,11 @@ bool SetSceneObjectAttributeColor2DAlpha(const std::filesystem::path& scene_path
 bool SetSceneObjectAttributeColor2DLockAspectRatio(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool lock_aspect_ratio)
 {
     return SetSceneObjectAttributeBoolean("AttributeColor2DLockAspectRatio", scene_path, object_name, attribute_index, lock_aspect_ratio);
+}
+
+bool SetSceneObjectAttributeColor2DStretchToScreen(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool stretch_to_screen)
+{
+    return SetSceneObjectAttributeBoolean("AttributeColor2DStretchToScreen", scene_path, object_name, attribute_index, stretch_to_screen);
 }
 
 bool SetSceneObjectAttributeColor2DPriority(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, int priority)

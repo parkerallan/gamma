@@ -188,6 +188,21 @@ private:
         std::vector<PositionedGlyph> glyphs;
     };
 
+    struct AnimatedImageCacheEntry
+    {
+        GpuTexture texture{};
+        std::vector<unsigned char> frames_rgba;
+        std::vector<int> delays_ms;
+        int width = 0;
+        int height = 0;
+        int frame_count = 0;
+        int current_frame = 0;
+        double frame_elapsed_seconds = 0.0;
+        std::uint64_t last_update_frame = 0;
+        SceneObjectImagePlayMode last_play_mode = SceneObjectImagePlayMode::Loop;
+        bool finished_once = false;
+    };
+
     VulkanContext* vulkan_context_ = nullptr;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
@@ -222,8 +237,12 @@ private:
     std::unordered_map<std::string, std::vector<unsigned char>> font_cache_;
     std::unordered_map<FontAtlasKey, FontAtlas, FontAtlasKeyHash> font_atlas_cache_;
     std::unordered_map<std::string, GpuTexture> image_cache_;
+    std::unordered_map<std::string, AnimatedImageCacheEntry> animated_image_cache_;
     std::unordered_map<TextCacheKey, TextLayoutCacheEntry, TextCacheKeyHash> text_layout_cache_;
     GpuTexture solid_color_texture_{};
+
+    std::uint64_t overlay_frame_index_ = 0;
+    std::uint64_t last_overlay_ticks_ = 0;
 
     VideoPlaybackManager* video_playback_manager_ = nullptr;
 
@@ -250,6 +269,12 @@ private:
         std::uint32_t codepoint,
         float scale);
     GpuTexture* GetOrLoadImage(const std::filesystem::path& path, bool use_pak_streaming);
+    GpuTexture* GetOrUpdateAnimatedImage(
+        const std::filesystem::path& path,
+        bool use_pak_streaming,
+        SceneObjectImagePlayMode play_mode,
+        double delta_seconds,
+        std::uint64_t frame_index);
     TextLayoutCacheEntry* GetOrBuildTextLayout(const std::string& font_path_abs,
                                                const std::string& text,
                                                float font_size,

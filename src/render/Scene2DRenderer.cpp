@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -186,6 +187,49 @@ std::vector<unsigned char> ReadFontBytes(
     }
 
     return ReadFontFile(path);
+}
+
+std::vector<std::uint8_t> ReadImageBytes(
+    const std::filesystem::path& path,
+    bool use_pak_streaming)
+{
+    if (use_pak_streaming)
+    {
+        if (!g_asset_reader)
+        {
+            return {};
+        }
+        return ReadAssetFileAsBytes(path.generic_string());
+    }
+
+    return ReadBinaryFile(path);
+}
+
+std::string MakeImageCacheKey(
+    const std::filesystem::path& path,
+    bool use_pak_streaming)
+{
+    return std::string(use_pak_streaming ? "pak:" : "fs:") + path.generic_string();
+}
+
+bool HasGifExtension(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    for (char& ch : extension)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return extension == ".gif";
+}
+
+double GifFrameDelaySeconds(const std::vector<int>& delays_ms, int frame_index)
+{
+    int delay_ms = 100;
+    if (frame_index >= 0 && frame_index < static_cast<int>(delays_ms.size()) && delays_ms[static_cast<std::size_t>(frame_index)] > 0)
+    {
+        delay_ms = delays_ms[static_cast<std::size_t>(frame_index)];
+    }
+    return static_cast<double>(delay_ms) / 1000.0;
 }
 
 // Expand grayscale alpha-only bitmap to RGBA for GPU upload.
@@ -475,6 +519,12 @@ void Scene2DRenderer::Shutdown()
         ReleaseGpuTexture(tex);
     }
     image_cache_.clear();
+
+    for (auto& [key, animated_image] : animated_image_cache_)
+    {
+        ReleaseGpuTexture(animated_image.texture);
+    }
+    animated_image_cache_.clear();
 
     text_layout_cache_.clear();
 
@@ -1449,8 +1499,7 @@ bool Scene2DRenderer::EnsureSolidColorTexture()
 
 Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesystem::path& path, bool use_pak_streaming)
 {
-    const std::string mode_prefix = use_pak_streaming ? "pak:" : "fs:";
-    const std::string key = mode_prefix + path.generic_string();
+    const std::string key = MakeImageCacheKey(path, use_pak_streaming);
     auto it = image_cache_.find(key);
     if (it != image_cache_.end())
     {
@@ -1494,6 +1543,153 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesyst
 
     image_cache_[key] = tex;
     return &image_cache_[key];
+}
+
+Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrUpdateAnimatedImage(
+    const std::filesystem::path& path,
+    bool use_pak_streaming,
+    SceneObjectImagePlayMode play_mode,
+    double delta_seconds,
+    std::uint64_t frame_index)
+{
+    const std::string key = MakeImageCacheKey(path, use_pak_streaming);
+    auto it = animated_image_cache_.find(key);
+    if (it == animated_image_cache_.end())
+    {
+        const std::vector<std::uint8_t> image_bytes = ReadImageBytes(path, use_pak_streaming);
+        if (image_bytes.empty())
+        {
+            return GetOrLoadImage(path, use_pak_streaming);
+        }
+
+        int* delays = nullptr;
+        int width = 0;
+        int height = 0;
+        int frame_count = 0;
+        int channels = 0;
+        stbi_uc* pixels = stbi_load_gif_from_memory(
+            image_bytes.data(),
+            static_cast<int>(image_bytes.size()),
+            &delays,
+            &width,
+            &height,
+            &frame_count,
+            &channels,
+            4);
+
+        if (pixels == nullptr || width <= 0 || height <= 0 || frame_count <= 0)
+        {
+            if (delays != nullptr)
+            {
+                stbi_image_free(delays);
+            }
+            if (pixels != nullptr)
+            {
+                stbi_image_free(pixels);
+            }
+            return GetOrLoadImage(path, use_pak_streaming);
+        }
+
+        const std::size_t frame_size = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+        const std::size_t total_size = frame_size * static_cast<std::size_t>(frame_count);
+
+        AnimatedImageCacheEntry entry;
+        entry.frames_rgba.assign(pixels, pixels + total_size);
+        entry.delays_ms.resize(static_cast<std::size_t>(frame_count), 100);
+        if (delays != nullptr)
+        {
+            for (int i = 0; i < frame_count; ++i)
+            {
+                entry.delays_ms[static_cast<std::size_t>(i)] = delays[i] > 0 ? delays[i] : 100;
+            }
+        }
+        entry.width = width;
+        entry.height = height;
+        entry.frame_count = frame_count;
+        entry.last_play_mode = play_mode;
+
+        stbi_image_free(pixels);
+        if (delays != nullptr)
+        {
+            stbi_image_free(delays);
+        }
+
+        if (!UploadTexture(entry.frames_rgba.data(), entry.width, entry.height, false, entry.texture))
+        {
+            return nullptr;
+        }
+
+        auto insert_result = animated_image_cache_.emplace(key, std::move(entry));
+        it = insert_result.first;
+    }
+
+    AnimatedImageCacheEntry& entry = it->second;
+    if (entry.last_play_mode != play_mode)
+    {
+        entry.last_play_mode = play_mode;
+        entry.frame_elapsed_seconds = 0.0;
+        entry.finished_once = false;
+        entry.current_frame = 0;
+        if (!entry.frames_rgba.empty())
+        {
+            UpdateTexture(entry.frames_rgba.data(), entry.width, entry.height, false, entry.texture);
+        }
+    }
+
+    if (entry.texture.descriptor_set == VK_NULL_HANDLE || entry.frame_count <= 1)
+    {
+        return &entry.texture;
+    }
+
+    if (play_mode == SceneObjectImagePlayMode::Off || entry.finished_once)
+    {
+        return &entry.texture;
+    }
+
+    if (entry.last_update_frame == frame_index)
+    {
+        return &entry.texture;
+    }
+    entry.last_update_frame = frame_index;
+
+    if (delta_seconds <= 0.0)
+    {
+        return &entry.texture;
+    }
+
+    entry.frame_elapsed_seconds += (std::min)(delta_seconds, 0.25);
+
+    bool frame_changed = false;
+    int advance_steps = 0;
+    while (advance_steps < entry.frame_count)
+    {
+        const double frame_delay = GifFrameDelaySeconds(entry.delays_ms, entry.current_frame);
+        if (entry.frame_elapsed_seconds < frame_delay)
+        {
+            break;
+        }
+
+        entry.frame_elapsed_seconds -= frame_delay;
+        if (play_mode == SceneObjectImagePlayMode::PlayOnce && entry.current_frame >= entry.frame_count - 1)
+        {
+            entry.current_frame = entry.frame_count - 1;
+            entry.finished_once = true;
+            entry.frame_elapsed_seconds = 0.0;
+            break;
+        }
+        entry.current_frame = (entry.current_frame + 1) % entry.frame_count;
+        frame_changed = true;
+        ++advance_steps;
+    }
+
+    if (frame_changed)
+    {
+        const std::size_t frame_size = static_cast<std::size_t>(entry.width) * static_cast<std::size_t>(entry.height) * 4u;
+        const unsigned char* frame_pixels = entry.frames_rgba.data() + frame_size * static_cast<std::size_t>(entry.current_frame);
+        UpdateTexture(frame_pixels, entry.width, entry.height, false, entry.texture);
+    }
+
+    return &entry.texture;
 }
 
 bool Scene2DRenderer::GetText2DRenderSize(
@@ -1747,6 +1943,16 @@ void Scene2DRenderer::CompositeOverlay(
     {
         return;
     }
+
+    double overlay_delta_seconds = 0.0;
+    const std::uint64_t overlay_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+    const std::uint64_t overlay_frequency = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+    if (last_overlay_ticks_ != 0 && overlay_ticks > last_overlay_ticks_ && overlay_frequency > 0)
+    {
+        overlay_delta_seconds = static_cast<double>(overlay_ticks - last_overlay_ticks_) / static_cast<double>(overlay_frequency);
+    }
+    last_overlay_ticks_ = overlay_ticks;
+    ++overlay_frame_index_;
 
     // Check whether there is any 2D work, and whether Color2D needs the shared solid texture.
     bool has_any = false;
@@ -2050,9 +2256,21 @@ void Scene2DRenderer::CompositeOverlay(
                         ? std::filesystem::path(img.image_path)
                         : project_root / img.image_path);
 
-                GpuTexture* tex = GetOrLoadImage(img_abs, use_pak_streaming);
+                GpuTexture* tex = HasGifExtension(img_abs)
+                    ? GetOrUpdateAnimatedImage(img_abs, use_pak_streaming, img.play_mode, overlay_delta_seconds, overlay_frame_index_)
+                    : GetOrLoadImage(img_abs, use_pak_streaming);
                 if (tex == nullptr)
                 {
+                    continue;
+                }
+
+                if (img.stretch_to_screen)
+                {
+                    DrawQuad(cmd, *tex,
+                        quad_index,
+                        0.0f, 0.0f, 1.0f, 1.0f,
+                        img.tint[0], img.tint[1], img.tint[2], img.alpha);
+                    ++quad_index;
                     continue;
                 }
 
@@ -2078,7 +2296,22 @@ void Scene2DRenderer::CompositeOverlay(
             else if (attr.kind == SceneObjectAttributeKind::Color2D)
             {
                 const SceneObjectColor2DAttributes& color = attr.color_2d;
-                if (color.alpha <= 0.0f || color.width <= 0.0f || color.height <= 0.0f || solid_color_texture_.descriptor_set == VK_NULL_HANDLE)
+                if (color.alpha <= 0.0f || solid_color_texture_.descriptor_set == VK_NULL_HANDLE)
+                {
+                    continue;
+                }
+
+                if (color.stretch_to_screen)
+                {
+                    DrawQuad(cmd, solid_color_texture_,
+                        quad_index,
+                        0.0f, 0.0f, 1.0f, 1.0f,
+                        color.color[0], color.color[1], color.color[2], std::clamp(color.alpha, 0.0f, 1.0f));
+                    ++quad_index;
+                    continue;
+                }
+
+                if (color.width <= 0.0f || color.height <= 0.0f)
                 {
                     continue;
                 }

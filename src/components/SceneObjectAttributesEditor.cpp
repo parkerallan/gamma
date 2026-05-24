@@ -2,6 +2,8 @@
 
 #include "imgui.h"
 
+#include <stb_image.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -68,6 +70,39 @@ bool HasAnyExtension(const std::filesystem::path& path, const std::initializer_l
         }
     }
     return false;
+}
+
+std::filesystem::path ResolveAssetReadPath(const EngineState& state, const std::filesystem::path& path)
+{
+    if (path.is_absolute())
+    {
+        return path;
+    }
+    if (!state.project_root.empty())
+    {
+        return state.project_root / path;
+    }
+    return path;
+}
+
+bool TryReadImageDimensions(const EngineState& state, const std::filesystem::path& path, float& out_width, float& out_height)
+{
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    const std::filesystem::path resolved_path = ResolveAssetReadPath(state, path);
+    if (!stbi_info(resolved_path.string().c_str(), &width, &height, &channels))
+    {
+        return false;
+    }
+    if (width <= 0 || height <= 0)
+    {
+        return false;
+    }
+
+    out_width = static_cast<float>(width);
+    out_height = static_cast<float>(height);
+    return true;
 }
 
 std::filesystem::path GetBuiltInShapePath(const char* file_name)
@@ -1166,9 +1201,22 @@ bool RenderAttributeSection(
                     if (HasAnyExtension(dropped_path, {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".gif", ".webp"}))
                     {
                         const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        float natural_width = 0.0f;
+                        float natural_height = 0.0f;
+                        const bool has_natural_size = TryReadImageDimensions(state, dropped_path, natural_width, natural_height);
                         changed = SaveSceneObjectAttributeEdit(state, object, "image 2D path", [&]()
                         {
-                            return SetSceneObjectAttributeImage2DImagePath(state.selected_item_path, object.name, attribute_index, normalized);
+                            bool updated = SetSceneObjectAttributeImage2DImagePath(state.selected_item_path, object.name, attribute_index, normalized);
+                            if (has_natural_size)
+                            {
+                                updated = SetSceneObjectAttributeImage2DSize(
+                                    state.selected_item_path,
+                                    object.name,
+                                    attribute_index,
+                                    natural_width,
+                                    natural_height) && updated;
+                            }
+                            return updated;
                         }) || changed;
                     }
                 }
@@ -1228,6 +1276,36 @@ bool RenderAttributeSection(
                 {
                     return SetSceneObjectAttributeImage2DLockAspectRatio(state.selected_item_path, object.name, attribute_index, image_lock_aspect_ratio);
                 }) || changed;
+            }
+
+            bool image_stretch = attribute.image_2d.stretch_to_screen;
+            if (ImGui::Checkbox("Stretch to Screen", &image_stretch))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "image 2D stretch to screen", [&]()
+                {
+                    return SetSceneObjectAttributeImage2DStretchToScreen(state.selected_item_path, object.name, attribute_index, image_stretch);
+                }) || changed;
+            }
+
+            if (HasAnyExtension(std::filesystem::path(attribute.image_2d.image_path), {".gif"}))
+            {
+                ImGui::TextUnformatted("Play Mode");
+                const SceneObjectImagePlayMode image_mode = attribute.image_2d.play_mode;
+                auto image_play_mode_radio = [&](const char* label, SceneObjectImagePlayMode mode)
+                {
+                    if (ImGui::RadioButton(label, image_mode == mode))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "image 2D play mode", [&]()
+                        {
+                            return SetSceneObjectAttributeImage2DPlayMode(state.selected_item_path, object.name, attribute_index, mode);
+                        }) || changed;
+                    }
+                };
+                image_play_mode_radio("Loop", SceneObjectImagePlayMode::Loop);
+                ImGui::SameLine();
+                image_play_mode_radio("Play Once", SceneObjectImagePlayMode::PlayOnce);
+                ImGui::SameLine();
+                image_play_mode_radio("Off", SceneObjectImagePlayMode::Off);
             }
 
             float tint[3] = {
@@ -1343,6 +1421,15 @@ bool RenderAttributeSection(
                 changed = SaveSceneObjectAttributeEdit(state, object, "2D color lock aspect ratio", [&]()
                 {
                     return SetSceneObjectAttributeColor2DLockAspectRatio(state.selected_item_path, object.name, attribute_index, lock_aspect_ratio);
+                }) || changed;
+            }
+
+            bool color_stretch = attribute.color_2d.stretch_to_screen;
+            if (ImGui::Checkbox("Stretch to Screen", &color_stretch))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "2D color stretch to screen", [&]()
+                {
+                    return SetSceneObjectAttributeColor2DStretchToScreen(state.selected_item_path, object.name, attribute_index, color_stretch);
                 }) || changed;
             }
 

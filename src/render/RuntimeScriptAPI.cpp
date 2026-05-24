@@ -851,6 +851,34 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_bool(SceneObjectAttributeKind::Image2D,
             [](const SceneObjectAttribute& attribute) { return attribute.image_2d.lock_aspect_ratio; },
             [](SceneObjectAttribute& attribute, bool value) { attribute.image_2d.lock_aspect_ratio = value; });
+    case ScriptAttributeAccessorId::Image2DStretchToScreen:
+        return access_bool(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.image_2d.stretch_to_screen; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.image_2d.stretch_to_screen = value; });
+    case ScriptAttributeAccessorId::Image2DPlayMode:
+        return access_string(SceneObjectAttributeKind::Image2D,
+            [](const SceneObjectAttribute& attribute) -> std::string {
+                switch (attribute.image_2d.play_mode)
+                {
+                case SceneObjectImagePlayMode::Loop: return "Loop";
+                case SceneObjectImagePlayMode::PlayOnce: return "PlayOnce";
+                case SceneObjectImagePlayMode::Off: default: return "Off";
+                }
+            },
+            [](SceneObjectAttribute& attribute, const std::string& value) {
+                if (value == "Loop" || value == "loop")
+                {
+                    attribute.image_2d.play_mode = SceneObjectImagePlayMode::Loop;
+                }
+                else if (value == "PlayOnce" || value == "playonce" || value == "Once" || value == "once")
+                {
+                    attribute.image_2d.play_mode = SceneObjectImagePlayMode::PlayOnce;
+                }
+                else
+                {
+                    attribute.image_2d.play_mode = SceneObjectImagePlayMode::Off;
+                }
+            });
     case ScriptAttributeAccessorId::Image2DTint:
         return access_vec3(SceneObjectAttributeKind::Image2D,
             [](const SceneObjectAttribute& attribute) { return attribute.image_2d.tint; },
@@ -883,6 +911,10 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_bool(SceneObjectAttributeKind::Color2D,
             [](const SceneObjectAttribute& attribute) { return attribute.color_2d.lock_aspect_ratio; },
             [](SceneObjectAttribute& attribute, bool value) { attribute.color_2d.lock_aspect_ratio = value; });
+    case ScriptAttributeAccessorId::Color2DStretchToScreen:
+        return access_bool(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.color_2d.stretch_to_screen; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.color_2d.stretch_to_screen = value; });
     case ScriptAttributeAccessorId::Color2DColor:
         return access_vec3(SceneObjectAttributeKind::Color2D,
             [](const SceneObjectAttribute& attribute) { return attribute.color_2d.color; },
