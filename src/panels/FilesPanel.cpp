@@ -441,7 +441,7 @@ std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesyste
             object_node.path = scene_path;
             object_node.label = object.name;
             object_node.is_scene_object = true;
-            object_node.enabled_in_hierarchy = IsSceneObjectEnabledInHierarchy(scene_metadata, object.name);
+            object_node.enabled_in_hierarchy = object.enabled_in_hierarchy;
             object_node.has_camera_attribute = std::any_of(object.attributes.begin(), object.attributes.end(), [](const SceneObjectAttribute& attribute)
             {
                 return attribute.kind == SceneObjectAttributeKind::Camera;

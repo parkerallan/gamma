@@ -511,7 +511,7 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(
     std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -624,7 +624,7 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -3214,7 +3214,7 @@ void RuntimeRenderer::UpdateAnimatorControllersForFrame(const SceneMetadata& sce
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -3801,6 +3801,18 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectScale, 1);
     lua_setfield(script_lua_state_, -2, "GetObjectScale");
 
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetObjectEnabled, 1);
+    lua_setfield(script_lua_state_, -2, "SetObjectEnabled");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaGetObjectEnabled, 1);
+    lua_setfield(script_lua_state_, -2, "GetObjectEnabled");
+
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaSetCameraActive, 1);
+    lua_setfield(script_lua_state_, -2, "SetCameraActive");
+
     struct AttributeAccessorBinding
     {
         const char* table_name;
@@ -3857,6 +3869,12 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
         {"Image2DAttr", "Tint", ScriptAttributeAccessorId::Image2DTint},
         {"Image2DAttr", "Alpha", ScriptAttributeAccessorId::Image2DAlpha},
         {"Image2DAttr", "Priority", ScriptAttributeAccessorId::Image2DPriority},
+        {"Color2DAttr", "Position", ScriptAttributeAccessorId::Color2DPosition},
+        {"Color2DAttr", "Size", ScriptAttributeAccessorId::Color2DSize},
+        {"Color2DAttr", "LockAspectRatio", ScriptAttributeAccessorId::Color2DLockAspectRatio},
+        {"Color2DAttr", "Color", ScriptAttributeAccessorId::Color2DColor},
+        {"Color2DAttr", "Alpha", ScriptAttributeAccessorId::Color2DAlpha},
+        {"Color2DAttr", "Priority", ScriptAttributeAccessorId::Color2DPriority},
         {"Video2DAttr", "VideoPath", ScriptAttributeAccessorId::Video2DVideoPath},
         {"Video2DAttr", "Position", ScriptAttributeAccessorId::Video2DPosition},
         {"Video2DAttr", "Size", ScriptAttributeAccessorId::Video2DSize},
@@ -4510,7 +4528,7 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
     trigger_objects.reserve(cached_scene_metadata_.objects.size());
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -4874,7 +4892,7 @@ bool RuntimeRenderer::RuntimeObjectExists(const std::string& object_name) const
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -4947,7 +4965,7 @@ bool RuntimeRenderer::TryGetScriptObjectRotation(const std::string& object_name,
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -4978,7 +4996,7 @@ bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, Sc
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -4993,6 +5011,163 @@ bool RuntimeRenderer::TryGetScriptObjectScale(const std::string& object_name, Sc
     return false;
 }
 
+bool RuntimeRenderer::SetScriptObjectEnabled(const std::string& object_name, bool enabled)
+{
+    if (object_name.empty())
+    {
+        return false;
+    }
+
+    auto object_has_physics = [](const SceneObjectMetadata& object)
+    {
+        if (object.physics_shape != SceneObjectPhysicsShape::None || object.physics_is_trigger)
+        {
+            return true;
+        }
+
+        for (const SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind == SceneObjectAttributeKind::Rigidbody || attribute.kind == SceneObjectAttributeKind::TriggerVolume)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    auto object_is_in_subtree = [&](const SceneObjectMetadata& object)
+    {
+        if (object.name == object_name)
+        {
+            return true;
+        }
+
+        std::string parent_name = object.parent_name;
+        std::unordered_set<std::string> visited;
+        while (!parent_name.empty() && visited.insert(parent_name).second)
+        {
+            if (parent_name == object_name)
+            {
+                return true;
+            }
+
+            const auto parent_it = std::find_if(cached_scene_metadata_.objects.begin(), cached_scene_metadata_.objects.end(), [&](const SceneObjectMetadata& parent)
+            {
+                return parent.name == parent_name;
+            });
+            if (parent_it == cached_scene_metadata_.objects.end())
+            {
+                break;
+            }
+
+            parent_name = parent_it->parent_name;
+        }
+
+        return false;
+    };
+
+    bool affects_physics = false;
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object_is_in_subtree(object) && object_has_physics(object))
+        {
+            affects_physics = true;
+            break;
+        }
+    }
+
+    for (SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        if (object.enabled == enabled)
+        {
+            return true;
+        }
+
+        object.enabled = enabled;
+        ResolveSceneObjectEnabledState(cached_scene_metadata_);
+        if (affects_physics)
+        {
+            physics_world_built_ = false;
+            physics_object_transforms_.clear();
+            physics_object_transforms_prev_.clear();
+            physics_object_transforms_curr_.clear();
+            physics_accumulator_seconds_ = 0.0f;
+            physics_last_tick_ms_ = 0;
+            physics_has_curr_snapshot_ = false;
+        }
+        RefreshActiveScriptCameraSelection();
+        return true;
+    }
+
+    return false;
+}
+
+bool RuntimeRenderer::TryGetScriptObjectEnabled(const std::string& object_name, bool& enabled) const
+{
+    if (object_name.empty())
+    {
+        return false;
+    }
+
+    for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        if (object.name != object_name)
+        {
+            continue;
+        }
+
+        enabled = object.enabled;
+        return true;
+    }
+
+    return false;
+}
+
+bool RuntimeRenderer::SetScriptCameraActive(const std::string& object_name, bool active)
+{
+    if (object_name.empty())
+    {
+        return false;
+    }
+
+    bool found_target = false;
+    for (SceneObjectMetadata& object : cached_scene_metadata_.objects)
+    {
+        for (SceneObjectAttribute& attribute : object.attributes)
+        {
+            if (attribute.kind != SceneObjectAttributeKind::Camera)
+            {
+                continue;
+            }
+
+            const bool is_target = object.name == object_name;
+            if (is_target)
+            {
+                attribute.camera.active = active;
+                found_target = true;
+            }
+            else if (active)
+            {
+                attribute.camera.active = false;
+            }
+        }
+    }
+
+    if (!found_target)
+    {
+        return false;
+    }
+
+    RefreshActiveScriptCameraSelection();
+    return true;
+}
+
 RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimatorState(
     const std::string& object_name,
     std::size_t occurrence_index)
@@ -5004,7 +5179,7 @@ RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimatorState
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -5050,7 +5225,7 @@ RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::EnsureRuntimeAnimatorSta
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -5277,7 +5452,7 @@ const SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -5320,7 +5495,7 @@ const RuntimeRenderer::RuntimeAnimatorState* RuntimeRenderer::FindRuntimeAnimato
 
     for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -5360,6 +5535,8 @@ void RuntimeRenderer::RefreshActiveScriptCameraSelection()
     const ActiveSceneCameraSelection new_camera = FindActiveSceneCamera(cached_scene_metadata_);
     if (!new_camera.found)
     {
+        active_camera_object_name_.clear();
+        active_camera_attribute_index_ = 0;
         return;
     }
 
@@ -5429,7 +5606,7 @@ bool RuntimeRenderer::BuildQueuedScene(
     std::size_t queued_scan_count = 0;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -5762,11 +5939,11 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     }
 
     const SceneObjectAttribute& camera_attribute = camera_object_it->attributes[active_camera_attribute_index_];
-    if (camera_attribute.kind != SceneObjectAttributeKind::Camera)
+    if (!camera_object_it->enabled_in_hierarchy || camera_attribute.kind != SceneObjectAttributeKind::Camera || !camera_attribute.camera.active)
     {
         if (error_message != nullptr)
         {
-            *error_message = "Play camera attribute is no longer a camera; restart Play";
+            *error_message = "Active Play camera is no longer enabled and active";
         }
         return false;
     }
@@ -5789,7 +5966,7 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         world_matrices.reserve(scene_metadata.objects.size());
         for (const SceneObjectMetadata& object : scene_metadata.objects)
         {
-            if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+            if (!object.enabled_in_hierarchy)
             {
                 continue;
             }
@@ -6663,7 +6840,7 @@ void RuntimeRenderer::UpdateAudioSourcesForFrame(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

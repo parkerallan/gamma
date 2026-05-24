@@ -9,6 +9,7 @@
 #include <functional>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
@@ -423,6 +424,53 @@ bool SceneObjectExists(const SceneMetadata& scene_metadata, const std::string& o
     {
         return object.name == object_name;
     });
+}
+
+void ResolveSceneObjectEnabledStateInternal(SceneMetadata& scene_metadata)
+{
+    std::unordered_map<std::string, std::size_t> object_indices;
+    object_indices.reserve(scene_metadata.objects.size());
+    for (std::size_t index = 0; index < scene_metadata.objects.size(); ++index)
+    {
+        if (!scene_metadata.objects[index].name.empty())
+        {
+            object_indices.emplace(scene_metadata.objects[index].name, index);
+        }
+    }
+
+    std::vector<unsigned char> visit_state(scene_metadata.objects.size(), 0);
+    const auto resolve_object = [&](auto&& self, std::size_t object_index) -> bool
+    {
+        SceneObjectMetadata& object = scene_metadata.objects[object_index];
+        if (visit_state[object_index] == 2)
+        {
+            return object.enabled_in_hierarchy;
+        }
+        if (visit_state[object_index] == 1)
+        {
+            return object.enabled;
+        }
+
+        visit_state[object_index] = 1;
+        bool parent_enabled = true;
+        if (!object.parent_name.empty())
+        {
+            const auto parent_it = object_indices.find(object.parent_name);
+            if (parent_it != object_indices.end())
+            {
+                parent_enabled = self(self, parent_it->second);
+            }
+        }
+
+        object.enabled_in_hierarchy = object.enabled && parent_enabled;
+        visit_state[object_index] = 2;
+        return object.enabled_in_hierarchy;
+    };
+
+    for (std::size_t index = 0; index < scene_metadata.objects.size(); ++index)
+    {
+        resolve_object(resolve_object, index);
+    }
 }
 
 std::string BuildUniqueSceneObjectName(const SceneMetadata& scene_metadata, const std::string& desired_name, const std::vector<std::string>& reserved_names = {})
@@ -2125,39 +2173,23 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         }
     }
 
+    ResolveSceneObjectEnabledStateInternal(metadata);
     metadata.parsed = true;
     return metadata;
 }
 
+void ResolveSceneObjectEnabledState(SceneMetadata& scene_metadata)
+{
+    ResolveSceneObjectEnabledStateInternal(scene_metadata);
+}
+
 bool IsSceneObjectEnabledInHierarchy(const SceneMetadata& scene_metadata, const std::string& object_name)
 {
-    std::vector<std::string> visited_names;
-    std::string current_name = object_name;
-    while (!current_name.empty())
+    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
     {
-        if (std::find(visited_names.begin(), visited_names.end(), current_name) != visited_names.end())
-        {
-            return true;
-        }
-        visited_names.push_back(current_name);
-
-        const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](const SceneObjectMetadata& object)
-        {
-            return object.name == current_name;
-        });
-        if (object_it == scene_metadata.objects.end())
-        {
-            return true;
-        }
-        if (!object_it->enabled)
-        {
-            return false;
-        }
-
-        current_name = object_it->parent_name;
-    }
-
-    return true;
+        return object.name == object_name;
+    });
+    return object_it == scene_metadata.objects.end() || object_it->enabled_in_hierarchy;
 }
 
 ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_metadata)
@@ -2170,7 +2202,7 @@ ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_meta
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

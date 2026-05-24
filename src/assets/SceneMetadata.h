@@ -222,6 +222,7 @@ struct SceneObjectMetadata
     std::string name;
     std::string parent_name;
     bool enabled = true;
+    bool enabled_in_hierarchy = true;
     SceneVector3 position = {0.0f, 0.0f, 0.0f};
     SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
     SceneVector3 scale = {1.0f, 1.0f, 1.0f};
@@ -268,6 +269,7 @@ struct ActiveSceneCameraSelection
 };
 
 SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path);
+void ResolveSceneObjectEnabledState(SceneMetadata& scene_metadata);
 ActiveSceneCameraSelection FindActiveSceneCamera(const SceneMetadata& scene_metadata);
 bool IsSceneObjectEnabledInHierarchy(const SceneMetadata& scene_metadata, const std::string& object_name);
 const char* ToDisplayName(SceneObjectAttributeKind kind);

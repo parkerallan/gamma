@@ -383,6 +383,54 @@ int RuntimeRenderer::LuaGetObjectScale(lua_State* lua_state)
     return 3;
 }
 
+int RuntimeRenderer::LuaSetObjectEnabled(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const bool enabled = lua_toboolean(lua_state, 2) != 0;
+    lua_pushboolean(lua_state, renderer->SetScriptObjectEnabled(object_name, enabled) ? 1 : 0);
+    return 1;
+}
+
+int RuntimeRenderer::LuaGetObjectEnabled(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    bool enabled = false;
+    if (!renderer->TryGetScriptObjectEnabled(object_name, enabled))
+    {
+        lua_pushnil(lua_state);
+        return 1;
+    }
+
+    lua_pushboolean(lua_state, enabled ? 1 : 0);
+    return 1;
+}
+
+int RuntimeRenderer::LuaSetCameraActive(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const bool active = lua_toboolean(lua_state, 2) != 0;
+    lua_pushboolean(lua_state, renderer->SetScriptCameraActive(object_name, active) ? 1 : 0);
+    return 1;
+}
+
 int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
 {
     RuntimeRenderer* const renderer = GetRuntimeRenderer(lua_state);
@@ -815,6 +863,38 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_int(SceneObjectAttributeKind::Image2D,
             [](const SceneObjectAttribute& attribute) { return attribute.image_2d.priority; },
             [](SceneObjectAttribute& attribute, int value) { attribute.image_2d.priority = value; });
+    case ScriptAttributeAccessorId::Color2DPosition:
+        return access_vec2(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.color_2d.x, attribute.color_2d.y}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.color_2d.x = x;
+                attribute.color_2d.y = y;
+            });
+    case ScriptAttributeAccessorId::Color2DSize:
+        return access_vec2(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return std::array<float, 2>{attribute.color_2d.width, attribute.color_2d.height}; },
+            [](SceneObjectAttribute& attribute, float x, float y)
+            {
+                attribute.color_2d.width = (std::max)(1.0f, x);
+                attribute.color_2d.height = (std::max)(1.0f, y);
+            });
+    case ScriptAttributeAccessorId::Color2DLockAspectRatio:
+        return access_bool(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.color_2d.lock_aspect_ratio; },
+            [](SceneObjectAttribute& attribute, bool value) { attribute.color_2d.lock_aspect_ratio = value; });
+    case ScriptAttributeAccessorId::Color2DColor:
+        return access_vec3(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.color_2d.color; },
+            [](SceneObjectAttribute& attribute, float x, float y, float z) { attribute.color_2d.color = {x, y, z}; });
+    case ScriptAttributeAccessorId::Color2DAlpha:
+        return access_float(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.color_2d.alpha; },
+            [](SceneObjectAttribute& attribute, float value) { attribute.color_2d.alpha = std::clamp(value, 0.0f, 1.0f); });
+    case ScriptAttributeAccessorId::Color2DPriority:
+        return access_int(SceneObjectAttributeKind::Color2D,
+            [](const SceneObjectAttribute& attribute) { return attribute.color_2d.priority; },
+            [](SceneObjectAttribute& attribute, int value) { attribute.color_2d.priority = value; });
     case ScriptAttributeAccessorId::SkyboxImagePath:
         return access_string(SceneObjectAttributeKind::Skybox,
             [](const SceneObjectAttribute& attribute) { return attribute.skybox.image_path; },
@@ -1320,7 +1400,7 @@ int RuntimeRenderer::LuaWorldSpawnFromObject(lua_State* lua_state)
     {
         for (const SceneObjectMetadata& scene_object : renderer->cached_scene_metadata_.objects)
         {
-            if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, scene_object.name))
+            if (!scene_object.enabled_in_hierarchy)
             {
                 continue;
             }
@@ -1408,7 +1488,7 @@ int RuntimeRenderer::LuaWorldDestroyByPrefix(lua_State* lua_state)
 
     for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -1456,7 +1536,7 @@ int RuntimeRenderer::LuaWorldGetAll(lua_State* lua_state)
 
     for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -1513,7 +1593,7 @@ int RuntimeRenderer::LuaWorldFindByPrefix(lua_State* lua_state)
 
     for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(renderer->cached_scene_metadata_, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

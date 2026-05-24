@@ -1171,7 +1171,7 @@ void VideoPlaybackManager::Update(
     for (std::size_t obj_idx = 0; obj_idx < scene_metadata.objects.size(); ++obj_idx)
     {
         const SceneObjectMetadata& object = scene_metadata.objects[obj_idx];
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

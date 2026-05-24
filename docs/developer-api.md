@@ -68,6 +68,27 @@ Quick summary: Gets an object's scale. Returns `x, y, z` or `nil` if not found.
 local sx, sy, sz = Engine.GetObjectScale("Crate")
 ```
 
+#### `Engine.SetObjectEnabled(name, enabled)`
+Quick summary: Enables or disables a scene object for the current Play session. Returns `true` on success.
+
+```lua
+Engine.SetObjectEnabled("EnemySpawner", false)
+```
+
+#### `Engine.GetObjectEnabled(name)`
+Quick summary: Gets an object's direct enabled state. Returns `true`, `false`, or `nil` if not found.
+
+```lua
+local enabled = Engine.GetObjectEnabled("EnemySpawner")
+```
+
+#### `Engine.SetCameraActive(name, enabled)`
+Quick summary: Sets the first Camera attribute on an object active or inactive for the current Play session. Returns `true` on success. Setting a camera active clears other active cameras.
+
+```lua
+Engine.SetCameraActive("GameplayCamera", true)
+```
+
 ### `Engine` attribute tables
 
 Quick summary: Attribute tables expose the first matching attribute on an object. Calling a method with only `name` reads the value. Passing additional values writes the value for the active Play session without rewriting the scene file.
@@ -101,6 +122,9 @@ Methods: `FontPath(name[, path])`, `Text(name[, text])`, `Position(name[, x, y])
 #### `Engine.Image2DAttr`
 Methods: `ImagePath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
 
+#### `Engine.Color2DAttr`
+Methods: `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `Color(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`
+
 #### `Engine.Video2DAttr`
 Methods: `VideoPath(name[, path])`, `Position(name[, x, y])`, `Size(name[, width, height])`, `LockAspectRatio(name[, enabled])`, `StretchToScreen(name[, enabled])`, `Tint(name[, r, g, b])`, `Alpha(name[, value])`, `Priority(name[, value])`, `PlayMode(name[, value])`, `Volume(name[, value])`, `Muted(name[, enabled])`
 
@@ -130,10 +154,11 @@ Engine.Text2DAttr.Text("DialogueBox", "Hello there")
 local message = Engine.Text2DAttr.Text("DialogueBox")
 Engine.Text2DAttr.Priority("DialogueBox", 10)  -- Higher priority = rendered behind
 Engine.Image2DAttr.Priority("UIBackground", 1)  -- Lower priority = rendered on top
+Engine.Color2DAttr.Color("DamageFlash", 1.0, 0.0, 0.0)
 ```
 
 **Priority Notes:**
-- `Priority` is an integer that controls the stacking order of Text2D and Image2D overlays.
+- `Priority` is an integer that controls the stacking order of Text2D, Image2D, Color2D, and Video2D overlays.
 - Lower priority values render on top (drawn last); higher values render behind (drawn first).
 - Default priority is `1` for all overlays.
 - Example: Priority 1 will render on top of Priority 10. If priorities are equal, overlays are rendered in creation order.

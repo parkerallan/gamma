@@ -394,7 +394,7 @@ std::filesystem::path FindSceneSkyboxPath(const SceneMetadata& scene_metadata)
 {
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -502,7 +502,7 @@ float SkyboxRenderer::ResolveSkyboxRotationDegrees(const SceneMetadata& scene_me
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

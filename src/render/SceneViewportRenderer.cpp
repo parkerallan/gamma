@@ -546,7 +546,7 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_me
     std::unordered_map<std::string, const SceneObjectMetadata*> objects_by_name;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -605,7 +605,7 @@ SceneResolvedObjectPoseMap ResolveSceneObjectPoses(const SceneMetadata& scene_me
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -977,7 +977,7 @@ void DrawPhysicsColliderGizmos(
 {
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -3089,7 +3089,7 @@ void SceneViewportRenderer::RenderUi(
     queued_objects_.clear();
     for (const SceneObjectMetadata& object : active_scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(active_scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -3504,7 +3504,7 @@ void SceneViewportRenderer::RenderUi(
     for (auto object_it = active_scene_metadata.objects.rbegin(); object_it != active_scene_metadata.objects.rend(); ++object_it)
     {
         const SceneObjectMetadata& object = *object_it;
-        if (!IsSceneObjectEnabledInHierarchy(active_scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -3965,7 +3965,7 @@ void SceneViewportRenderer::RenderCameraPreview(
     queued_objects_.clear();
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

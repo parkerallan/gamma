@@ -297,6 +297,9 @@ private:
     bool TryGetScriptObjectRotation(const std::string& object_name, SceneVector3& rotation) const;
     void SetScriptObjectScale(const std::string& object_name, const SceneVector3& scale);
     bool TryGetScriptObjectScale(const std::string& object_name, SceneVector3& scale) const;
+    bool SetScriptObjectEnabled(const std::string& object_name, bool enabled);
+    bool TryGetScriptObjectEnabled(const std::string& object_name, bool& enabled) const;
+    bool SetScriptCameraActive(const std::string& object_name, bool active);
     RuntimeAnimatorState* FindRuntimeAnimatorState(const std::string& object_name, std::size_t occurrence_index = 0);
     const RuntimeAnimatorState* FindRuntimeAnimatorState(const std::string& object_name, std::size_t occurrence_index = 0) const;
     RuntimeAnimatorState* EnsureRuntimeAnimatorState(const std::string& object_name, std::size_t occurrence_index = 0);
@@ -357,6 +360,12 @@ private:
         Image2DTint,
         Image2DAlpha,
         Image2DPriority,
+        Color2DPosition,
+        Color2DSize,
+        Color2DLockAspectRatio,
+        Color2DColor,
+        Color2DAlpha,
+        Color2DPriority,
         SkyboxImagePath,
         SkyboxRotation,
         AnimatorControllerPath,
@@ -402,6 +411,9 @@ private:
     static int LuaGetObjectRotation(lua_State* lua_state);
     static int LuaSetObjectScale(lua_State* lua_state);
     static int LuaGetObjectScale(lua_State* lua_state);
+    static int LuaSetObjectEnabled(lua_State* lua_state);
+    static int LuaGetObjectEnabled(lua_State* lua_state);
+    static int LuaSetCameraActive(lua_State* lua_state);
     static int LuaAttributeAccessor(lua_State* lua_state);
     static int LuaInputIsKeyDown(lua_State* lua_state);
     static int LuaInputWasKeyPressed(lua_State* lua_state);

@@ -157,7 +157,7 @@ void ResolvePreferredDirectLights(
     {
         return;
     }
-    if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object_it->name))
+    if (!object_it->enabled_in_hierarchy)
     {
         return;
     }
@@ -205,7 +205,7 @@ ResolvedSceneLighting ResolveSceneLighting(
 
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

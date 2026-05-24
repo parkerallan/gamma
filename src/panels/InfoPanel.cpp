@@ -138,18 +138,6 @@ void UpdateCachedSceneObjectVector3(
     }
 }
 
-void UpdateCachedSceneObjectEnabled(SceneMetadata& scene_metadata, const std::string& object_name, bool enabled)
-{
-    const auto object_it = std::find_if(scene_metadata.objects.begin(), scene_metadata.objects.end(), [&](SceneObjectMetadata& object)
-    {
-        return object.name == object_name;
-    });
-    if (object_it != scene_metadata.objects.end())
-    {
-        object_it->enabled = enabled;
-    }
-}
-
 SceneVector3 SnapPositionToGrid(const SceneVector3& value, const EngineState& state)
 {
     if (!state.snap_to_grid || state.grid_size <= 0.0f)
@@ -409,7 +397,7 @@ void InfoPanel::RenderCameraAttributePreview(
     bool any_model_loading = false;
     for (const SceneObjectMetadata& scene_object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, scene_object.name))
+        if (!scene_object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -634,7 +622,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         else if (SetSceneObjectEnabled(state.selected_item_path, selected_object.name, enabled))
         {
             selected_object.enabled = enabled;
-            UpdateCachedSceneObjectEnabled(cached_scene_metadata_, selected_object.name, enabled);
+            has_cached_scene_metadata_ = false;
             if (state.HasOpenFile() && state.open_file_path == state.selected_item_path)
             {
                 state.OpenTextFile(state.selected_item_path);

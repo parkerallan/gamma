@@ -1753,7 +1753,7 @@ void Scene2DRenderer::CompositeOverlay(
     bool has_color_2d = false;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }
@@ -1913,7 +1913,7 @@ void Scene2DRenderer::CompositeOverlay(
     for (std::size_t obj_idx = 0; obj_idx < scene_metadata.objects.size(); ++obj_idx)
     {
         const SceneObjectMetadata& object = scene_metadata.objects[obj_idx];
-        if (!IsSceneObjectEnabledInHierarchy(scene_metadata, object.name))
+        if (!object.enabled_in_hierarchy)
         {
             continue;
         }

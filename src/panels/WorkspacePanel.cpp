@@ -120,7 +120,7 @@ bool WorkspacePanel::BeginAsyncViewportLoad(
         std::unordered_set<std::string> unique_video_paths;
         for (const SceneObjectMetadata& object : result.scene_metadata.objects)
         {
-            if (!IsSceneObjectEnabledInHierarchy(result.scene_metadata, object.name))
+            if (!object.enabled_in_hierarchy)
             {
                 continue;
             }
@@ -540,7 +540,7 @@ void WorkspacePanel::RenderSceneViewport(EngineState& state)
             model_paths_in_scene.reserve(cached_scene_metadata_.objects.size());
             for (const SceneObjectMetadata& object : cached_scene_metadata_.objects)
             {
-                if (!IsSceneObjectEnabledInHierarchy(cached_scene_metadata_, object.name))
+                if (!object.enabled_in_hierarchy)
                 {
                     continue;
                 }
