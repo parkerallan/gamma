@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ed = ax::NodeEditor;
@@ -131,6 +132,14 @@ struct NodeGraphComponent::Impl
     // Tracks which node ids have had their saved canvas position pushed into
     // the editor at least once.
     std::unordered_map<std::uint64_t, bool> position_initialized;
+
+    // Clipboard for Ctrl+C / Ctrl+X / Ctrl+V. Stores deep copies of nodes
+    // (with their input literals) and any links whose endpoints are both
+    // inside the copied selection. `clipboard_origin` is the top-left of
+    // the source bounding box so paste can re-anchor at the mouse cursor.
+    std::vector<graph::GraphNode> clipboard_nodes;
+    std::vector<graph::GraphLink> clipboard_links;
+    ImVec2 clipboard_origin{0.0f, 0.0f};
 
     void EnsureEditor()
     {
@@ -737,6 +746,119 @@ void NodeGraphComponent::Render(EngineState& state)
         }
     }
 
+    // ---- Copy / Cut / Paste (Ctrl+C/X/V and right-click menus) ----------
+    // Shared lambdas so the keyboard handler and the context-menu items
+    // below dispatch the same logic. Copy snapshots selected nodes (plus
+    // links whose endpoints are both inside the selection) into the impl
+    // clipboard. Cut snapshots then deletes. Paste re-allocates ids,
+    // anchors the bounding box at `anchor` (canvas space), and selects
+    // the freshly pasted nodes.
+    auto do_copy = [&]()
+    {
+        impl_->clipboard_nodes.clear();
+        impl_->clipboard_links.clear();
+
+        const int sel_count = ed::GetSelectedObjectCount();
+        if (sel_count <= 0) return;
+        std::vector<ed::NodeId> sel_nodes(static_cast<std::size_t>(sel_count));
+        const int nn = ed::GetSelectedNodes(sel_nodes.data(), sel_count);
+        if (nn <= 0) return;
+
+        std::unordered_set<std::uint64_t> id_set;
+        id_set.reserve(static_cast<std::size_t>(nn));
+        float min_x = 0.0f, min_y = 0.0f;
+        bool have_origin = false;
+        for (int i = 0; i < nn; ++i)
+        {
+            const std::uint64_t nid = static_cast<std::uint64_t>(sel_nodes[i].Get());
+            const graph::GraphNode* src = doc.FindNode(nid);
+            if (!src) continue;
+            // Pull the live editor position so a dragged-but-unsaved node
+            // still copies at its on-screen location.
+            const ImVec2 ed_pos = ed::GetNodePosition(sel_nodes[i]);
+            graph::GraphNode copy = *src;
+            if (!std::isnan(ed_pos.x) && !std::isnan(ed_pos.y))
+            {
+                copy.position_x = ed_pos.x;
+                copy.position_y = ed_pos.y;
+            }
+            if (!have_origin || copy.position_x < min_x) min_x = copy.position_x;
+            if (!have_origin || copy.position_y < min_y) min_y = copy.position_y;
+            have_origin = true;
+            id_set.insert(nid);
+            impl_->clipboard_nodes.push_back(std::move(copy));
+        }
+        impl_->clipboard_origin = ImVec2(min_x, min_y);
+
+        for (const auto& link : doc.links)
+        {
+            if (id_set.count(link.from_node) && id_set.count(link.to_node))
+                impl_->clipboard_links.push_back(link);
+        }
+    };
+
+    auto do_cut = [&]()
+    {
+        do_copy();
+        for (const auto& n : impl_->clipboard_nodes)
+            ed::DeleteNode(static_cast<ed::NodeId>(n.id));
+    };
+
+    auto do_paste = [&](ImVec2 anchor)
+    {
+        if (impl_->clipboard_nodes.empty()) return;
+        const ImVec2 offset(anchor.x - impl_->clipboard_origin.x,
+                            anchor.y - impl_->clipboard_origin.y);
+
+        std::unordered_map<std::uint64_t, std::uint64_t> id_remap;
+        id_remap.reserve(impl_->clipboard_nodes.size());
+
+        ed::ClearSelection();
+        for (const auto& src : impl_->clipboard_nodes)
+        {
+            graph::GraphNode n = src;
+            n.id = doc.AllocateId();
+            n.position_x = src.position_x + offset.x;
+            n.position_y = src.position_y + offset.y;
+            id_remap[src.id] = n.id;
+            impl_->position_initialized[n.id] = false;
+            const ed::NodeId new_ed_id = static_cast<ed::NodeId>(n.id);
+            doc.nodes.push_back(std::move(n));
+            ed::SelectNode(new_ed_id, true);
+        }
+        for (const auto& src : impl_->clipboard_links)
+        {
+            auto a = id_remap.find(src.from_node);
+            auto b = id_remap.find(src.to_node);
+            if (a == id_remap.end() || b == id_remap.end()) continue;
+            graph::GraphLink l = src;
+            l.id = doc.AllocateId();
+            l.from_node = a->second;
+            l.to_node = b->second;
+            doc.links.push_back(std::move(l));
+        }
+        any_change = true;
+    };
+
+    if (!ImGui::GetIO().WantTextInput)
+    {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+            do_copy();
+        else if (ctrl && ImGui::IsKeyPressed(ImGuiKey_X, false))
+            do_cut();
+        else if (ctrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
+        {
+            // Anchor at the mouse if it's over the editor; else stack with a
+            // small fixed offset so repeated Ctrl+V is predictable.
+            ImVec2 anchor(impl_->clipboard_origin.x + 20.0f,
+                          impl_->clipboard_origin.y + 20.0f);
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_RootWindow))
+                anchor = ed::ScreenToCanvas(ImGui::GetMousePos());
+            do_paste(anchor);
+        }
+    }
+
     if (ed::BeginDelete())
     {
         ed::LinkId deleted_link;
@@ -786,7 +908,31 @@ void NodeGraphComponent::Render(EngineState& state)
     }
     if (ImGui::BeginPopup("graph_node_ctx"))
     {
-        if (ImGui::MenuItem("Delete Node"))
+        if (ImGui::MenuItem("Copy", "Ctrl+C"))
+        {
+            // The user may right-click a node that isn't part of the
+            // current selection — make sure that node is selected so
+            // do_copy() picks it up.
+            const ed::NodeId nid = static_cast<ed::NodeId>(impl_->ctx_node);
+            if (!ed::IsNodeSelected(nid))
+            {
+                ed::ClearSelection();
+                ed::SelectNode(nid, true);
+            }
+            do_copy();
+        }
+        if (ImGui::MenuItem("Cut", "Ctrl+X"))
+        {
+            const ed::NodeId nid = static_cast<ed::NodeId>(impl_->ctx_node);
+            if (!ed::IsNodeSelected(nid))
+            {
+                ed::ClearSelection();
+                ed::SelectNode(nid, true);
+            }
+            do_cut();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Delete Node", "Backspace"))
         {
             ed::DeleteNode(static_cast<ed::NodeId>(impl_->ctx_node));
         }
@@ -842,8 +988,16 @@ void NodeGraphComponent::Render(EngineState& state)
     }
     if (ImGui::BeginPopup("graph_palette"))
     {
-        ImGui::TextUnformatted("Add Node");
-        ImGui::Separator();
+        // Quick Paste at the cursor when there's clipboard content
+        if (!impl_->clipboard_nodes.empty())
+        {
+            if (ImGui::MenuItem("Paste", "Ctrl+V"))
+            {
+                do_paste(impl_->palette_spawn_pos);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::Separator();
+        }
         ImGui::SetNextItemWidth(240.0f);
         if (impl_->palette_open_pending)
         {
@@ -852,8 +1006,14 @@ void NodeGraphComponent::Render(EngineState& state)
         }
         ImGui::InputTextWithHint("##palette_filter", "search...", impl_->palette_filter, sizeof(impl_->palette_filter));
 
-        std::unordered_map<std::string, std::vector<const graph::NodeSpec*>> by_cat;
-        std::vector<std::string> ordered_cats;
+        // Build a tree of categories split on '/' so e.g. "Attribute/PointLightAttr"
+        // becomes a nested menu: Attribute > PointLightAttr > Set/Get.
+        struct MenuNode {
+            std::vector<std::string> child_order;
+            std::unordered_map<std::string, MenuNode> children;
+            std::vector<const graph::NodeSpec*> specs;
+        };
+        MenuNode root;
         for (const auto& s : reg.All())
         {
             if (impl_->palette_filter[0] != '\0')
@@ -868,35 +1028,59 @@ void NodeGraphComponent::Render(EngineState& state)
                 };
                 if (!contains_ci(s.display_name, filter) && !contains_ci(s.type_key, filter)) continue;
             }
-            if (by_cat.find(s.category) == by_cat.end()) ordered_cats.push_back(s.category);
-            by_cat[s.category].push_back(&s);
-        }
-        for (const auto& cat : ordered_cats)
-        {
-            if (ImGui::BeginMenu(cat.c_str()))
+            MenuNode* cur = &root;
+            const std::string& cat = s.category;
+            std::string::size_type start = 0;
+            while (start <= cat.size())
             {
-                for (const graph::NodeSpec* s : by_cat[cat])
-                {
-                    if (ImGui::MenuItem(s->display_name.c_str()))
-                    {
-                        graph::GraphNode new_node;
-                        new_node.id = doc.AllocateId();
-                        new_node.type_key = s->type_key;
-                        new_node.position_x = impl_->palette_spawn_pos.x;
-                        new_node.position_y = impl_->palette_spawn_pos.y;
-                        for (const auto& pin : s->inputs)
-                        {
-                            if (pin.type != graph::PinType::Exec && !pin.default_literal.empty())
-                                new_node.input_literals[pin.name] = pin.default_literal;
-                        }
-                        impl_->position_initialized[new_node.id] = false;
-                        doc.nodes.push_back(std::move(new_node));
-                        any_change = true;
-                    }
-                }
-                ImGui::EndMenu();
+                const std::string::size_type slash = cat.find('/', start);
+                const std::string seg = (slash == std::string::npos)
+                    ? cat.substr(start)
+                    : cat.substr(start, slash - start);
+                if (cur->children.find(seg) == cur->children.end())
+                    cur->child_order.push_back(seg);
+                cur = &cur->children[seg];
+                if (slash == std::string::npos) break;
+                start = slash + 1;
             }
+            cur->specs.push_back(&s);
         }
+
+        auto spawn_node = [&](const graph::NodeSpec* s)
+        {
+            graph::GraphNode new_node;
+            new_node.id = doc.AllocateId();
+            new_node.type_key = s->type_key;
+            new_node.position_x = impl_->palette_spawn_pos.x;
+            new_node.position_y = impl_->palette_spawn_pos.y;
+            for (const auto& pin : s->inputs)
+            {
+                if (pin.type != graph::PinType::Exec && !pin.default_literal.empty())
+                    new_node.input_literals[pin.name] = pin.default_literal;
+            }
+            impl_->position_initialized[new_node.id] = false;
+            doc.nodes.push_back(std::move(new_node));
+            any_change = true;
+        };
+
+        auto render_menu = [&](auto& self, const MenuNode& n) -> void
+        {
+            for (const auto& key : n.child_order)
+            {
+                const MenuNode& child = n.children.at(key);
+                if (ImGui::BeginMenu(key.c_str()))
+                {
+                    self(self, child);
+                    ImGui::EndMenu();
+                }
+            }
+            for (const graph::NodeSpec* s : n.specs)
+            {
+                if (ImGui::MenuItem(s->display_name.c_str()))
+                    spawn_node(s);
+            }
+        };
+        render_menu(render_menu, root);
         ImGui::EndPopup();
     }
     ed::Resume();

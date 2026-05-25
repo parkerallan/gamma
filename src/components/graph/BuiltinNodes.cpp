@@ -109,6 +109,23 @@ std::string EmitEventFunctionSimple(TranspileContext& ctx, const GraphNode& node
 
 void RegisterEventNodes(NodeSpecRegistry& reg)
 {
+    // OnCreate ----------------------------------------------------------
+    // Fires once when the script instance is first loaded, before OnStart.
+    {
+        NodeSpec s;
+        s.type_key = "event.OnCreate";
+        s.display_name = "On Create";
+        s.category = "Events";
+        s.is_event_entry = true;
+        s.is_exec_node = true;
+        s.header_color = 0xff2f7a2fu;
+        s.outputs = { ExecOut("Then") };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return EmitEventFunctionSimple(ctx, node, "OnCreate", {});
+        };
+        reg.Register(std::move(s));
+    }
     // OnStart -----------------------------------------------------------
     {
         NodeSpec s;
@@ -372,6 +389,53 @@ void RegisterVariableNodes(NodeSpecRegistry& reg)
         };
         reg.Register(std::move(s));
     }
+    // SetGlobal ---------------------------------------------------------
+    // Writes to a Lua global so the value persists across script callbacks
+    // and is visible to hand-written Lua sharing the same VM.
+    {
+        NodeSpec s;
+        s.type_key = "var.SetGlobal";
+        s.display_name = "Set Global";
+        s.category = "Variables";
+        s.is_exec_node = true;
+        s.header_color = 0xffb87333u;
+        s.inputs  = { ExecIn(),
+                      PinIn("Name",  PinType::String, "score"),
+                      PinIn("Value", PinType::Any,    "0") };
+        s.outputs = { ExecOut("Then") };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            std::string name_lit;
+            const auto it = node.input_literals.find("Name");
+            if (it != node.input_literals.end()) name_lit = it->second;
+            if (name_lit.empty()) name_lit = "score";
+            const std::string value = ctx.EvalInput(node, "Value");
+            std::string out;
+            out += "_G[\"" + name_lit + "\"] = " + value + "\n";
+            out += ctx.EmitFromExec(node, "Then");
+            return out;
+        };
+        reg.Register(std::move(s));
+    }
+    // GetGlobal ---------------------------------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "var.GetGlobal";
+        s.display_name = "Get Global";
+        s.category = "Variables";
+        s.header_color = 0xffb87333u;
+        s.inputs  = { PinIn("Name", PinType::String, "score") };
+        s.outputs = { PinOut("Value", PinType::Any) };
+        s.emit = [](TranspileContext& /*ctx*/, const GraphNode& node) -> std::string
+        {
+            std::string name_lit;
+            const auto it = node.input_literals.find("Name");
+            if (it != node.input_literals.end()) name_lit = it->second;
+            if (name_lit.empty()) name_lit = "score";
+            return "_G[\"" + name_lit + "\"]";
+        };
+        reg.Register(std::move(s));
+    }
 }
 
 // Helper: register a binary math operator data node.
@@ -426,6 +490,199 @@ void RegisterMathNodes(NodeSpecRegistry& reg)
         s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
         {
             return "(not " + ctx.EvalInput(node, "A") + ")";
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Unary math helpers -----------------------------------------------
+    auto register_unary = [&](const std::string& key, const std::string& display,
+        const std::string& lua_fn)
+    {
+        NodeSpec s;
+        s.type_key = key;
+        s.display_name = display;
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("A", PinType::Number, "0") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [lua_fn](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(" + lua_fn + "(" + ctx.EvalInput(node, "A") + "))";
+        };
+        reg.Register(std::move(s));
+    };
+    register_unary("math.Abs",   "Abs",   "math.abs");
+    register_unary("math.Sqrt",  "Sqrt",  "math.sqrt");
+    register_unary("math.Floor", "Floor", "math.floor");
+    register_unary("math.Ceil",  "Ceil",  "math.ceil");
+    register_unary("math.Sin",   "Sin",   "math.sin");
+    register_unary("math.Cos",   "Cos",   "math.cos");
+    register_unary("math.Tan",   "Tan",   "math.tan");
+
+    {
+        NodeSpec s;
+        s.type_key = "math.Negate";
+        s.display_name = "Negate";
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("A", PinType::Number, "0") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(-(" + ctx.EvalInput(node, "A") + "))";
+        };
+        reg.Register(std::move(s));
+    }
+    {
+        NodeSpec s;
+        s.type_key = "math.Round";
+        s.display_name = "Round";
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("A", PinType::Number, "0") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(math.floor((" + ctx.EvalInput(node, "A") + ") + 0.5))";
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Binary math helpers ----------------------------------------------
+    auto register_binary_fn = [&](const std::string& key, const std::string& display,
+        const std::string& lua_fn)
+    {
+        NodeSpec s;
+        s.type_key = key;
+        s.display_name = display;
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("A", PinType::Number, "0"), PinIn("B", PinType::Number, "0") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [lua_fn](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(" + lua_fn + "(" + ctx.EvalInput(node, "A") + ", " + ctx.EvalInput(node, "B") + "))";
+        };
+        reg.Register(std::move(s));
+    };
+    register_binary_fn("math.Min", "Min", "math.min");
+    register_binary_fn("math.Max", "Max", "math.max");
+    RegisterBinaryOp(reg, "math.Pow", "Power", "Math", PinType::Number, PinType::Number, "^", math_color);
+
+    // Clamp ------------------------------------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "math.Clamp";
+        s.display_name = "Clamp";
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("Value", PinType::Number, "0"),
+                      PinIn("Min",   PinType::Number, "0"),
+                      PinIn("Max",   PinType::Number, "1") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            const std::string v   = ctx.EvalInput(node, "Value");
+            const std::string mn  = ctx.EvalInput(node, "Min");
+            const std::string mx  = ctx.EvalInput(node, "Max");
+            return "(math.max(" + mn + ", math.min(" + mx + ", " + v + ")))";
+        };
+        reg.Register(std::move(s));
+    }
+    // Lerp -------------------------------------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "math.Lerp";
+        s.display_name = "Lerp";
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("A", PinType::Number, "0"),
+                      PinIn("B", PinType::Number, "1"),
+                      PinIn("T", PinType::Number, "0") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            const std::string a = ctx.EvalInput(node, "A");
+            const std::string b = ctx.EvalInput(node, "B");
+            const std::string t = ctx.EvalInput(node, "T");
+            return "((" + a + ") + ((" + b + ") - (" + a + ")) * (" + t + "))";
+        };
+        reg.Register(std::move(s));
+    }
+    // Random (0..1) ----------------------------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "math.Random";
+        s.display_name = "Random";
+        s.category = "Math";
+        s.header_color = math_color;
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& /*ctx*/, const GraphNode& /*node*/) -> std::string
+        {
+            return "(math.random())";
+        };
+        reg.Register(std::move(s));
+    }
+    // RandomRange (Min..Max float) -------------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "math.RandomRange";
+        s.display_name = "Random Range";
+        s.category = "Math";
+        s.header_color = math_color;
+        s.inputs  = { PinIn("Min", PinType::Number, "0"),
+                      PinIn("Max", PinType::Number, "1") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            const std::string mn = ctx.EvalInput(node, "Min");
+            const std::string mx = ctx.EvalInput(node, "Max");
+            return "((" + mn + ") + ((" + mx + ") - (" + mn + ")) * math.random())";
+        };
+        reg.Register(std::move(s));
+    }
+
+    // String helpers ---------------------------------------------------
+    const unsigned int string_color = 0xff7da37du;
+    {
+        NodeSpec s;
+        s.type_key = "str.Concat";
+        s.display_name = "Concat";
+        s.category = "String";
+        s.header_color = string_color;
+        s.inputs  = { PinIn("A", PinType::String, ""), PinIn("B", PinType::String, "") };
+        s.outputs = { PinOut("Result", PinType::String) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(tostring(" + ctx.EvalInput(node, "A") + ") .. tostring(" + ctx.EvalInput(node, "B") + "))";
+        };
+        reg.Register(std::move(s));
+    }
+    {
+        NodeSpec s;
+        s.type_key = "str.ToString";
+        s.display_name = "To String";
+        s.category = "String";
+        s.header_color = string_color;
+        s.inputs  = { PinIn("A", PinType::Any, "0") };
+        s.outputs = { PinOut("Result", PinType::String) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(tostring(" + ctx.EvalInput(node, "A") + "))";
+        };
+        reg.Register(std::move(s));
+    }
+    {
+        NodeSpec s;
+        s.type_key = "str.ToNumber";
+        s.display_name = "To Number";
+        s.category = "String";
+        s.header_color = string_color;
+        s.inputs  = { PinIn("A", PinType::String, "0") };
+        s.outputs = { PinOut("Result", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return "(tonumber(" + ctx.EvalInput(node, "A") + ") or 0)";
         };
         reg.Register(std::move(s));
     }
@@ -624,6 +881,43 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
         { PinIn("Name",    PinType::Object, "MainCamera"),
           PinIn("Enabled", PinType::Bool,   "true") }));
 
+    reg.Register(MakeCallStatement("engine.SetObjectScale", "Set Object Scale", "Engine", engine_color,
+        "Engine.SetObjectScale({0}, {1}, {2}, {3})",
+        { PinIn("Name", PinType::Object, "Player"),
+          PinIn("X",    PinType::Number, "1"),
+          PinIn("Y",    PinType::Number, "1"),
+          PinIn("Z",    PinType::Number, "1") }));
+
+    reg.Register(MakeCallExpression("engine.GetObjectEnabled", "Get Object Enabled", "Engine", engine_color,
+        "Engine.GetObjectEnabled({0})",
+        { PinIn("Name", PinType::Object, "Player") },
+        PinType::Bool));
+
+    // GetObjectScale (multi-output data) --------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "engine.GetObjectScale";
+        s.display_name = "Get Object Scale";
+        s.category = "Engine";
+        s.header_color = engine_color;
+        s.inputs  = { PinIn("Name", PinType::Object, "Player") };
+        s.outputs = { PinOut("X", PinType::Number),
+                      PinOut("Y", PinType::Number),
+                      PinOut("Z", PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            const std::string& req = ctx.RequestedOutputPin();
+            const std::string base = std::string("scale_") + std::to_string(node.id);
+            const std::string name_expr = ctx.EvalInput(node, "Name");
+            ctx.EmitPrelude("local " + base + "_x, " + base + "_y, " + base + "_z = Engine.GetObjectScale(" + name_expr + ")");
+            if (req == "X") return base + "_x";
+            if (req == "Y") return base + "_y";
+            if (req == "Z") return base + "_z";
+            return "1";
+        };
+        reg.Register(std::move(s));
+    }
+
     // GetObjectPosition (multi-output data) -----------------------------
     {
         NodeSpec s;
@@ -748,14 +1042,147 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
         "World.Destroy({0})",
         { PinIn("Name", PinType::Object, "Target") }));
 
+    reg.Register(MakeCallStatement("world.DestroyByPrefix", "Destroy By Prefix", "World", world_color,
+        "World.DestroyByPrefix({0})",
+        { PinIn("Prefix", PinType::String, "Bullet_") }));
+
     reg.Register(MakeCallExpression("world.Exists", "Exists", "World", world_color,
         "World.Exists({0})",
         { PinIn("Name", PinType::Object, "Target") },
         PinType::Bool));
 
+    reg.Register(MakeCallStatement("world.Emit", "Emit Event", "World", world_color,
+        "World.Emit({0}, {1})",
+        { PinIn("Event",   PinType::String, "Damage"),
+          PinIn("Payload", PinType::Any,    "") }));
+
     reg.Register(MakeCallStatement("world.LoadScene", "Load Scene", "World", world_color,
         "World.LoadScene({0})",
         { PinIn("Scene", PinType::String, "Level2") }));
+
+    // Timers ------------------------------------------------------------
+    // Helper used by SetTimeout/SetInterval emit() to wrap the downstream
+    // exec branch in a Lua closure while keeping the closure's data-node
+    // preludes scoped INSIDE the closure body (not hoisted to the outer
+    // event function).
+    auto emit_timer_node = [](TranspileContext& ctx, const GraphNode& node,
+                              const char* api_name,
+                              const char* callback_exec_pin,
+                              bool expose_timer_id) -> std::string
+    {
+        const std::string timer_local = std::string("timer_") + std::to_string(node.id);
+
+        // EvalInput path: another node wants the TimerID output.
+        if (expose_timer_id && ctx.RequestedOutputPin() == "TimerID")
+        {
+            return timer_local;
+        }
+
+        // Exec path. Evaluate the Seconds input first; any preludes it
+        // produces belong to the OUTER event scope.
+        const std::string seconds = ctx.EvalInput(node, "Seconds");
+
+        // Snapshot+clear the outer prelude so the recursion into the
+        // callback branch starts with an empty prelude bucket.
+        const std::string outer_prelude = ctx.TakePrelude();
+        const std::string callback_body = ctx.EmitFromExec(node, callback_exec_pin);
+        const std::string callback_prelude = ctx.TakePrelude();
+
+        // Restore outer prelude for the enclosing emitter.
+        if (!outer_prelude.empty())
+        {
+            ctx.EmitPrelude(outer_prelude);
+        }
+
+        std::string out;
+        if (expose_timer_id)
+        {
+            // Forward-declare the local so closures (e.g. a SetInterval
+            // body that clears its own timer) can capture it as an
+            // upvalue, and so downstream EvalInput("TimerID") works even
+            // when the read appears earlier in the function.
+            ctx.EmitPrelude(std::string("local ") + timer_local);
+            out += timer_local + " = " + api_name + "(" + seconds
+                 + ", function(self)\n";
+        }
+        else
+        {
+            out += std::string(api_name) + "(" + seconds + ", function(self)\n";
+        }
+
+        // Indent callback prelude + body inside the closure.
+        auto append_indented = [&out](const std::string& text)
+        {
+            if (text.empty()) return;
+            std::istringstream iss(text);
+            std::string line;
+            while (std::getline(iss, line))
+            {
+                if (!line.empty()) out += "    " + line + "\n";
+            }
+        };
+        append_indented(callback_prelude);
+        append_indented(callback_body);
+
+        out += "end)\n";
+        return out;
+    };
+
+    // Delay (one-shot, no TimerID exposed) ------------------------------
+    {
+        NodeSpec s;
+        s.type_key = "world.Delay";
+        s.display_name = "Delay";
+        s.category = "World";
+        s.is_exec_node = true;
+        s.header_color = world_color;
+        s.inputs  = { ExecIn(), PinIn("Seconds", PinType::Number, "1.0") };
+        s.outputs = { ExecOut("Then") };
+        s.emit = [emit_timer_node](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return emit_timer_node(ctx, node, "World.SetTimeout", "Then", false);
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Set Timeout (one-shot, exposes TimerID) ---------------------------
+    {
+        NodeSpec s;
+        s.type_key = "world.SetTimeout";
+        s.display_name = "Set Timeout";
+        s.category = "World";
+        s.is_exec_node = true;
+        s.header_color = world_color;
+        s.inputs  = { ExecIn(), PinIn("Seconds", PinType::Number, "1.0") };
+        s.outputs = { ExecOut("OnFire"), PinOut("TimerID", PinType::Number) };
+        s.emit = [emit_timer_node](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return emit_timer_node(ctx, node, "World.SetTimeout", "OnFire", true);
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Set Interval (repeating, exposes TimerID) -------------------------
+    {
+        NodeSpec s;
+        s.type_key = "world.SetInterval";
+        s.display_name = "Set Interval";
+        s.category = "World";
+        s.is_exec_node = true;
+        s.header_color = world_color;
+        s.inputs  = { ExecIn(), PinIn("Seconds", PinType::Number, "1.0") };
+        s.outputs = { ExecOut("OnTick"), PinOut("TimerID", PinType::Number) };
+        s.emit = [emit_timer_node](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return emit_timer_node(ctx, node, "World.SetInterval", "OnTick", true);
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Clear Timer -------------------------------------------------------
+    reg.Register(MakeCallStatement("world.ClearTimer", "Clear Timer", "World", world_color,
+        "World.ClearTimer({0})",
+        { PinIn("TimerID", PinType::Number, "0") }));
 
     // Physics -----------------------------------------------------------
     reg.Register(MakeCallStatement("physics.SetVelocity", "Set Velocity", "Physics", physics_color,
@@ -803,22 +1230,419 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
         reg.Register(std::move(s));
     }
 
-    // Audio / Video small samples --------------------------------------
+    // Physics.Raycast --------------------------------------------------
+    // Casts a ray and returns a multi-field hit (object name, distance,
+    // hit point, surface normal). When the ray misses, the underlying Lua
+    // call returns nil, so each output pin guards with `(hit and hit.x) or 0`
+    // so disconnected misses don't trip a nil-index error downstream.
+    {
+        NodeSpec s;
+        s.type_key = "physics.Raycast";
+        s.display_name = "Raycast";
+        s.category = "Physics";
+        s.header_color = physics_color;
+        s.inputs  = { PinIn("OX", PinType::Number, "0"),
+                      PinIn("OY", PinType::Number, "0"),
+                      PinIn("OZ", PinType::Number, "0"),
+                      PinIn("DX", PinType::Number, "0"),
+                      PinIn("DY", PinType::Number, "-1"),
+                      PinIn("DZ", PinType::Number, "0"),
+                      PinIn("MaxDistance", PinType::Number, "1000") };
+        s.outputs = { PinOut("Hit",      PinType::Bool),
+                      PinOut("Object",   PinType::String),
+                      PinOut("Distance", PinType::Number),
+                      PinOut("X",        PinType::Number),
+                      PinOut("Y",        PinType::Number),
+                      PinOut("Z",        PinType::Number),
+                      PinOut("NX",       PinType::Number),
+                      PinOut("NY",       PinType::Number),
+                      PinOut("NZ",       PinType::Number) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            const std::string& req = ctx.RequestedOutputPin();
+            const std::string base = std::string("hit_") + std::to_string(node.id);
+            const std::string ox = ctx.EvalInput(node, "OX");
+            const std::string oy = ctx.EvalInput(node, "OY");
+            const std::string oz = ctx.EvalInput(node, "OZ");
+            const std::string dx = ctx.EvalInput(node, "DX");
+            const std::string dy = ctx.EvalInput(node, "DY");
+            const std::string dz = ctx.EvalInput(node, "DZ");
+            const std::string md = ctx.EvalInput(node, "MaxDistance");
+            ctx.EmitPrelude("local " + base + " = Physics.Raycast("
+                + ox + ", " + oy + ", " + oz + ", "
+                + dx + ", " + dy + ", " + dz + ", " + md + ")");
+            if (req == "Hit")      return "(" + base + " ~= nil)";
+            if (req == "Object")   return "(" + base + " and " + base + ".object) or \"\"";
+            if (req == "Distance") return "(" + base + " and " + base + ".distance) or 0";
+            if (req == "X")        return "(" + base + " and " + base + ".x) or 0";
+            if (req == "Y")        return "(" + base + " and " + base + ".y) or 0";
+            if (req == "Z")        return "(" + base + " and " + base + ".z) or 0";
+            if (req == "NX")       return "(" + base + " and " + base + ".nx) or 0";
+            if (req == "NY")       return "(" + base + " and " + base + ".ny) or 0";
+            if (req == "NZ")       return "(" + base + " and " + base + ".nz) or 0";
+            return "nil";
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Time --------------------------------------------------------------
+    const unsigned int time_color = 0xff8e7cc3u;
+    {
+        NodeSpec s;
+        s.type_key = "time.DeltaTime";
+        s.display_name = "Delta Time";
+        s.category = "Time";
+        s.header_color = time_color;
+        s.outputs = { PinOut("Seconds", PinType::Number) };
+        s.emit = [](TranspileContext& /*ctx*/, const GraphNode& /*node*/) -> std::string
+        {
+            return "Time.DeltaTime";
+        };
+        reg.Register(std::move(s));
+    }
+    {
+        NodeSpec s;
+        s.type_key = "time.TotalTime";
+        s.display_name = "Total Time";
+        s.category = "Time";
+        s.header_color = time_color;
+        s.outputs = { PinOut("Seconds", PinType::Number) };
+        s.emit = [](TranspileContext& /*ctx*/, const GraphNode& /*node*/) -> std::string
+        {
+            return "Time.TotalTime";
+        };
+        reg.Register(std::move(s));
+    }
+
+    // Time-namespaced timer nodes (call Time.Delay / Time.Timer /
+    // Time.ClearTimer at the Lua level; these share the same registry as
+    // World.SetTimeout/SetInterval/ClearTimer).
+    {
+        NodeSpec s;
+        s.type_key = "time.Delay";
+        s.display_name = "Delay";
+        s.category = "Time";
+        s.is_exec_node = true;
+        s.header_color = time_color;
+        s.inputs  = { ExecIn(), PinIn("Seconds", PinType::Number, "1.0") };
+        s.outputs = { ExecOut("Then"), PinOut("TimerID", PinType::Number) };
+        s.emit = [emit_timer_node](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return emit_timer_node(ctx, node, "Time.Delay", "Then", true);
+        };
+        reg.Register(std::move(s));
+    }
+    {
+        NodeSpec s;
+        s.type_key = "time.Timer";
+        s.display_name = "Timer";
+        s.category = "Time";
+        s.is_exec_node = true;
+        s.header_color = time_color;
+        s.inputs  = { ExecIn(), PinIn("Seconds", PinType::Number, "1.0") };
+        s.outputs = { ExecOut("OnTick"), PinOut("TimerID", PinType::Number) };
+        s.emit = [emit_timer_node](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return emit_timer_node(ctx, node, "Time.Timer", "OnTick", true);
+        };
+        reg.Register(std::move(s));
+    }
+    reg.Register(MakeCallStatement("time.ClearTimer", "Clear Timer", "Time", time_color,
+        "Time.ClearTimer({0})",
+        { PinIn("TimerID", PinType::Number, "0") }));
+
+    // Audio (complete) --------------------------------------------------
     reg.Register(MakeCallStatement("audio.Play", "Audio Play", "Audio", audio_color,
         "Audio.Play({0})",
         { PinIn("Name", PinType::Object, "Speaker") }));
+    reg.Register(MakeCallStatement("audio.Stop", "Audio Stop", "Audio", audio_color,
+        "Audio.Stop({0})",
+        { PinIn("Name", PinType::Object, "Speaker") }));
+    reg.Register(MakeCallExpression("audio.IsPlaying", "Audio Is Playing", "Audio", audio_color,
+        "Audio.IsPlaying({0})",
+        { PinIn("Name", PinType::Object, "Speaker") },
+        PinType::Bool));
+    reg.Register(MakeCallStatement("audio.SetVolume", "Audio Set Volume", "Audio", audio_color,
+        "Audio.SetVolume({0}, {1})",
+        { PinIn("Name",   PinType::Object, "Speaker"),
+          PinIn("Volume", PinType::Number, "1") }));
+    reg.Register(MakeCallStatement("audio.SetPitch", "Audio Set Pitch", "Audio", audio_color,
+        "Audio.SetPitch({0}, {1})",
+        { PinIn("Name",  PinType::Object, "Speaker"),
+          PinIn("Pitch", PinType::Number, "1") }));
+    reg.Register(MakeCallStatement("audio.SetLoop", "Audio Set Loop", "Audio", audio_color,
+        "Audio.SetLoop({0}, {1})",
+        { PinIn("Name", PinType::Object, "Speaker"),
+          PinIn("Loop", PinType::Bool,   "true") }));
 
+    // Video (complete) --------------------------------------------------
     reg.Register(MakeCallStatement("video.Play", "Video Play", "Video", video_color,
         "Video.Play({0})",
         { PinIn("Name", PinType::Object, "Cinematic") }));
+    reg.Register(MakeCallStatement("video.Stop", "Video Stop", "Video", video_color,
+        "Video.Stop({0})",
+        { PinIn("Name", PinType::Object, "Cinematic") }));
+    reg.Register(MakeCallExpression("video.IsPlaying", "Video Is Playing", "Video", video_color,
+        "Video.IsPlaying({0})",
+        { PinIn("Name", PinType::Object, "Cinematic") },
+        PinType::Bool));
+    reg.Register(MakeCallStatement("video.SetVolume", "Video Set Volume", "Video", video_color,
+        "Video.SetVolume({0}, {1})",
+        { PinIn("Name",   PinType::Object, "Cinematic"),
+          PinIn("Volume", PinType::Number, "1") }));
+    reg.Register(MakeCallStatement("video.SetMuted", "Video Set Muted", "Video", video_color,
+        "Video.SetMuted({0}, {1})",
+        { PinIn("Name",  PinType::Object, "Cinematic"),
+          PinIn("Muted", PinType::Bool,   "true") }));
 
-    // Attribute sample: PointLightAttr.Color (read + write) ------------
-    reg.Register(MakeCallStatement("attr.PointLight.SetColor", "Set Point Light Color", "Attr", attr_color,
-        "Engine.PointLightAttr.Color({0}, {1}, {2}, {3})",
-        { PinIn("Name", PinType::Object, "Lamp"),
-          PinIn("R", PinType::Number, "1"),
-          PinIn("G", PinType::Number, "1"),
-          PinIn("B", PinType::Number, "1") }));
+    // Attribute Set/Get nodes -----------------------------------------
+    // ONE combined Set + ONE Get per attribute type. Every writable field of
+    // the type is surfaced as a pin on the same node. Setter calls are only
+    // emitted for fields whose pins have an actual incoming link, so any
+    // disconnected field keeps its current runtime value untouched.
+    enum class AccessorKind { Float, Int, Bool, String, Vec2, Vec3 };
+    struct AttrField { const char* name; AccessorKind kind; };
+    struct AttrType  { const char* table; std::vector<AttrField> fields; };
+
+    auto value_pin_type = [](AccessorKind k) -> PinType {
+        switch (k) {
+        case AccessorKind::Bool:   return PinType::Bool;
+        case AccessorKind::String: return PinType::String;
+        default:                    return PinType::Number;
+        }
+    };
+    auto value_default = [](AccessorKind k) -> std::string {
+        switch (k) {
+        case AccessorKind::Bool:   return "false";
+        case AccessorKind::String: return "";
+        default:                    return "0";
+        }
+    };
+
+    const std::vector<AttrType> attr_types = {
+        {"EnvironmentLightAttr", {
+            {"Color", AccessorKind::Vec3}, {"Intensity", AccessorKind::Float} }},
+        {"DirectionalLightAttr", {
+            {"Color", AccessorKind::Vec3}, {"Intensity", AccessorKind::Float} }},
+        {"PointLightAttr", {
+            {"Color", AccessorKind::Vec3}, {"Intensity", AccessorKind::Float},
+            {"Range", AccessorKind::Float}, {"Radius", AccessorKind::Float},
+            {"HaloIntensity", AccessorKind::Float}, {"HaloRadius", AccessorKind::Float} }},
+        {"SpotLightAttr", {
+            {"Color", AccessorKind::Vec3}, {"Intensity", AccessorKind::Float},
+            {"Range", AccessorKind::Float}, {"InnerCone", AccessorKind::Float},
+            {"OuterCone", AccessorKind::Float} }},
+        {"CameraAttr", {
+            {"FieldOfView", AccessorKind::Float}, {"NearClip", AccessorKind::Float},
+            {"FarClip", AccessorKind::Float}, {"Active", AccessorKind::Bool} }},
+        {"RigidbodyAttr", {
+            {"Shape", AccessorKind::String}, {"Dynamic", AccessorKind::Bool},
+            {"LockRotationX", AccessorKind::Bool}, {"LockRotationY", AccessorKind::Bool},
+            {"LockRotationZ", AccessorKind::Bool}, {"Mass", AccessorKind::Float},
+            {"Friction", AccessorKind::Float}, {"Radius", AccessorKind::Float},
+            {"CapsuleHalfHeight", AccessorKind::Float}, {"HalfExtent", AccessorKind::Vec3},
+            {"LinearDamping", AccessorKind::Float}, {"AngularDamping", AccessorKind::Float} }},
+        {"TriggerVolumeAttr", {
+            {"HalfExtent", AccessorKind::Vec3} }},
+        {"Text2DAttr", {
+            {"FontPath", AccessorKind::String}, {"Text", AccessorKind::String},
+            {"Position", AccessorKind::Vec2}, {"Size", AccessorKind::Vec2},
+            {"LockAspectRatio", AccessorKind::Bool}, {"FontSize", AccessorKind::Float},
+            {"Color", AccessorKind::Vec3}, {"Alpha", AccessorKind::Float},
+            {"Priority", AccessorKind::Int} }},
+        {"Image2DAttr", {
+            {"ImagePath", AccessorKind::String}, {"Position", AccessorKind::Vec2},
+            {"Size", AccessorKind::Vec2}, {"LockAspectRatio", AccessorKind::Bool},
+            {"StretchToScreen", AccessorKind::Bool}, {"PlayMode", AccessorKind::String},
+            {"Tint", AccessorKind::Vec3}, {"Alpha", AccessorKind::Float},
+            {"Priority", AccessorKind::Int} }},
+        {"Color2DAttr", {
+            {"Color", AccessorKind::Vec3}, {"Alpha", AccessorKind::Float},
+            {"Priority", AccessorKind::Int} }},
+        {"Video2DAttr", {
+            {"VideoPath", AccessorKind::String}, {"Position", AccessorKind::Vec2},
+            {"Size", AccessorKind::Vec2}, {"LockAspectRatio", AccessorKind::Bool},
+            {"StretchToScreen", AccessorKind::Bool}, {"Tint", AccessorKind::Vec3},
+            {"Alpha", AccessorKind::Float}, {"Priority", AccessorKind::Int},
+            {"PlayMode", AccessorKind::String}, {"Volume", AccessorKind::Float},
+            {"Muted", AccessorKind::Bool} }},
+        {"SkyboxAttr", {
+            {"ImagePath", AccessorKind::String}, {"Rotation", AccessorKind::Float} }},
+        {"AudioAttr", {
+            {"ClipPath", AccessorKind::String}, {"PlayMode", AccessorKind::String},
+            {"Volume", AccessorKind::Float}, {"Loop", AccessorKind::Bool},
+            {"Spatialize3D", AccessorKind::Bool}, {"Pitch", AccessorKind::Float},
+            {"MinDistance", AccessorKind::Float}, {"MaxDistance", AccessorKind::Float},
+            {"DopplerFactor", AccessorKind::Float} }},
+        {"Animator", {
+            {"ControllerPath", AccessorKind::String}, {"InitialState", AccessorKind::String},
+            {"PlaybackSpeed", AccessorKind::Float}, {"AutoPlay", AccessorKind::Bool} }},
+    };
+
+    auto pretty_name = [](const std::string& table) -> std::string {
+        // Strip a trailing "Attr" suffix so category names read naturally
+        // (e.g. "PointLightAttr" -> "PointLight"). Names that don't end in
+        // "Attr" (like "Animator") are returned unchanged.
+        if (table.size() > 4 && table.compare(table.size() - 4, 4, "Attr") == 0)
+            return table.substr(0, table.size() - 4);
+        return table;
+    };
+
+    for (const AttrType& t : attr_types)
+    {
+        const std::string category = std::string("Attribute/") + pretty_name(t.table);
+        const std::string table   = t.table;
+        const std::vector<AttrField> fields = t.fields;
+
+        // Set (exec, all fields as pins) -------------------------------
+        {
+            NodeSpec s;
+            s.type_key = "attr." + table + ".Set";
+            s.display_name = "Set";
+            s.category = category;
+            s.header_color = attr_color;
+            s.is_exec_node = true;
+            s.inputs.push_back(ExecIn());
+            s.inputs.push_back(PinIn("Name", PinType::Object, "Target"));
+            for (const AttrField& f : fields)
+            {
+                if (f.kind == AccessorKind::Vec3) {
+                    s.inputs.push_back(PinIn(std::string(f.name) + "X", PinType::Number, "0"));
+                    s.inputs.push_back(PinIn(std::string(f.name) + "Y", PinType::Number, "0"));
+                    s.inputs.push_back(PinIn(std::string(f.name) + "Z", PinType::Number, "0"));
+                } else if (f.kind == AccessorKind::Vec2) {
+                    s.inputs.push_back(PinIn(std::string(f.name) + "X", PinType::Number, "0"));
+                    s.inputs.push_back(PinIn(std::string(f.name) + "Y", PinType::Number, "0"));
+                } else {
+                    s.inputs.push_back(PinIn(f.name, value_pin_type(f.kind), value_default(f.kind)));
+                }
+            }
+            s.outputs = { ExecOut("Then") };
+
+            s.emit = [table, fields](TranspileContext& ctx, const GraphNode& node) -> std::string
+            {
+                const std::string name_expr = ctx.EvalInput(node, "Name");
+                std::string out;
+                for (const AttrField& f : fields)
+                {
+                    std::vector<std::string> pins;
+                    if (f.kind == AccessorKind::Vec3)
+                        pins = { std::string(f.name) + "X", std::string(f.name) + "Y", std::string(f.name) + "Z" };
+                    else if (f.kind == AccessorKind::Vec2)
+                        pins = { std::string(f.name) + "X", std::string(f.name) + "Y" };
+                    else
+                        pins = { f.name };
+
+                    bool any_linked = false;
+                    for (const auto& p : pins) {
+                        if (ctx.Document().HasLinkIntoInput(node.id, p)) { any_linked = true; break; }
+                    }
+                    if (!any_linked) continue;
+
+                    std::string call = "Engine." + table + "." + f.name + "(" + name_expr;
+                    for (const auto& p : pins) call += ", " + ctx.EvalInput(node, p);
+                    call += ")\n";
+                    out += call;
+                }
+                out += ctx.EmitFromExec(node, "Then");
+                return out;
+            };
+            reg.Register(std::move(s));
+        }
+
+        // Get (data, all fields as outputs) ----------------------------
+        {
+            NodeSpec s;
+            s.type_key = "attr." + table + ".Get";
+            s.display_name = "Get";
+            s.category = category;
+            s.header_color = attr_color;
+            s.inputs = { PinIn("Name", PinType::Object, "Target") };
+            for (const AttrField& f : fields)
+            {
+                if (f.kind == AccessorKind::Vec3) {
+                    s.outputs.push_back(PinOut(std::string(f.name) + "X", PinType::Number));
+                    s.outputs.push_back(PinOut(std::string(f.name) + "Y", PinType::Number));
+                    s.outputs.push_back(PinOut(std::string(f.name) + "Z", PinType::Number));
+                } else if (f.kind == AccessorKind::Vec2) {
+                    s.outputs.push_back(PinOut(std::string(f.name) + "X", PinType::Number));
+                    s.outputs.push_back(PinOut(std::string(f.name) + "Y", PinType::Number));
+                } else {
+                    s.outputs.push_back(PinOut(f.name, value_pin_type(f.kind)));
+                }
+            }
+
+            s.emit = [table, fields](TranspileContext& ctx, const GraphNode& node) -> std::string
+            {
+                const std::string& req = ctx.RequestedOutputPin();
+                const std::string name_expr = ctx.EvalInput(node, "Name");
+                const std::string base = std::string("attr_") + std::to_string(node.id);
+                for (const AttrField& f : fields)
+                {
+                    const std::string fname = f.name;
+                    if (f.kind == AccessorKind::Vec3) {
+                        if (req == fname + "X" || req == fname + "Y" || req == fname + "Z") {
+                            ctx.EmitPrelude("local " + base + "_" + fname + "_x, " + base + "_" + fname + "_y, " + base + "_" + fname + "_z = Engine." + table + "." + fname + "(" + name_expr + ")");
+                            if (req == fname + "X") return base + "_" + fname + "_x";
+                            if (req == fname + "Y") return base + "_" + fname + "_y";
+                            return base + "_" + fname + "_z";
+                        }
+                    } else if (f.kind == AccessorKind::Vec2) {
+                        if (req == fname + "X" || req == fname + "Y") {
+                            ctx.EmitPrelude("local " + base + "_" + fname + "_x, " + base + "_" + fname + "_y = Engine." + table + "." + fname + "(" + name_expr + ")");
+                            if (req == fname + "X") return base + "_" + fname + "_x";
+                            return base + "_" + fname + "_y";
+                        }
+                    } else {
+                        if (req == fname) {
+                            ctx.EmitPrelude("local " + base + "_" + fname + "_v = Engine." + table + "." + fname + "(" + name_expr + ")");
+                            return base + "_" + fname + "_v";
+                        }
+                    }
+                }
+                return "nil";
+            };
+            reg.Register(std::move(s));
+        }
+    }
+
+    // Animator specials (non-standard signatures) -----------------------
+    // Live alongside the combined Animator Set/Get under Attribute/Animator.
+    const std::string anim_cat = "Attribute/Animator";
+    reg.Register(MakeCallStatement("attr.Animator.SetBool", "Set Bool", anim_cat, attr_color,
+        "Engine.Animator.SetBool({0}, {1}, {2})",
+        { PinIn("Name",      PinType::Object, "Target"),
+          PinIn("Parameter", PinType::String, "moving"),
+          PinIn("Value",     PinType::Bool,   "true") }));
+    reg.Register(MakeCallExpression("attr.Animator.GetBool", "Get Bool", anim_cat, attr_color,
+        "Engine.Animator.GetBool({0}, {1})",
+        { PinIn("Name",      PinType::Object, "Target"),
+          PinIn("Parameter", PinType::String, "moving") },
+        PinType::Bool));
+    reg.Register(MakeCallStatement("attr.Animator.SetTrigger", "Set Trigger", anim_cat, attr_color,
+        "Engine.Animator.SetTrigger({0}, {1})",
+        { PinIn("Name",    PinType::Object, "Target"),
+          PinIn("Trigger", PinType::String, "jump") }));
+    reg.Register(MakeCallStatement("attr.Animator.SetState", "Set State", anim_cat, attr_color,
+        "Engine.Animator.SetState({0}, {1})",
+        { PinIn("Name",  PinType::Object, "Target"),
+          PinIn("State", PinType::String, "Idle") }));
+    reg.Register(MakeCallExpression("attr.Animator.GetState", "Get State", anim_cat, attr_color,
+        "Engine.Animator.GetState({0})",
+        { PinIn("Name", PinType::Object, "Target") },
+        PinType::String));
+    reg.Register(MakeCallExpression("attr.Animator.StateTime", "State Time", anim_cat, attr_color,
+        "Engine.Animator.StateTime({0})",
+        { PinIn("Name", PinType::Object, "Target") },
+        PinType::Number));
+    reg.Register(MakeCallStatement("attr.Animator.SetDefaultState", "Set Default State", anim_cat, attr_color,
+        "Engine.Animator.SetDefaultState({0}, {1})",
+        { PinIn("Name",  PinType::Object, "Target"),
+          PinIn("State", PinType::String, "Idle") }));
+    reg.Register(MakeCallExpression("attr.Animator.GetDefaultState", "Get Default State", anim_cat, attr_color,
+        "Engine.Animator.GetDefaultState({0})",
+        { PinIn("Name", PinType::Object, "Target") },
+        PinType::String));
 }
 
 } // namespace

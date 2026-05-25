@@ -3944,6 +3944,18 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_setfield(script_lua_state_, -2, "DeltaTime");
     lua_pushnumber(script_lua_state_, 0.0);
     lua_setfield(script_lua_state_, -2, "TotalTime");
+    // Time.Delay / Time.Timer / Time.ClearTimer — share the World timer
+    // implementations so they're visible under the semantically-appropriate
+    // Time namespace as well.
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSetTimeout, 1);
+    lua_setfield(script_lua_state_, -2, "Delay");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSetInterval, 1);
+    lua_setfield(script_lua_state_, -2, "Timer");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldClearTimer, 1);
+    lua_setfield(script_lua_state_, -2, "ClearTimer");
     lua_setglobal(script_lua_state_, "Time");
 
     // Input table

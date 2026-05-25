@@ -217,7 +217,7 @@ Notes:
 
 ### `Time`
 
-`Time` exposes fields, not functions.
+`Time` exposes frame-timing fields and timer functions.
 
 #### `Time.DeltaTime`
 Quick summary: Seconds elapsed since the previous frame.
@@ -231,6 +231,31 @@ Quick summary: Seconds elapsed since Play started (or since a scene load).
 
 ```lua
 local t = Time.TotalTime
+```
+
+#### `Time.Delay(seconds, callback)`
+Quick summary: Runs callback once after delay. Returns timer id. Alias of `World.SetTimeout`.
+
+```lua
+local timerId = Time.Delay(1.5, function(self)
+    Engine.Log("Delay fired")
+end)
+```
+
+#### `Time.Timer(seconds, callback)`
+Quick summary: Runs callback repeatedly every `seconds`. Returns timer id. Alias of `World.SetInterval`.
+
+```lua
+local timerId = Time.Timer(0.25, function(self)
+    Engine.Log("Tick")
+end)
+```
+
+#### `Time.ClearTimer(timerId)`
+Quick summary: Stops a `Time.Delay`/`Time.Timer` (or `World.SetTimeout`/`World.SetInterval`) by id. Returns `true` if found.
+
+```lua
+local ok = Time.ClearTimer(timerId)
 ```
 
 ### `Input`
@@ -537,7 +562,48 @@ Notes:
 
 ## Callback Notes
 
-Typical script callbacks are `OnStart(self)`, `OnUpdate(self, dt)`, and `OnDestroy(self)`.
+A `Script:<Name>(self, ...)` method is invoked automatically when the runtime fires the matching event. All callbacks receive `self` as the script instance table; additional parameters vary per callback. Implementing any callback is optional — missing ones are silently skipped.
+
+### Lifecycle Callbacks
+
+#### `OnCreate(self)`
+Quick summary: Called once when the script instance is first loaded, before `OnStart`. Use it to initialize fields, register event subscriptions, or create timers tied to the instance's lifetime.
+
+```lua
+function Script:OnCreate()
+    self.hits = 0
+    World.Subscribe("Damage", function(s, sender, payload)
+        s.hits = s.hits + 1
+    end)
+end
+```
+
+#### `OnStart(self)`
+Quick summary: Called once after `OnCreate` and after the scene is fully loaded. Use it for setup that depends on other objects already existing.
+
+```lua
+function Script:OnStart()
+    Engine.Log("Hello from " .. tostring(self))
+end
+```
+
+#### `OnUpdate(self, dt)`
+Quick summary: Called every frame with the per-frame delta time in seconds. Keep work lightweight — this runs once per object per frame.
+
+```lua
+function Script:OnUpdate(dt)
+    self.timer = (self.timer or 0) + dt
+end
+```
+
+#### `OnDestroy(self)`
+Quick summary: Called once when the object is destroyed (via `World.Destroy`, scene unload, or play-mode stop). Use it to release external resources or notify other systems.
+
+```lua
+function Script:OnDestroy()
+    Engine.Log("Cleaning up")
+end
+```
 
 ### Trigger Callbacks
 
@@ -578,4 +644,6 @@ end
 
 `otherName` is the other object in the overlap pair, and `phase` is one of `enter`, `stay`, `exit`.
 
-`World.Subscribe`, `World.SetTimeout`, and `World.SetInterval` must be called from an active script callback.
+### Callback Restrictions
+
+`World.Subscribe`, `World.SetTimeout`, `World.SetInterval`, `Time.Delay`, and `Time.Timer` must be called from inside an active script callback (`OnCreate`, `OnStart`, `OnUpdate`, a trigger callback, or another timer's callback). Calling them at file scope will error.
