@@ -1057,6 +1057,17 @@ void EngineApplication::RenderRuntimeWindow()
         taa_dbg.adaptive_preservation= state_.taa_adaptive_preservation;
         runtime_renderer_.SetTaaDebugSettings(taa_dbg);
     }
+    runtime_renderer_.SetTranspiledLuaDumpEnabled(state_.show_transpiled_lua);
+    // When the setting is off, remove the Transpiled folder so it disappears from the file tree.
+    if (!state_.show_transpiled_lua && state_.HasOpenProject())
+    {
+        std::error_code transpiled_ec;
+        const std::filesystem::path transpiled_dir = state_.project_root / "Graphs" / "Transpiled";
+        if (std::filesystem::exists(transpiled_dir, transpiled_ec))
+        {
+            std::filesystem::remove_all(transpiled_dir, transpiled_ec);
+        }
+    }
     if (!runtime_renderer_.RenderFrame(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), &runtime_error))
     {
         state_.SetPlayError(runtime_error.empty() ? "Runtime frame render failed" : runtime_error);

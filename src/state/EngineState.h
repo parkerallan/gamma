@@ -94,6 +94,7 @@ struct EngineState
     int auto_save_interval_minutes = 5;
     bool highlight_drop_targets = true;
     bool wrap_editor_text = false;
+    bool show_transpiled_lua = false;
 
     // --- Temporal AA debug / tuning ---
     // Master enable. When false, TAA is bypassed and the raw RT output is shown.
@@ -360,6 +361,7 @@ struct EngineState
         auto_save_on_focus_loss = false;
         auto_save_interval_minutes = 5;
         ui_scale = 1.0f;
+        show_transpiled_lua = false;
         std::fill(editor_buffer.begin(), editor_buffer.end(), '\0');
         AddLog("Closed active project");
     }
@@ -928,6 +930,7 @@ struct EngineState
             else if (key == "autoSaveOnFocusLoss") auto_save_on_focus_loss = parse_bool(value);
             else if (key == "autoSaveIntervalMinutes") auto_save_interval_minutes = parse_int(value, 5);
             else if (key == "uiScale") ui_scale = parse_float(value, 1.0f);
+            else if (key == "showTranspiledLua") show_transpiled_lua = parse_bool(value);
             else if (key == "versionControlRemoteUrl") version_control_remote_url = value;
             else if (key == "taaEnabled") taa_enabled = parse_bool(value);
             else if (key == "taaVizMode") taa_viz_mode = parse_int(value, 0);
@@ -989,6 +992,9 @@ struct EngineState
         output << "autoSaveOnFocusLoss=" << write_bool(auto_save_on_focus_loss) << "\n";
         output << "autoSaveIntervalMinutes=" << auto_save_interval_minutes << "\n";
         output << "uiScale=" << ui_scale << "\n";
+        output << "\n";
+        output << "# Graph\n";
+        output << "showTranspiledLua=" << write_bool(show_transpiled_lua) << "\n";
         output << "\n";
         output << "# Version Control\n";
         output << "versionControlRemoteUrl=" << version_control_remote_url << "\n";

@@ -129,6 +129,10 @@ add_executable(game
     src/render/RuntimeScriptAPI.cpp
     src/render/VideoPlaybackManager.cpp
     src/vfs/AssetVFS.cpp
+    src/components/graph/NodeSpec.cpp
+    src/components/graph/BuiltinNodes.cpp
+    src/components/graph/GraphDocument.cpp
+    src/components/graph/GraphTranspiler.cpp
 )
 
 target_include_directories(game PRIVATE

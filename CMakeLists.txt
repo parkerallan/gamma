@@ -118,6 +118,23 @@ if(NOT imguicolortextedit_POPULATED)
     FetchContent_Populate(imguicolortextedit)
 endif()
 
+# imgui-node-editor (thedmd) — Blueprint-style node graph editor used by the
+# NodeGraphComponent. Editor-only; the shipped game does not link this and
+# instead consumes the .lua files generated from .graph documents at build time.
+FetchContent_Declare(
+    imgui_node_editor
+    GIT_REPOSITORY https://github.com/thedmd/imgui-node-editor.git
+    # Pinned to a master commit ahead of the v0.9.3 tag. v0.9.3 collides with
+    # imgui >= 1.91 because the stock ImGui now defines ImVec2 operator==/!=
+    # and removed GetKeyIndex; this commit has the compatibility fixes.
+    GIT_TAG 021aa0ea4da13fed864bafb2a92d4c5205076866
+    GIT_SHALLOW FALSE
+)
+FetchContent_GetProperties(imgui_node_editor)
+if(NOT imgui_node_editor_POPULATED)
+    FetchContent_Populate(imgui_node_editor)
+endif()
+
 set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
@@ -455,6 +472,26 @@ add_library(imguicolortextedit STATIC
 target_include_directories(imguicolortextedit PUBLIC ${IMGUICOLORTEXTEDIT_DIR})
 target_link_libraries(imguicolortextedit PUBLIC imgui)
 
+set(IMGUI_NODE_EDITOR_DIR ${imgui_node_editor_SOURCE_DIR})
+set(IMGUI_NODE_EDITOR_UTILS_DIR ${IMGUI_NODE_EDITOR_DIR}/examples/blueprints-example/utilities)
+# Note: builders.cpp from the blueprints-example is intentionally NOT compiled
+# here because it requires the stack-layout fork of imgui (Spring/BeginHorizontal)
+# which is not in upstream imgui. drawing.cpp + widgets.cpp depend only on
+# standard imgui APIs and provide the pin-icon widgets we need.
+add_library(imgui_node_editor STATIC
+    ${IMGUI_NODE_EDITOR_DIR}/crude_json.cpp
+    ${IMGUI_NODE_EDITOR_DIR}/imgui_canvas.cpp
+    ${IMGUI_NODE_EDITOR_DIR}/imgui_node_editor.cpp
+    ${IMGUI_NODE_EDITOR_DIR}/imgui_node_editor_api.cpp
+    ${IMGUI_NODE_EDITOR_UTILS_DIR}/drawing.cpp
+    ${IMGUI_NODE_EDITOR_UTILS_DIR}/widgets.cpp
+)
+target_include_directories(imgui_node_editor PUBLIC ${IMGUI_NODE_EDITOR_DIR} ${IMGUI_NODE_EDITOR_UTILS_DIR})
+target_link_libraries(imgui_node_editor PUBLIC imgui)
+if(MSVC)
+    target_compile_options(imgui_node_editor PRIVATE /W0)
+endif()
+
 if(MSVC)
     target_compile_options(imguizmo PRIVATE /wd4100 /wd4244 /wd4456)
     target_compile_options(imguicolortextedit PRIVATE /W0)
@@ -478,6 +515,10 @@ add_executable(engine
     src/components/NodeGraphComponent.cpp
     src/components/SceneObjectAttributesEditor.cpp
     src/components/BuildSettingsComponent.cpp
+    src/components/graph/NodeSpec.cpp
+    src/components/graph/BuiltinNodes.cpp
+    src/components/graph/GraphDocument.cpp
+    src/components/graph/GraphTranspiler.cpp
     src/dialogs/BuildGameDialog.cpp
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
@@ -519,6 +560,7 @@ target_link_libraries(engine PRIVATE
     imgui
     imguizmo
     imguicolortextedit
+    imgui_node_editor
     tinyexr
     lua_runtime
     joltphysics

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 struct EngineState;
 
 class NodeGraphComponent
@@ -15,4 +17,8 @@ public:
     void Shutdown();
     bool SaveOpenGraph(EngineState& state);
     bool ReloadOpenGraph(EngineState& state);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };

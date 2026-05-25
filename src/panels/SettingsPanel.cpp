@@ -82,6 +82,18 @@ void SettingsPanel::Render(EngineState& state)
         }
     }
 
+    if (ImGui::CollapsingHeader("Graph", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        settings_changed |= ImGui::Checkbox("Show Transpiled Lua", &state.show_transpiled_lua);
+        ImGui::TextDisabled("When enabled, every graph's transpiled Lua is written to\nProject/Graphs/Transpiled/ on Play so the folder appears in the file tree.\nDisabling removes the folder.");
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Revert to defaults##graph"))
+        {
+            state.show_transpiled_lua = false;
+            settings_changed = true;
+        }
+    }
+
     if (ImGui::CollapsingHeader("Build", ImGuiTreeNodeFlags_DefaultOpen))
     {
         build_changed = BuildSettingsComponent::Render(state);

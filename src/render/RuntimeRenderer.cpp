@@ -1,4 +1,5 @@
 #include "render/RuntimeRenderer.h"
+#include "components/graph/GraphTranspiler.h"
 #include "vfs/AssetVFS.h"
 
 #include <assimp/Importer.hpp>
@@ -4230,6 +4231,132 @@ bool RuntimeRenderer::LoadScriptInstance(const std::string& object_name, const s
         return false;
     }
 
+    // Fire OnStart immediately after OnCreate. Failures are non-fatal (logged
+    // via error_message); the instance is already registered so OnUpdate /
+    // event dispatch continues to work.
+    CallScriptMethod(loaded_instance, "OnStart", 0.0f, false, error_message);
+
+    return true;
+}
+
+bool RuntimeRenderer::LoadGraphInstance(const std::string& object_name, const std::filesystem::path& graph_path, std::string* error_message)
+{
+    if (script_lua_state_ == nullptr && !InitializeScriptRuntime(error_message))
+    {
+        return false;
+    }
+
+    std::string lua_source;
+    std::string transpile_error;
+    if (!graph::TranspileGraphFile(graph_path, lua_source, transpile_error))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Failed to transpile graph " + graph_path.generic_string() + ": " + transpile_error;
+        }
+        return false;
+    }
+
+    // Optional: dump the transpiled Lua to disk so it shows up in the file tree.
+    // Controlled by the "Show Transpiled Lua" setting (SettingsPanel -> Graph).
+    if (transpiled_lua_dump_enabled_ && !project_root_.empty())
+    {
+        std::error_code dump_ec;
+        const std::filesystem::path dump_dir = project_root_ / "Graphs" / "Transpiled";
+        std::filesystem::create_directories(dump_dir, dump_ec);
+        if (!dump_ec)
+        {
+            const std::filesystem::path dump_file = dump_dir / (graph_path.stem().string() + ".lua");
+            std::ofstream out(dump_file, std::ios::binary | std::ios::trunc);
+            if (out)
+            {
+                out << "-- Auto-generated from " << graph_path.generic_string() << "\n";
+                out << "-- Regenerated each Play while \"Show Transpiled Lua\" is enabled. Do not edit.\n\n";
+                out.write(lua_source.data(), static_cast<std::streamsize>(lua_source.size()));
+            }
+        }
+    }
+
+    lua_State* const lua_state = script_lua_state_;
+    const std::string chunkname = "@graph:" + graph_path.generic_string();
+    const int load_result = luaL_loadbuffer(
+        lua_state,
+        lua_source.data(),
+        lua_source.size(),
+        chunkname.c_str());
+    if (load_result != LUA_OK)
+    {
+        if (error_message != nullptr)
+        {
+            const char* message = lua_tostring(lua_state, -1);
+            *error_message = "Failed to load graph " + graph_path.generic_string() + ": " + (message != nullptr ? message : "unknown error");
+        }
+        lua_pop(lua_state, 1);
+        return false;
+    }
+
+    const int run_result = lua_pcall(lua_state, 0, 1, 0);
+    if (run_result != LUA_OK)
+    {
+        if (error_message != nullptr)
+        {
+            const char* message = lua_tostring(lua_state, -1);
+            *error_message = "Failed to execute graph " + graph_path.generic_string() + ": " + (message != nullptr ? message : "unknown error");
+        }
+        lua_pop(lua_state, 1);
+        return false;
+    }
+
+    if (!lua_istable(lua_state, -1))
+    {
+        if (error_message != nullptr)
+        {
+            *error_message = "Graph must return a table: " + graph_path.generic_string();
+        }
+        lua_pop(lua_state, 1);
+        return false;
+    }
+
+    RuntimeScriptInstance instance;
+    instance.instance_key = BuildScriptInstanceKey(object_name, graph_path);
+    instance.object_name = object_name;
+    instance.script_path = graph_path;
+    instance.table_ref = luaL_ref(lua_state, LUA_REGISTRYINDEX);
+
+    const std::string instance_key = instance.instance_key;
+    auto it = script_instances_.find(instance_key);
+    if (it != script_instances_.end())
+    {
+        RemoveScriptEventSubscriptionsForInstance(instance_key);
+        RemoveScriptTimersForInstance(instance_key);
+        if (it->second.table_ref != LUA_NOREF && it->second.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(lua_state, LUA_REGISTRYINDEX, it->second.table_ref);
+        }
+        it->second = std::move(instance);
+    }
+    else
+    {
+        auto insert_result = script_instances_.emplace(instance_key, std::move(instance));
+        it = insert_result.first;
+    }
+
+    RuntimeScriptInstance& loaded_instance = it->second;
+    if (!CallScriptMethod(loaded_instance, "OnCreate", 0.0f, false, error_message))
+    {
+        RemoveScriptEventSubscriptionsForInstance(loaded_instance.instance_key);
+        RemoveScriptTimersForInstance(loaded_instance.instance_key);
+        if (loaded_instance.table_ref != LUA_NOREF && loaded_instance.table_ref != LUA_REFNIL)
+        {
+            luaL_unref(lua_state, LUA_REGISTRYINDEX, loaded_instance.table_ref);
+        }
+        script_instances_.erase(instance_key);
+        return false;
+    }
+
+    // Fire OnStart immediately after OnCreate so graph event.OnStart chains run.
+    CallScriptMethod(loaded_instance, "OnStart", 0.0f, false, error_message);
+
     return true;
 }
 
@@ -4250,6 +4377,18 @@ bool RuntimeRenderer::SyncScriptInstances(std::string* error_message)
             if (script_instances_.find(instance_key) == script_instances_.end())
             {
                 if (!LoadScriptInstance(queued_object.name, script_path, error_message))
+                {
+                    return false;
+                }
+            }
+        }
+        for (const std::filesystem::path& graph_path : queued_object.graph_paths)
+        {
+            const std::string instance_key = BuildScriptInstanceKey(queued_object.name, graph_path);
+            desired_instance_keys.insert(instance_key);
+            if (script_instances_.find(instance_key) == script_instances_.end())
+            {
+                if (!LoadGraphInstance(queued_object.name, graph_path, error_message))
                 {
                     return false;
                 }
@@ -5609,11 +5748,6 @@ bool RuntimeRenderer::BuildQueuedScene(
     std::size_t queued_scan_count = 0;
     for (const SceneObjectMetadata& object : scene_metadata.objects)
     {
-        if (!object.enabled_in_hierarchy)
-        {
-            continue;
-        }
-
         if ((queued_scan_count++ & 31u) == 0u)
         {
             // Prevent Windows from flagging the app as hung during heavy first-frame loads.
@@ -5622,6 +5756,42 @@ bool RuntimeRenderer::BuildQueuedScene(
 
         if (runtime_destroyed_objects_.find(object.name) != runtime_destroyed_objects_.end())
         {
+            continue;
+        }
+
+        if (!object.enabled_in_hierarchy)
+        {
+            // Disabled objects skip rendering/physics but must still load scripts/graphs so
+            // their OnStart logic (e.g. Engine.SetObjectEnabled) can flip themselves on.
+            const bool has_any_script_or_graph =
+                std::any_of(object.script_paths.begin(), object.script_paths.end(), [](const std::string& p) { return !p.empty(); }) ||
+                std::any_of(object.graph_paths.begin(), object.graph_paths.end(), [](const std::string& p) { return !p.empty(); });
+            if (!has_any_script_or_graph)
+            {
+                continue;
+            }
+
+            QueuedSceneObject disabled_queued_object;
+            disabled_queued_object.name = object.name;
+            disabled_queued_object.script_paths.reserve(object.script_paths.size());
+            for (const std::string& script_path : object.script_paths)
+            {
+                if (!script_path.empty())
+                {
+                    disabled_queued_object.script_paths.push_back(project_root_ / script_path);
+                }
+            }
+            disabled_queued_object.graph_paths.reserve(object.graph_paths.size());
+            for (const std::string& graph_path : object.graph_paths)
+            {
+                if (!graph_path.empty())
+                {
+                    disabled_queued_object.graph_paths.push_back(project_root_ / graph_path);
+                }
+            }
+            // No model_path / identity matrix -> nothing to render. Scripts/graphs still dispatch
+            // via SyncScriptInstances which iterates queued_objects_.
+            queued_objects_.push_back(std::move(disabled_queued_object));
             continue;
         }
 
@@ -5637,6 +5807,15 @@ bool RuntimeRenderer::BuildQueuedScene(
 
             queued_object.script_paths.push_back(project_root_ / script_path);
         }
+        queued_object.graph_paths.reserve(object.graph_paths.size());
+        for (const std::string& graph_path : object.graph_paths)
+        {
+            if (graph_path.empty())
+            {
+                continue;
+            }
+            queued_object.graph_paths.push_back(project_root_ / graph_path);
+        }
 
         bool has_renderable_model = false;
         if (!object.model_path.empty())
@@ -5650,7 +5829,7 @@ bool RuntimeRenderer::BuildQueuedScene(
             }
         }
 
-        if (!has_renderable_model && queued_object.script_paths.empty())
+        if (!has_renderable_model && queued_object.script_paths.empty() && queued_object.graph_paths.empty())
         {
             continue;
         }

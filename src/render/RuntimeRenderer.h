@@ -55,6 +55,10 @@ public:
     // SceneViewportRenderer wiring used in the editor viewport).
     void SetTAAEnabled(bool enabled) { ray_tracing_.SetTAAEnabled(enabled); }
     void SetTaaDebugSettings(const RayTracing::TaaDebugSettings& settings) { ray_tracing_.SetTaaDebugSettings(settings); }
+    // When enabled, LoadGraphInstance writes the transpiled Lua source to
+    // <project>/Graphs/Transpiled/<graph_basename>.lua so it appears in the
+    // file tree. Disabling removes the directory on the next call.
+    void SetTranspiledLuaDumpEnabled(bool enabled) { transpiled_lua_dump_enabled_ = enabled; }
 
     // Editor->runtime hand-off: pre-populate caches so the first runtime frame
     // doesn't pay the Assimp + scene-text parse cost again. Call AFTER
@@ -170,6 +174,7 @@ public:
         SceneVector3 model_visual_offset = {0.0f, 0.0f, 0.0f};
         std::array<float, 16> model_matrix{};
         std::vector<std::filesystem::path> script_paths;
+        std::vector<std::filesystem::path> graph_paths;
     };
 
     struct CachedScriptSourceEntry
@@ -276,6 +281,10 @@ private:
     void ShutdownScriptRuntime();
     void DestroyAllScriptInstances();
     bool LoadScriptInstance(const std::string& object_name, const std::filesystem::path& script_path, std::string* error_message);
+    // Transpiles a .graph document to Lua in-memory and loads it via the
+    // same path as LoadScriptInstance. The graph path is used as the
+    // instance-key suffix so multiple graphs can coexist on one object.
+    bool LoadGraphInstance(const std::string& object_name, const std::filesystem::path& graph_path, std::string* error_message);
     bool SyncScriptInstances(std::string* error_message);
     bool CallScriptMethod(RuntimeScriptInstance& instance, const char* method_name, float delta_time, bool include_delta_time, std::string* error_message);
     bool CallScriptTriggerMethod(RuntimeScriptInstance& instance, const char* method_name, const std::string& other_object_name, const std::string& phase, std::string* error_message);
@@ -473,6 +482,7 @@ private:
     std::filesystem::path scene_path_;
     std::string active_camera_object_name_;
     std::size_t active_camera_attribute_index_ = 0;
+    bool transpiled_lua_dump_enabled_ = false;
     std::filesystem::path cached_scene_path_;
     std::filesystem::file_time_type cached_scene_write_time_{};
     SceneMetadata cached_scene_metadata_{};
