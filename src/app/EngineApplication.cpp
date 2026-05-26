@@ -4,6 +4,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
+#include "components/graph/GraphTranspiler.h"
 #include "vfs/PakArchive.h"
 #include "ui/Codicons.h"
 
@@ -1853,7 +1854,6 @@ bool EngineApplication::StageBuiltGame(
     pending_directories.push_back(content_root);
     std::size_t packed_file_count = 0;
     std::size_t packed_script_count = 0;
-    std::size_t packed_graph_count = 0;
     std::string app_icon_rel_path;
 
     while (!pending_directories.empty())
@@ -1932,20 +1932,51 @@ bool EngineApplication::StageBuiltGame(
                 continue;
             }
 
-            if (!pak.AddFile(rel_path.generic_string(), file_path))
+            // .graph documents are editor-only; the runtime in the built
+            // game streams pre-transpiled Lua just like any other script.
+            // We transpile each .graph here and stage ONLY the resulting
+            // "<rel_path>.lua" companion into assets.pak (the .graph JSON
+            // itself is intentionally not packed). RuntimeRenderer::
+            // LoadGraphInstance loads the .lua directly via the VFS with
+            // no graph parsing or registry lookups at runtime.
+            const std::string rel_generic = rel_path.generic_string();
+            const bool is_graph = ToLowerCopy(file_path.extension().string()) == ".graph";
+            if (is_graph)
+            {
+                std::string transpiled_lua;
+                std::string transpile_error;
+                if (!graph::TranspileGraphFile(file_path, transpiled_lua, transpile_error))
+                {
+                    out_error = "Failed to transpile graph for pak: "
+                        + file_path.generic_string() + ": " + transpile_error;
+                    return false;
+                }
+                const std::string lua_rel_path = rel_generic + ".lua";
+                std::vector<std::uint8_t> lua_bytes(transpiled_lua.begin(), transpiled_lua.end());
+                if (!pak.AddBuffer(lua_rel_path, lua_bytes))
+                {
+                    out_error = "Failed to add transpiled graph to pak: " + lua_rel_path;
+                    return false;
+                }
+                log("[Build] Transpiled graph: " + rel_generic + " -> " + lua_rel_path
+                    + " (" + std::to_string(lua_bytes.size()) + " bytes)");
+                // The transpiled .lua is what actually ships in the pak,
+                // so account for it under script assets. The original
+                // .graph is not packed (editor-only authoring format).
+                ++packed_script_count;
+                ++packed_file_count;
+                continue;
+            }
+
+            if (!pak.AddFile(rel_generic, file_path))
             {
                 out_error = "Failed to add file to pak: " + file_path.generic_string();
                 return false;
             }
 
-            const std::string rel_generic = rel_path.generic_string();
             if (rel_generic.rfind("Scripts/", 0) == 0)
             {
                 ++packed_script_count;
-            }
-            else if (rel_generic.rfind("Graphs/", 0) == 0)
-            {
-                ++packed_graph_count;
             }
 
             ++packed_file_count;
@@ -1998,8 +2029,8 @@ bool EngineApplication::StageBuiltGame(
     }
 
     log("[Build] Packed " + std::to_string(packed_file_count) + " files into assets.pak");
-    log("[Build] Included script assets: " + std::to_string(packed_script_count));
-    log("[Build] Included graph assets: " + std::to_string(packed_graph_count));
+    log("[Build] Included script assets: " + std::to_string(packed_script_count)
+        + " (includes transpiled graphs)");
 
     // -----------------------------------------------------------------
     // Game executable

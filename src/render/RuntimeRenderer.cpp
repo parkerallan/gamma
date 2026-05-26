@@ -4261,15 +4261,41 @@ bool RuntimeRenderer::LoadGraphInstance(const std::string& object_name, const st
         return false;
     }
 
+    // Editor live-edit path: transpile the .graph on disk each Play so script
+    // authors see iteration immediately. The built game does NOT ship .graph
+    // files; the pak build step transpiles each graph and stages a
+    // companion ".graph.lua" alongside it in assets.pak (see EngineApplication
+    // staging). When the .graph isn't on disk we load that pre-transpiled
+    // Lua directly from the VFS, treating the graph like any other script.
     std::string lua_source;
-    std::string transpile_error;
-    if (!graph::TranspileGraphFile(graph_path, lua_source, transpile_error))
+    std::error_code stat_ec;
+    const bool graph_on_disk = std::filesystem::exists(graph_path, stat_ec) && !stat_ec;
+    if (graph_on_disk)
     {
-        if (error_message != nullptr)
+        std::string transpile_error;
+        if (!graph::TranspileGraphFile(graph_path, lua_source, transpile_error))
         {
-            *error_message = "Failed to transpile graph " + graph_path.generic_string() + ": " + transpile_error;
+            if (error_message != nullptr)
+            {
+                *error_message = "Failed to transpile graph " + graph_path.generic_string() + ": " + transpile_error;
+            }
+            return false;
         }
-        return false;
+    }
+    else
+    {
+        const std::string vfs_lua_path = graph_path.generic_string() + ".lua";
+        if (!g_asset_reader || !g_asset_reader->FileExists(vfs_lua_path))
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Missing graph asset: " + graph_path.generic_string()
+                    + " (no source on disk, no pre-transpiled " + vfs_lua_path + " in pak)";
+            }
+            return false;
+        }
+        const std::vector<std::uint8_t> bytes = g_asset_reader->ReadFile(vfs_lua_path);
+        lua_source.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
 
     // Optional: dump the transpiled Lua to disk so it shows up in the file tree.
