@@ -138,22 +138,6 @@ void UpdateCachedSceneObjectVector3(
     }
 }
 
-SceneVector3 SnapPositionToGrid(const SceneVector3& value, const EngineState& state)
-{
-    if (!state.snap_to_grid || state.grid_size <= 0.0f)
-    {
-        return value;
-    }
-
-    SceneVector3 snapped = value;
-    for (float& component : snapped)
-    {
-        component = std::round(component / state.grid_size) * state.grid_size;
-    }
-
-    return snapped;
-}
-
 bool HasSceneObjectAttributeKind(const SceneObjectMetadata& object, SceneObjectAttributeKind kind)
 {
     return std::any_of(object.attributes.begin(), object.attributes.end(), [kind](const SceneObjectAttribute& attribute)
@@ -640,11 +624,11 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     float position[3] = {selected_object.position[0], selected_object.position[1], selected_object.position[2]};
     if (ImGui::DragFloat3("Position", position, 0.1f))
     {
-        const SceneVector3 snapped_position = SnapPositionToGrid({position[0], position[1], position[2]}, state);
-        if (SaveSceneObjectVector3Edit(state, selected_object, "position", snapped_position, SetSceneObjectPosition))
+        const SceneVector3 new_position = {position[0], position[1], position[2]};
+        if (SaveSceneObjectVector3Edit(state, selected_object, "position", new_position, SetSceneObjectPosition))
         {
-            selected_object.position = snapped_position;
-            UpdateCachedSceneObjectVector3(cached_scene_metadata_, selected_object.name, &SceneObjectMetadata::position, snapped_position);
+            selected_object.position = new_position;
+            UpdateCachedSceneObjectVector3(cached_scene_metadata_, selected_object.name, &SceneObjectMetadata::position, new_position);
         }
     }
 

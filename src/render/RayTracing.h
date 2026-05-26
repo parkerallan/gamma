@@ -224,6 +224,11 @@ public:
     std::uint32_t GetOutputHeight() const { return output_height_; }
     VkImageLayout GetOutputLayout() const { return output_layout_; }
     void SetOutputLayout(VkImageLayout layout) { output_layout_ = layout; }
+    // Current-frame linear depth image (R32_SFLOAT, VK_IMAGE_LAYOUT_GENERAL
+    // after the ray-tracing pass). Written by the rgen shader as the primary-
+    // ray world-space hit distance; sky/miss pixels contain 1e30.
+    VkImage GetCurrentDepthImage() const { return depth_images_[taa_parity_]; }
+    VkImageView GetCurrentDepthView() const { return depth_views_[taa_parity_]; }
     VkAccelerationStructureKHR GetTopLevelAccelerationStructure() const { return top_level_as_.handle; }
 
 private:

@@ -33,6 +33,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Video2D,
     SceneObjectAttributeKind::Skybox,
     SceneObjectAttributeKind::Audio,
+    SceneObjectAttributeKind::Effects,
 };
 
 constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
@@ -387,7 +388,8 @@ bool RenderAttributeSection(
             attribute.kind != SceneObjectAttributeKind::Image2D &&
             attribute.kind != SceneObjectAttributeKind::Color2D &&
             attribute.kind != SceneObjectAttributeKind::Video2D &&
-            attribute.kind != SceneObjectAttributeKind::Skybox)
+            attribute.kind != SceneObjectAttributeKind::Skybox &&
+            attribute.kind != SceneObjectAttributeKind::Effects)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
             {
@@ -1794,6 +1796,62 @@ bool RenderAttributeSection(
                     }) || changed;
                 }
             }
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Effects:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+
+            const std::string current_effect_label = attribute.effects.effect_path.empty()
+                ? std::string("Drop Effect (.efk/.efkefc)")
+                : std::filesystem::path(attribute.effects.effect_path).filename().string();
+            ImGui::Button(current_effect_label.c_str(), ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget())
+            {
+                const std::filesystem::path dropped_path = GetDragDroppedPath();
+                if (!dropped_path.empty())
+                {
+                    if (HasAnyExtension(dropped_path, {".efk", ".efkefc"}))
+                    {
+                        const std::string normalized = NormalizeAssetPath(state, dropped_path);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "effect path", [&]()
+                        {
+                            return SetSceneObjectAttributeEffectsPath(state.selected_item_path, object.name, attribute_index, normalized);
+                        }) || changed;
+                    }
+                    else
+                    {
+                        state.AddLog("Drop a supported effect: .efk or .efkefc");
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            if (!attribute.effects.effect_path.empty())
+            {
+                ImGui::TextWrapped("Path: %s", attribute.effects.effect_path.c_str());
+            }
+
+            ImGui::TextUnformatted("Play Mode");
+            const SceneObjectEffectsPlayMode current_mode = attribute.effects.play_mode;
+            auto effect_play_mode_radio = [&](const char* label, SceneObjectEffectsPlayMode mode)
+            {
+                if (ImGui::RadioButton(label, current_mode == mode))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "effect play mode", [&]()
+                    {
+                        return SetSceneObjectAttributeEffectsPlayMode(state.selected_item_path, object.name, attribute_index, mode);
+                    }) || changed;
+                }
+            };
+            effect_play_mode_radio("Stop", SceneObjectEffectsPlayMode::Stop);
+            ImGui::SameLine();
+            effect_play_mode_radio("Loop", SceneObjectEffectsPlayMode::Loop);
+            ImGui::SameLine();
+            effect_play_mode_radio("Play Once", SceneObjectEffectsPlayMode::PlayOnce);
 
             break;
         }

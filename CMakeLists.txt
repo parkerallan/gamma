@@ -373,6 +373,24 @@ set(IMGUI_DIR ${imgui_SOURCE_DIR})
 set(IMGUIZMO_DIR ${imguizmo_SOURCE_DIR})
 set(IMGUICOLORTEXTEDIT_DIR ${imguicolortextedit_SOURCE_DIR})
 
+set(GAMMA_EFFEKSEER_ROOT "${CMAKE_SOURCE_DIR}/third_party/effekseer")
+set(GAMMA_WITH_EFFEKSEER OFF)
+if(EXISTS "${GAMMA_EFFEKSEER_ROOT}/CMakeLists.txt")
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_GL OFF CACHE BOOL "" FORCE)
+    set(BUILD_VULKAN ON CACHE BOOL "" FORCE)
+    set(BUILD_DX9 OFF CACHE BOOL "" FORCE)
+    set(BUILD_DX11 OFF CACHE BOOL "" FORCE)
+    set(BUILD_DX12 OFF CACHE BOOL "" FORCE)
+    set(BUILD_METAL OFF CACHE BOOL "" FORCE)
+    set(USE_OPENAL OFF CACHE BOOL "" FORCE)
+    set(USE_XAUDIO2 OFF CACHE BOOL "" FORCE)
+    set(USE_DSOUND OFF CACHE BOOL "" FORCE)
+    set(USE_MSVC_RUNTIME_LIBRARY_DLL ON CACHE BOOL "" FORCE)
+    add_subdirectory("${GAMMA_EFFEKSEER_ROOT}" "${CMAKE_BINARY_DIR}/effekseer" EXCLUDE_FROM_ALL)
+    set(GAMMA_WITH_EFFEKSEER ON)
+endif()
+
 # ---------------------------------------------------------------------------
 # ENGINE_BUILD_GAME=ON  → build only the standalone game target
 # ENGINE_BUILD_GAME=OFF → build only the engine app (default)
@@ -430,6 +448,8 @@ add_engine_shader(overlay2d.vert vert)
 add_engine_shader(overlay2d.frag frag)
 add_engine_shader(animator_preview.vert vert)
 add_engine_shader(animator_preview.frag frag)
+add_engine_shader(effects_depth.vert vert)
+add_engine_shader(effects_depth.frag frag)
 
 add_custom_target(engine_scene_shaders
     DEPENDS ${ENGINE_SHADER_OUTPUTS}
@@ -497,24 +517,6 @@ if(MSVC)
     target_compile_options(imguicolortextedit PRIVATE /W0)
 endif()
 
-set(GAMMA_EFFEKSEER_ROOT "${CMAKE_SOURCE_DIR}/third_party/effekseer")
-set(GAMMA_WITH_EFFEKSEER OFF)
-if(EXISTS "${GAMMA_EFFEKSEER_ROOT}/CMakeLists.txt")
-    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(BUILD_GL OFF CACHE BOOL "" FORCE)
-    set(BUILD_VULKAN ON CACHE BOOL "" FORCE)
-    set(BUILD_DX9 OFF CACHE BOOL "" FORCE)
-    set(BUILD_DX11 OFF CACHE BOOL "" FORCE)
-    set(BUILD_DX12 OFF CACHE BOOL "" FORCE)
-    set(BUILD_METAL OFF CACHE BOOL "" FORCE)
-    set(USE_OPENAL OFF CACHE BOOL "" FORCE)
-    set(USE_XAUDIO2 OFF CACHE BOOL "" FORCE)
-    set(USE_DSOUND OFF CACHE BOOL "" FORCE)
-    set(USE_MSVC_RUNTIME_LIBRARY_DLL ON CACHE BOOL "" FORCE)
-    add_subdirectory("${GAMMA_EFFEKSEER_ROOT}" "${CMAKE_BINARY_DIR}/effekseer" EXCLUDE_FROM_ALL)
-    set(GAMMA_WITH_EFFEKSEER ON)
-endif()
-
 add_executable(engine
     ${ENGINE_ICON_RC}
     src/app/main.cpp
@@ -552,6 +554,7 @@ add_executable(engine
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
     src/render/RuntimeRenderer.cpp
+    src/render/RuntimeEffectsRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/render/PhysicsWorld.cpp
     src/render/Scene2DRenderer.cpp

@@ -2516,6 +2516,7 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
         return false;
     }
     ray_tracing_.SetTAAEnabled(true);
+    effects_renderer_.Initialize(context);
 
     scene_2d_renderer_.Initialize(context);
     skybox_renderer_.Initialize(context);
@@ -2767,6 +2768,7 @@ void RuntimeRenderer::ReleaseSkinningResources(GpuSkinningResources& resources)
 void RuntimeRenderer::Shutdown()
 {
     skybox_renderer_.Shutdown();
+    effects_renderer_.Shutdown();
     ShutdownScriptRuntime();
     physics_world_.Shutdown();
     scene_2d_renderer_.SetVideoPlaybackManager(nullptr);
@@ -2860,6 +2862,7 @@ bool RuntimeRenderer::StartSession(
     cached_scene_metadata_ = SceneMetadata{};
     has_cached_scene_metadata_ = false;
     queued_objects_.clear();
+    effects_renderer_.ResetPlayback();
     audio_engine_.StopAll();
     active_audio_sources_.clear();
     DestroyAllScriptInstances();
@@ -6095,6 +6098,50 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
     return true;
 }
 
+std::vector<RuntimeEffectsRenderer::QueuedEffect> RuntimeRenderer::BuildQueuedEffects(const SceneMetadata& scene_metadata) const
+{
+    RuntimePoseOverrides pose_overrides;
+    pose_overrides.physics_transforms = &physics_object_transforms_;
+    pose_overrides.position_overrides = &script_object_position_overrides_;
+    pose_overrides.rotation_overrides = &script_object_rotation_overrides_;
+    pose_overrides.scale_overrides = &script_object_scale_overrides_;
+
+    const SceneResolvedObjectPoseMap resolved_object_poses = ResolveSceneObjectPoses(scene_metadata, pose_overrides);
+    std::vector<RuntimeEffectsRenderer::QueuedEffect> effects;
+    for (const SceneObjectMetadata& object : scene_metadata.objects)
+    {
+        if (!object.enabled_in_hierarchy || runtime_destroyed_objects_.find(object.name) != runtime_destroyed_objects_.end())
+        {
+            continue;
+        }
+
+        const auto pose_it = resolved_object_poses.find(object.name);
+        if (pose_it == resolved_object_poses.end())
+        {
+            continue;
+        }
+
+        for (std::size_t attribute_index = 0; attribute_index < object.attributes.size(); ++attribute_index)
+        {
+            const SceneObjectAttribute& attribute = object.attributes[attribute_index];
+            if (attribute.kind != SceneObjectAttributeKind::Effects || attribute.effects.effect_path.empty())
+            {
+                continue;
+            }
+
+            RuntimeEffectsRenderer::QueuedEffect effect;
+            effect.key = object.name + "#" + std::to_string(attribute_index);
+            const std::filesystem::path relative_effect_path = attribute.effects.effect_path;
+            effect.effect_path = project_root_ / relative_effect_path;
+            effect.play_mode = attribute.effects.play_mode;
+            effect.world_matrix = pose_it->second.world_matrix;
+            effects.push_back(std::move(effect));
+        }
+    }
+
+    return effects;
+}
+
 bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t target_height, std::string* error_message)
 {
     performance_stats_ = RuntimePerformanceStats{};
@@ -6329,6 +6376,34 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     performance_stats_.render_time_ms = TicksToMilliseconds(
         render_start_ticks,
         static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+
+    if (ray_tracing_.WasFrameSubmittedLastCall())
+    {
+        const std::uint64_t effects_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+        const std::vector<RuntimeEffectsRenderer::QueuedEffect> queued_effects = BuildQueuedEffects(scene_metadata);
+        VkImageLayout effects_output_layout = ray_tracing_.GetOutputLayout();
+        std::string effects_error;
+        if (!effects_renderer_.RenderEffects(
+                ray_tracing_.GetOutputImage(),
+                ray_tracing_.GetOutputImageView(),
+                ray_tracing_.GetOutputLayout(),
+                ray_tracing_.GetOutputWidth(),
+                ray_tracing_.GetOutputHeight(),
+                ray_tracing_.GetCurrentDepthImage(),
+                ray_tracing_.GetCurrentDepthView(),
+                view_inverse,
+                camera_attribute.camera,
+                queued_effects,
+                effects_output_layout,
+                &effects_error))
+        {
+            SDL_Log("Runtime effects renderer failed: %s", effects_error.c_str());
+        }
+        ray_tracing_.SetOutputLayout(effects_output_layout);
+        performance_stats_.render_time_ms += TicksToMilliseconds(
+            effects_start_ticks,
+            static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
+    }
 
     const std::uint64_t overlay_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
     float overlay_gpu_wait_ms = 0.0f;

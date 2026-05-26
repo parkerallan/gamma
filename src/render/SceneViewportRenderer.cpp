@@ -389,14 +389,6 @@ float SnapScalar(float value, float spacing)
     return std::round(value / spacing) * spacing;
 }
 
-void SnapVector(SceneVector3& value, float spacing)
-{
-    for (float& component : value)
-    {
-        component = SnapScalar(component, spacing);
-    }
-}
-
 void BuildLookAtMatrix(const Vec3& eye, const Vec3& center, const Vec3& up, float* matrix)
 {
     const Vec3 forward = Normalize(Subtract(center, eye));
@@ -3262,8 +3254,6 @@ void SceneViewportRenderer::RenderUi(
     }
     const Vec3 camera_position = Add(scene_center, Multiply(orbit_direction, distance));
 
-    SyncRayTracingScene();
-
     float view_matrix[16];
     float projection_matrix[16];
     BuildLookAtMatrix(camera_position, scene_center, Vec3{0.0f, 1.0f, 0.0f}, view_matrix);
@@ -3333,13 +3323,7 @@ void SceneViewportRenderer::RenderUi(
         }
 
         const ImGuizmo::MODE mode = (gizmo_operation_ == 2 || gizmo_local_mode_) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
-        float snap_values[3] = {state.grid_size, state.grid_size, state.grid_size};
-        float angle_snap = 15.0f;
         const float* snap = nullptr;
-        if (state.snap_to_grid)
-        {
-            snap = operation == ImGuizmo::ROTATE ? &angle_snap : snap_values;
-        }
 
         const bool write_position = operation == ImGuizmo::TRANSLATE;
         const bool write_rotation = operation == ImGuizmo::ROTATE;
@@ -3355,11 +3339,6 @@ void SceneViewportRenderer::RenderUi(
             SceneVector3 new_position = {position[0], position[1], position[2]};
             SceneVector3 new_rotation = {rotation[0], rotation[1], rotation[2]};
             SceneVector3 new_scale = {scale[0], scale[1], scale[2]};
-
-            if (state.snap_to_grid && operation == ImGuizmo::TRANSLATE)
-            {
-                SnapVector(new_position, state.grid_size);
-            }
 
             gizmo_object->world_position = new_position;
 
@@ -3421,6 +3400,10 @@ void SceneViewportRenderer::RenderUi(
             gizmo_preview_write_scale_ = false;
         }
     }
+
+    // Sync ray tracing after the gizmo block so the model renders at the
+    // same position the gizmo shows in the current frame (no one-frame lag).
+    SyncRayTracingScene();
 
     if (selected_scene_object_metadata != nullptr)
     {

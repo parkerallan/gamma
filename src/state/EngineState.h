@@ -85,7 +85,6 @@ struct EngineState
     std::filesystem::path open_graph_path;
     float ui_scale = 1.0f;
     bool show_grid_overlay = true;
-    bool snap_to_grid = true;
     float grid_size = 1.0f;
     float grid_extent = 64.0f;
     bool auto_open_startup_scene = true;
@@ -354,7 +353,6 @@ struct EngineState
         confirm_before_delete = true;
         highlight_drop_targets = true;
         show_grid_overlay = true;
-        snap_to_grid = true;
         grid_size = 1.0f;
         grid_extent = 64.0f;
         wrap_editor_text = false;
@@ -923,7 +921,6 @@ struct EngineState
             else if (key == "confirmBeforeDelete") confirm_before_delete = parse_bool(value);
             else if (key == "highlightDropTargets") highlight_drop_targets = parse_bool(value);
             else if (key == "showGridOverlay") show_grid_overlay = parse_bool(value);
-            else if (key == "snapToGrid") snap_to_grid = parse_bool(value);
             else if (key == "gridSize") grid_size = parse_float(value, 1.0f);
             else if (key == "gridExtent") grid_extent = parse_float(value, 64.0f);
             else if (key == "wrapEditorText") wrap_editor_text = parse_bool(value);
@@ -983,7 +980,6 @@ struct EngineState
         output << "\n";
         output << "# Viewport\n";
         output << "showGridOverlay=" << write_bool(show_grid_overlay) << "\n";
-        output << "snapToGrid=" << write_bool(snap_to_grid) << "\n";
         output << "gridSize=" << grid_size << "\n";
         output << "gridExtent=" << grid_extent << "\n";
         output << "\n";

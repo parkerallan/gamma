@@ -629,7 +629,9 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeVideo2DPriority:") ||
     StartsWith(line, "AttributeVideo2DPlayMode:") ||
     StartsWith(line, "AttributeVideo2DVolume:") ||
-    StartsWith(line, "AttributeVideo2DMuted:");
+    StartsWith(line, "AttributeVideo2DMuted:") ||
+    StartsWith(line, "AttributeEffectPath:") ||
+    StartsWith(line, "AttributeEffectPlayMode:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -1197,6 +1199,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Audio";
     case SceneObjectAttributeKind::Video2D:
         return "Video 2D";
+    case SceneObjectAttributeKind::Effects:
+        return "Effects";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -1243,6 +1247,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Audio";
     case SceneObjectAttributeKind::Video2D:
         return "Video2D";
+    case SceneObjectAttributeKind::Effects:
+        return "Effects";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -1323,6 +1329,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Video2D")
     {
         return SceneObjectAttributeKind::Video2D;
+    }
+    if (trimmed == "Effects")
+    {
+        return SceneObjectAttributeKind::Effects;
     }
 
     return SceneObjectAttributeKind::None;
@@ -2177,6 +2187,26 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeVideo2DMuted:") && current_attribute != nullptr)
         {
             ParseBool(ExtractValue(trimmed, "AttributeVideo2DMuted:"), current_attribute->video_2d.muted);
+        }
+        else if (StartsWith(trimmed, "AttributeEffectPath:") && current_attribute != nullptr)
+        {
+            current_attribute->effects.effect_path = ExtractValue(trimmed, "AttributeEffectPath:");
+        }
+        else if (StartsWith(trimmed, "AttributeEffectPlayMode:") && current_attribute != nullptr)
+        {
+            const std::string mode = TrimCopy(ExtractValue(trimmed, "AttributeEffectPlayMode:"));
+            if (mode == "Loop")
+            {
+                current_attribute->effects.play_mode = SceneObjectEffectsPlayMode::Loop;
+            }
+            else if (mode == "PlayOnce" || mode == "On")
+            {
+                current_attribute->effects.play_mode = SceneObjectEffectsPlayMode::PlayOnce;
+            }
+            else
+            {
+                current_attribute->effects.play_mode = SceneObjectEffectsPlayMode::Stop;
+            }
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -3231,6 +3261,19 @@ bool SetSceneObjectAttributeVideo2DVolume(const std::filesystem::path& scene_pat
 bool SetSceneObjectAttributeVideo2DMuted(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool muted)
 {
     return SetSceneObjectAttributeBoolean("AttributeVideo2DMuted", scene_path, object_name, attribute_index, muted);
+}
+
+bool SetSceneObjectAttributeEffectsPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& effect_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeEffectPath", scene_path, object_name, attribute_index, effect_path);
+}
+
+bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectEffectsPlayMode play_mode)
+{
+    const std::string value = (play_mode == SceneObjectEffectsPlayMode::Loop) ? "Loop"
+        : (play_mode == SceneObjectEffectsPlayMode::PlayOnce) ? "PlayOnce"
+        : "Stop";
+    return SetSceneObjectAttributeStringValue("AttributeEffectPlayMode", scene_path, object_name, attribute_index, value);
 }
 
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height)

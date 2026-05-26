@@ -8,6 +8,7 @@
 #include "render/Lighting.h"
 #include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
+#include "render/RuntimeEffectsRenderer.h"
 #include "render/Scene2DRenderer.h"
 #include "render/VideoPlaybackManager.h"
 #include "render/SkyboxRenderer.h"
@@ -471,10 +472,12 @@ private:
         std::array<float, 16>& projection_inverse,
         ResolvedSceneLighting& lighting,
         std::string* error_message);
+    std::vector<RuntimeEffectsRenderer::QueuedEffect> BuildQueuedEffects(const SceneMetadata& scene_metadata) const;
     bool SyncRayTracingScene(std::string* error_message, float* out_skinning_ms = nullptr);
 
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
+    RuntimeEffectsRenderer effects_renderer_{};
     Scene2DRenderer scene_2d_renderer_{};
     VideoPlaybackManager video_playback_manager_{};
     SkyboxRenderer skybox_renderer_{};

@@ -49,7 +49,6 @@ void SettingsPanel::Render(EngineState& state)
     if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen))
     {
         settings_changed |= ImGui::Checkbox("Show grid overlay", &state.show_grid_overlay);
-        settings_changed |= ImGui::Checkbox("Snap to grid", &state.snap_to_grid);
         settings_changed |= ImGui::SliderFloat("Grid spacing", &state.grid_size, 0.125f, 16.0f, "%.3f u", ImGuiSliderFlags_Logarithmic);
         settings_changed |= ImGui::SliderFloat("Grid bounds", &state.grid_extent, 8.0f, 1024.0f, "%.1f u", ImGuiSliderFlags_Logarithmic);
         ImGui::TextDisabled("Acts as the minimum viewport grid extent. Large scenes can still expand it further.");
@@ -57,7 +56,6 @@ void SettingsPanel::Render(EngineState& state)
         if (ImGui::SmallButton("Revert to defaults##viewport"))
         {
             state.show_grid_overlay = true;
-            state.snap_to_grid = true;
             state.grid_size = 1.0f;
             state.grid_extent = 64.0f;
             settings_changed = true;

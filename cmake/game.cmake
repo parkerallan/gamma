@@ -74,6 +74,8 @@ add_game_shader(skinning.comp comp)
 add_game_shader(taa.comp comp)
 add_game_shader(overlay2d.vert vert)
 add_game_shader(overlay2d.frag frag)
+add_game_shader(effects_depth.vert vert)
+add_game_shader(effects_depth.frag frag)
 
 add_custom_target(game_shaders
     DEPENDS ${GAME_SHADER_OUTPUTS}
@@ -126,6 +128,7 @@ add_executable(game
     src/render/Scene2DRenderer.cpp
     src/render/SkyboxRenderer.cpp
     src/render/RuntimeRenderer.cpp
+    src/render/RuntimeEffectsRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/render/VideoPlaybackManager.cpp
     src/vfs/AssetVFS.cpp
@@ -169,6 +172,11 @@ if(TARGET assimp::assimp)
     target_link_libraries(game PRIVATE assimp::assimp)
 elseif(TARGET assimp)
     target_link_libraries(game PRIVATE assimp)
+endif()
+
+if(GAMMA_WITH_EFFEKSEER)
+    target_compile_definitions(game PRIVATE GAMMA_WITH_EFFEKSEER)
+    target_link_libraries(game PRIVATE EffekseerRendererVulkan)
 endif()
 
 add_dependencies(game game_shaders)

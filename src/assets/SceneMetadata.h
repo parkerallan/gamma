@@ -39,6 +39,7 @@ enum class SceneObjectAttributeKind
     Skybox,
     Audio,
     Video2D,
+    Effects,
 };
 
 enum class SceneObjectAudioPlayMode
@@ -57,6 +58,13 @@ enum class SceneObjectVideoPlayMode
 enum class SceneObjectImagePlayMode
 {
     Off,
+    PlayOnce,
+    Loop,
+};
+
+enum class SceneObjectEffectsPlayMode
+{
+    Stop,
     PlayOnce,
     Loop,
 };
@@ -208,6 +216,12 @@ struct SceneObjectVideo2DAttributes
     bool muted = false;
 };
 
+struct SceneObjectEffectsAttributes
+{
+    std::string effect_path;
+    SceneObjectEffectsPlayMode play_mode = SceneObjectEffectsPlayMode::Stop;
+};
+
 struct SceneObjectAttribute
 {
     SceneObjectAttributeKind kind = SceneObjectAttributeKind::None;
@@ -225,6 +239,7 @@ struct SceneObjectAttribute
     SceneObjectSkyboxAttributes skybox{};
     SceneObjectAudioAttributes audio{};
     SceneObjectVideo2DAttributes video_2d{};
+    SceneObjectEffectsAttributes effects{};
 };
 
 struct SceneObjectMetadata
@@ -390,6 +405,8 @@ bool SetSceneObjectAttributeVideo2DPriority(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeVideo2DPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectVideoPlayMode play_mode);
 bool SetSceneObjectAttributeVideo2DVolume(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float volume);
 bool SetSceneObjectAttributeVideo2DMuted(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool muted);
+bool SetSceneObjectAttributeEffectsPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& effect_path);
+bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectEffectsPlayMode play_mode);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);
