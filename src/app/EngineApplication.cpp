@@ -1127,7 +1127,7 @@ void EngineApplication::RenderUI()
     files_panel_.Render(state_);
     version_control_panel_.Render(state_);
     workspace_panel_.Render(state_);
-    effects_panel_.Render(state_);
+    effects_panel_.Render(state_, &vulkan_context_);
     animator_panel_.Render(state_, &vulkan_context_);
     settings_panel_.Render(state_);
     info_panel_.Render(state_, &vulkan_context_);

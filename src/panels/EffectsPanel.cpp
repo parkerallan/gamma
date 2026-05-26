@@ -1,80 +1,73 @@
 #include "panels/EffectsPanel.h"
 
+#include "app/VulkanContext.h"
 #include "imgui.h"
 #include "ui/Codicons.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <cctype>
+#include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
 
-void EffectsPanel::Render(EngineState& state)
+namespace
+{
+std::string LowerExtension(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+    return extension;
+}
+
+bool IsEffectFile(const std::filesystem::path& path)
+{
+    const std::string extension = LowerExtension(path);
+    return extension == ".efk" || extension == ".efkefc";
+}
+
+std::string MakeEffectDisplayName(const std::filesystem::path& effects_dir, const std::filesystem::path& path)
+{
+    std::error_code error;
+    std::filesystem::path relative_path = std::filesystem::relative(path, effects_dir, error);
+    if (error)
+    {
+        relative_path = path.filename();
+    }
+    return relative_path.generic_string();
+}
+}
+
+void EffectsPanel::Render(EngineState& state, VulkanContext* vulkan_context)
 {
     if (!state.show_effects_panel)
     {
         return;
     }
 
-    if (!ImGui::Begin("Effects", &state.show_effects_panel))
+    if (!ImGui::Begin("Effects", &state.show_effects_panel, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
     {
         ImGui::End();
         return;
     }
 
-    static char effect_name[128] = "NewEffect";
     static bool preview_playing = false;
     static bool preview_paused = false;
     static int selected_effect_index = 0;
-    static bool effect_dirty = false;
-    static int random_seed = 1337;
-    static int max_particles = 20000;
-    static int burst_count = 120;
-    static int flipbook_columns = 8;
-    static int flipbook_rows = 8;
-    static int preview_frame = 0;
-    static int collision_bounce = 25;
     static int timeline_frame = 0;
-    static float duration_seconds = 2.5f;
-    static float spawn_rate = 80.0f;
-    static float prewarm_seconds = 0.0f;
-    static float lifetime_min = 0.6f;
-    static float lifetime_max = 1.8f;
-    static float speed_min = 0.4f;
-    static float speed_max = 6.0f;
-    static float drag = 0.12f;
-    static float gravity_scale = -0.6f;
-    static float emitter_radius = 0.35f;
-    static float cone_angle = 18.0f;
-    static float turbulence_strength = 1.2f;
-    static float turbulence_scale = 0.75f;
-    static float turbulence_scroll = 0.9f;
-    static float start_size = 0.16f;
-    static float mid_size = 0.42f;
-    static float end_size = 0.08f;
-    static float softness = 0.6f;
-    static float distortion = 0.15f;
-    static float emissive = 2.0f;
-    static float temperature = 0.7f;
-    static float shadow_density = 0.25f;
     static float timeline_seconds = 0.0f;
     static float timeline_max_seconds = 6.0f;
-    static float flipbook_fps = 24.0f;
     static bool looping = true;
-    static bool world_space = true;
-    static bool sort_back_to_front = true;
-    static bool receive_lighting = true;
-    static bool cast_shadows = false;
-    static bool collision_enabled = false;
-    static bool use_flipbook = false;
-    static bool local_space_noise = false;
-    static bool use_soft_particles = true;
 
     static std::vector<std::string> effect_names;
     static std::vector<std::filesystem::path> effect_paths;
+    static std::filesystem::path selected_effect_path;
     static std::filesystem::path last_scanned_dir;
     static std::uint64_t last_dir_signature = 0;
 
@@ -91,11 +84,17 @@ void EffectsPanel::Render(EngineState& state)
         
         std::uint64_t signature = 1;
         std::error_code ec;
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec))
         {
-            if (entry.is_regular_file() && entry.path().extension() == ".fx")
+            if (entry.is_regular_file(ec) && IsEffectFile(entry.path()))
             {
-                signature ^= std::hash<std::string>{}(entry.path().filename().string());
+                signature ^= std::hash<std::string>{}(entry.path().generic_string());
+                std::error_code time_error;
+                const auto write_time = entry.last_write_time(time_error);
+                if (!time_error)
+                {
+                    signature ^= std::hash<std::int64_t>{}(write_time.time_since_epoch().count());
+                }
                 signature *= 1099511628211ull;
             }
         }
@@ -110,20 +109,61 @@ void EffectsPanel::Render(EngineState& state)
         
         effect_names.clear();
         effect_paths.clear();
-        effect_names.push_back("New +");
+        effect_names.push_back("Select effect...");
         effect_paths.push_back({});
 
         if (!current_effects_dir.empty() && std::filesystem::is_directory(current_effects_dir))
         {
             std::error_code ec;
-            for (const auto& entry : std::filesystem::directory_iterator(current_effects_dir, ec))
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(current_effects_dir, ec))
             {
-                if (entry.is_regular_file() && entry.path().extension() == ".fx")
+                if (entry.is_regular_file(ec) && IsEffectFile(entry.path()))
                 {
-                    effect_names.push_back(entry.path().stem().string());
+                    effect_names.push_back(MakeEffectDisplayName(current_effects_dir, entry.path()));
                     effect_paths.push_back(entry.path());
                 }
             }
+        }
+
+        std::vector<std::size_t> sorted_indices;
+        sorted_indices.reserve(effect_paths.size() > 0 ? effect_paths.size() - 1 : 0);
+        for (std::size_t index = 1; index < effect_paths.size(); ++index)
+        {
+            sorted_indices.push_back(index);
+        }
+        std::sort(sorted_indices.begin(), sorted_indices.end(), [&](std::size_t lhs, std::size_t rhs)
+        {
+            return effect_names[lhs] < effect_names[rhs];
+        });
+
+        std::vector<std::string> sorted_names;
+        std::vector<std::filesystem::path> sorted_paths;
+        sorted_names.push_back(effect_names.front());
+        sorted_paths.push_back(effect_paths.front());
+        for (const std::size_t index : sorted_indices)
+        {
+            sorted_names.push_back(effect_names[index]);
+            sorted_paths.push_back(effect_paths[index]);
+        }
+        effect_names = std::move(sorted_names);
+        effect_paths = std::move(sorted_paths);
+
+        selected_effect_index = 0;
+        if (!selected_effect_path.empty())
+        {
+            for (std::size_t index = 1; index < effect_paths.size(); ++index)
+            {
+                if (effect_paths[index] == selected_effect_path)
+                {
+                    selected_effect_index = static_cast<int>(index);
+                    break;
+                }
+            }
+        }
+        if (selected_effect_index == 0 && effect_paths.size() > 1)
+        {
+            selected_effect_index = 1;
+            selected_effect_path = effect_paths[selected_effect_index];
         }
     }
 
@@ -131,12 +171,8 @@ void EffectsPanel::Render(EngineState& state)
     {
         selected_effect_index = 0;
     }
-    if (selected_effect_index == 0 && effect_name[0] == '\0')
-    {
-        std::snprintf(effect_name, sizeof(effect_name), "%s", "NewEffect");
-    }
 
-    timeline_max_seconds = (std::max)(6.0f, duration_seconds);
+    timeline_max_seconds = 6.0f;
     if (preview_playing && !preview_paused)
     {
         timeline_seconds += ImGui::GetIO().DeltaTime;
@@ -156,7 +192,6 @@ void EffectsPanel::Render(EngineState& state)
     timeline_seconds = std::clamp(timeline_seconds, 0.0f, timeline_max_seconds);
     timeline_frame = static_cast<int>(std::round(timeline_seconds * 60.0f));
 
-    const std::string save_label = std::string(ICON_CI_SAVE) + " Save";
     const std::string play_pause_label = preview_playing && !preview_paused
         ? std::string(ICON_CI_DEBUG_PAUSE)
         : std::string(ICON_CI_DEBUG_START);
@@ -170,163 +205,98 @@ void EffectsPanel::Render(EngineState& state)
         effect_name_ptrs.push_back(name.c_str());
     }
 
-    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SetNextItemWidth(260.0f);
     const int previous_effect_index = selected_effect_index;
-    ImGui::Combo("##EffectsSelector", &selected_effect_index, effect_name_ptrs.data(), static_cast<int>(effect_name_ptrs.size()));
+    ImGui::Combo("##CurrentEffect", &selected_effect_index, effect_name_ptrs.data(), static_cast<int>(effect_name_ptrs.size()));
     if (selected_effect_index != previous_effect_index)
     {
-        effect_dirty = false;
-        if (selected_effect_index == 0)
-        {
-            if (effect_name[0] == '\0')
-            {
-                std::snprintf(effect_name, sizeof(effect_name), "%s", "NewEffect");
-            }
-        }
-        else
-        {
-            effect_name[0] = '\0';
-        }
-    }
-
-    const bool editing_new_effect = selected_effect_index == 0;
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(260.0f);
-    if (!editing_new_effect)
-    {
-        ImGui::BeginDisabled();
-    }
-    ImGui::InputTextWithHint("##EffectsName", "", effect_name, sizeof(effect_name));
-    if (!editing_new_effect)
-    {
-        ImGui::EndDisabled();
-    }
-
-    {
-        const float sp = ImGui::GetStyle().ItemSpacing.x;
-        const float save_w = ImGui::CalcTextSize(ICON_CI_SAVE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
-        const float build_w = ImGui::CalcTextSize(ICON_CI_RUN_WITH_DEPS).x + ImGui::GetStyle().FramePadding.x * 2.0f;
-        const float play_w = ImGui::CalcTextSize(ICON_CI_DEBUG_START).x + ImGui::GetStyle().FramePadding.x * 2.0f;
-        const float toolbar_total = save_w + build_w + play_w + sp * 2.0f;
-        const float cur_x = ImGui::GetCursorPosX();
-        const float avail = ImGui::GetContentRegionAvail().x;
-        if (effect_dirty)
-        {
-            ImGui::SameLine();
-            ImGui::TextDisabled("Unsaved changes");
-        }
-        ImGui::SameLine();
-        if (avail > toolbar_total)
-        {
-            ImGui::SetCursorPosX(cur_x + avail - toolbar_total);
-        }
-        if (ImGui::Button(ICON_CI_SAVE))
-        {
-            if (editing_new_effect)
-            {
-                if (state.project_root.empty() || effect_name[0] == '\0')
-                {
-                    state.AddLog("Cannot create effect: missing project root or effect name");
-                }
-                else
-                {
-                    const std::filesystem::path effects_dir = state.project_root / "Assets" / "Effects";
-                    std::error_code ec;
-                    std::filesystem::create_directories(effects_dir, ec);
-                    const std::string created_effect_name = effect_name;
-                    const std::filesystem::path new_effect_path = effects_dir / (created_effect_name + ".fx");
-
-                    std::ofstream out(new_effect_path, std::ios::binary);
-                    if (!out)
-                    {
-                        state.AddLog("Failed to create effect: " + state.GetDisplayPath(new_effect_path));
-                    }
-                    else
-                    {
-                        out << "{\n";
-                        out << "  \"name\": \"" << created_effect_name << "\",\n";
-                        out << "  \"version\": 1\n";
-                        out << "}\n";
-                        out.close();
-
-                        effect_names.push_back(created_effect_name);
-                        effect_paths.push_back(new_effect_path);
-                        selected_effect_index = static_cast<int>(effect_paths.size()) - 1;
-                        effect_name[0] = '\0';
-                        state.request_files_tree_refresh = true;
-                        state.AddLog("Created effect: " + created_effect_name);
-                    }
-                }
-            }
-            else
-            {
-                const std::filesystem::path active_effect_path = effect_paths[selected_effect_index];
-                std::ofstream out(active_effect_path, std::ios::binary);
-                if (!out)
-                {
-                    state.AddLog("Failed to save effect: " + state.GetDisplayPath(active_effect_path));
-                }
-                else
-                {
-                    const std::string active_effect_name = active_effect_path.stem().string();
-                    out << "{\n";
-                    out << "  \"name\": \"" << active_effect_name << "\",\n";
-                    out << "  \"version\": 1\n";
-                    out << "}\n";
-                    out.close();
-                    state.AddLog("Saved effect: " + active_effect_name);
-                    effect_dirty = false;
-                }
-            }
-        }
-        ImGui::SameLine();
-        if (!state.CanBuildProject()) { ImGui::BeginDisabled(); }
-        if (ImGui::Button(ICON_CI_RUN_WITH_DEPS)) { state.TriggerBuildAction(); }
-        if (!state.CanBuildProject()) { ImGui::EndDisabled(); }
-        ImGui::SameLine();
-        if (!state.CanPlayScene()) { ImGui::BeginDisabled(); }
-        if (ImGui::Button(ICON_CI_DEBUG_START)) { state.TriggerPlayAction(); }
-        if (!state.CanPlayScene()) { ImGui::EndDisabled(); }
+        selected_effect_path = selected_effect_index > 0 && selected_effect_index < static_cast<int>(effect_paths.size())
+            ? effect_paths[selected_effect_index]
+            : std::filesystem::path();
+        timeline_seconds = 0.0f;
+        timeline_frame = 0;
+        preview_renderer_.Restart();
     }
 
     const float content_height = ImGui::GetContentRegionAvail().y;
     const float region_height = (std::max)(120.0f, content_height);
-    const float left_width = ImGui::GetContentRegionAvail().x * 0.44f;
-    const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float timeline_height = 110.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.y;
     const float preview_height = (std::max)(120.0f, region_height - timeline_height - spacing);
 
-    ImGui::BeginChild("##EffectsPreviewColumn", ImVec2(left_width, region_height), true);
-
     const ImVec2 preview_size = ImVec2(ImGui::GetContentRegionAvail().x, preview_height);
-    ImGui::BeginChild("##EffectsPreviewCanvas", preview_size, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    const ImVec2 min = ImGui::GetWindowPos();
-    const ImVec2 max = ImVec2(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
+    ImGui::InvisibleButton("##EffectsPreviewCanvas", preview_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    draw_list->AddRectFilledMultiColor(
-        min,
-        max,
-        IM_COL32(18, 20, 26, 255),
-        IM_COL32(26, 31, 40, 255),
-        IM_COL32(12, 14, 18, 255),
-        IM_COL32(18, 22, 28, 255));
+    preview_renderer_.HandleMouseControls(min, max);
+    const std::filesystem::path active_effect_path =
+        selected_effect_index > 0 && selected_effect_index < static_cast<int>(effect_paths.size())
+            ? effect_paths[selected_effect_index]
+            : std::filesystem::path();
+
+    const std::uint32_t preview_width = static_cast<std::uint32_t>((std::max)(1.0f, preview_size.x));
+    const std::uint32_t preview_height_u = static_cast<std::uint32_t>((std::max)(1.0f, preview_size.y));
+    const ImTextureID effect_preview = preview_renderer_.Render(
+        vulkan_context,
+        active_effect_path,
+        preview_width,
+        preview_height_u,
+        timeline_seconds,
+        preview_playing,
+        preview_paused,
+        looping);
+
+    if (effect_preview)
+    {
+        draw_list->AddImage(effect_preview, min, max);
+    }
+    else
+    {
+        draw_list->AddRectFilledMultiColor(
+            min,
+            max,
+            IM_COL32(18, 20, 26, 255),
+            IM_COL32(26, 31, 40, 255),
+            IM_COL32(12, 14, 18, 255),
+            IM_COL32(18, 22, 28, 255));
+    }
+    preview_renderer_.DrawGridOverlay(draw_list, min, max);
     draw_list->AddRect(min, max, IM_COL32(84, 92, 105, 255), 8.0f, 0, 1.5f);
 
     const char* status_text = !preview_playing ? "Stopped" : (preview_paused ? "Paused" : "Playing");
     draw_list->AddText(ImVec2(min.x + 14.0f, min.y + 12.0f), IM_COL32(236, 240, 245, 255), status_text);
 
-    const std::string stats_line = std::string("Particles: ") + std::to_string(max_particles) +
-        "  |  Spawn/s: " + std::to_string(static_cast<int>(spawn_rate));
-    draw_list->AddText(ImVec2(min.x + 14.0f, min.y + 32.0f), IM_COL32(166, 178, 195, 255), stats_line.c_str());
-
-    const char* placeholder = "RT effect preview scaffold";
-    const ImVec2 text_size = ImGui::CalcTextSize(placeholder);
-    draw_list->AddText(
-        ImVec2((min.x + max.x - text_size.x) * 0.5f, (min.y + max.y - text_size.y) * 0.5f),
-        IM_COL32(220, 226, 236, 255),
-        placeholder);
-    ImGui::EndChild();
-
+    const char* placeholder = active_effect_path.empty()
+        ? "Select an Effekseer effect"
+        : (preview_renderer_.LastError().empty() ? nullptr : preview_renderer_.LastError().c_str());
+    if (placeholder != nullptr && !effect_preview)
+    {
+        const ImVec2 text_size = ImGui::CalcTextSize(placeholder);
+        draw_list->AddText(
+            ImVec2((min.x + max.x - text_size.x) * 0.5f, (min.y + max.y - text_size.y) * 0.5f),
+            IM_COL32(220, 226, 236, 255),
+            placeholder);
+    }
+    else if (effect_preview && !preview_renderer_.LastError().empty())
+    {
+        const std::string warning = preview_renderer_.LastError();
+        const ImVec2 text_size = ImGui::CalcTextSize(warning.c_str());
+        const ImVec2 warning_min(min.x + 10.0f, max.y - text_size.y - 18.0f);
+        const ImVec2 warning_max((std::min)(max.x - 10.0f, warning_min.x + text_size.x + 16.0f), max.y - 8.0f);
+        draw_list->AddRectFilled(warning_min, warning_max, IM_COL32(35, 26, 15, 225), 5.0f);
+        draw_list->AddRect(warning_min, warning_max, IM_COL32(210, 150, 75, 210), 5.0f);
+        const ImVec4 clip_rect(warning_min.x + 8.0f, warning_min.y + 4.0f, warning_max.x - 8.0f, warning_max.y - 4.0f);
+        draw_list->AddText(
+            ImGui::GetFont(),
+            ImGui::GetFontSize(),
+            ImVec2(warning_min.x + 8.0f, warning_min.y + 5.0f),
+            IM_COL32(255, 218, 160, 255),
+            warning.c_str(),
+            nullptr,
+            0.0f,
+            &clip_rect);
+    }
     ImGui::Spacing();
 
     if (ImGui::Button(play_pause_label.c_str()))
@@ -335,6 +305,7 @@ void EffectsPanel::Render(EngineState& state)
         {
             preview_playing = true;
             preview_paused = false;
+            preview_renderer_.Restart();
             state.AddLog("Effects preview started");
         }
         else
@@ -350,6 +321,7 @@ void EffectsPanel::Render(EngineState& state)
         preview_paused = false;
         timeline_seconds = 0.0f;
         timeline_frame = 0;
+        preview_renderer_.Restart();
         state.AddLog("Effects preview restarted");
     }
     ImGui::SameLine();
@@ -359,8 +331,11 @@ void EffectsPanel::Render(EngineState& state)
         preview_paused = false;
         timeline_seconds = 0.0f;
         timeline_frame = 0;
+        preview_renderer_.Stop();
         state.AddLog("Effects preview stopped");
     }
+    ImGui::SameLine();
+    ImGui::Checkbox("Loop", &looping);
     ImGui::SameLine();
     ImGui::Text("Time %.2fs / %.2fs", timeline_seconds, timeline_max_seconds);
     ImGui::SameLine();
@@ -420,97 +395,6 @@ void EffectsPanel::Render(EngineState& state)
         IM_COL32(198, 232, 58, 255),
         2.0f);
     timeline_draw_list->AddCircleFilled(ImVec2(playhead_x, track_min.y + 8.0f), 5.0f, IM_COL32(198, 232, 58, 255));
-
-    ImGui::Dummy(ImVec2(0.0f, 32.0f));
-    ImGui::EndChild();
-
-    ImGui::SameLine(0.0f, spacing);
-
-    ImGui::BeginChild("##EffectsSettingsColumn", ImVec2(0.0f, region_height), true);
-    
-    if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::SliderFloat("Duration (s)", &duration_seconds, 0.05f, 30.0f, "%.2f");
-        ImGui::SliderFloat("Prewarm (s)", &prewarm_seconds, 0.0f, 10.0f, "%.2f");
-        ImGui::SliderFloat("Spawn Rate", &spawn_rate, 0.0f, 2000.0f, "%.1f");
-        ImGui::SliderInt("Burst Count", &burst_count, 0, 5000);
-        ImGui::SliderInt("Max Particles", &max_particles, 64, 300000);
-        ImGui::SliderInt("Random Seed", &random_seed, 0, 65535);
-        ImGui::Checkbox("Looping", &looping);
-        ImGui::Checkbox("World Space", &world_space);
-    }
-
-    if (ImGui::CollapsingHeader("Lifetime", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::SliderFloat("Lifetime Min", &lifetime_min, 0.01f, 12.0f, "%.2f");
-        ImGui::SliderFloat("Lifetime Max", &lifetime_max, 0.01f, 12.0f, "%.2f");
-        if (lifetime_max < lifetime_min)
-        {
-            lifetime_max = lifetime_min;
-        }
-        ImGui::SliderFloat("Speed Min", &speed_min, 0.0f, 40.0f, "%.2f");
-        ImGui::SliderFloat("Speed Max", &speed_max, 0.0f, 40.0f, "%.2f");
-        if (speed_max < speed_min)
-        {
-            speed_max = speed_min;
-        }
-        ImGui::SliderFloat("Drag", &drag, 0.0f, 10.0f, "%.2f");
-        ImGui::SliderFloat("Gravity Scale", &gravity_scale, -8.0f, 8.0f, "%.2f");
-    }
-
-    if (ImGui::CollapsingHeader("Emitter Shape", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::SliderFloat("Radius", &emitter_radius, 0.0f, 8.0f, "%.2f");
-        ImGui::SliderFloat("Cone Angle", &cone_angle, 0.0f, 180.0f, "%.1f");
-        ImGui::Checkbox("Collision Enabled", &collision_enabled);
-        if (collision_enabled)
-        {
-            ImGui::SliderInt("Collision Bounce %", &collision_bounce, 0, 100);
-        }
-    }
-
-    if (ImGui::CollapsingHeader("Noise and Turbulence", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::SliderFloat("Strength", &turbulence_strength, 0.0f, 12.0f, "%.2f");
-        ImGui::SliderFloat("Scale", &turbulence_scale, 0.01f, 8.0f, "%.2f");
-        ImGui::SliderFloat("Scroll Speed", &turbulence_scroll, 0.0f, 10.0f, "%.2f");
-        ImGui::Checkbox("Local Space Noise", &local_space_noise);
-    }
-
-    if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::SliderFloat("Start Size", &start_size, 0.001f, 5.0f, "%.3f");
-        ImGui::SliderFloat("Mid Size", &mid_size, 0.001f, 5.0f, "%.3f");
-        ImGui::SliderFloat("End Size", &end_size, 0.001f, 5.0f, "%.3f");
-        ImGui::SliderFloat("Softness", &softness, 0.0f, 1.0f, "%.2f");
-        ImGui::SliderFloat("Distortion", &distortion, 0.0f, 2.0f, "%.2f");
-        ImGui::SliderFloat("Emissive", &emissive, 0.0f, 32.0f, "%.2f");
-        ImGui::SliderFloat("Temperature", &temperature, 0.0f, 1.0f, "%.2f");
-        ImGui::SliderFloat("Shadow Density", &shadow_density, 0.0f, 1.0f, "%.2f");
-        ImGui::Checkbox("Sort Back-To-Front", &sort_back_to_front);
-        ImGui::Checkbox("Receive Lighting", &receive_lighting);
-        ImGui::Checkbox("Cast Shadows", &cast_shadows);
-        ImGui::Checkbox("Soft Particles", &use_soft_particles);
-    }
-
-    if (ImGui::CollapsingHeader("Flipbook", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::Checkbox("Use Flipbook", &use_flipbook);
-        if (use_flipbook)
-        {
-            ImGui::SliderInt("Columns", &flipbook_columns, 1, 32);
-            ImGui::SliderInt("Rows", &flipbook_rows, 1, 32);
-            ImGui::SliderFloat("Frames Per Second", &flipbook_fps, 1.0f, 120.0f, "%.1f");
-            const int frame_count = (std::max)(1, flipbook_columns * flipbook_rows);
-            if (preview_frame >= frame_count)
-            {
-                preview_frame = frame_count - 1;
-            }
-            ImGui::SliderInt("Preview Frame", &preview_frame, 0, frame_count - 1);
-        }
-    }
-
-    ImGui::EndChild();
 
     ImGui::End();
 }

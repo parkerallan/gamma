@@ -497,6 +497,24 @@ if(MSVC)
     target_compile_options(imguicolortextedit PRIVATE /W0)
 endif()
 
+set(GAMMA_EFFEKSEER_ROOT "${CMAKE_SOURCE_DIR}/third_party/effekseer")
+set(GAMMA_WITH_EFFEKSEER OFF)
+if(EXISTS "${GAMMA_EFFEKSEER_ROOT}/CMakeLists.txt")
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_GL OFF CACHE BOOL "" FORCE)
+    set(BUILD_VULKAN ON CACHE BOOL "" FORCE)
+    set(BUILD_DX9 OFF CACHE BOOL "" FORCE)
+    set(BUILD_DX11 OFF CACHE BOOL "" FORCE)
+    set(BUILD_DX12 OFF CACHE BOOL "" FORCE)
+    set(BUILD_METAL OFF CACHE BOOL "" FORCE)
+    set(USE_OPENAL OFF CACHE BOOL "" FORCE)
+    set(USE_XAUDIO2 OFF CACHE BOOL "" FORCE)
+    set(USE_DSOUND OFF CACHE BOOL "" FORCE)
+    set(USE_MSVC_RUNTIME_LIBRARY_DLL ON CACHE BOOL "" FORCE)
+    add_subdirectory("${GAMMA_EFFEKSEER_ROOT}" "${CMAKE_BINARY_DIR}/effekseer" EXCLUDE_FROM_ALL)
+    set(GAMMA_WITH_EFFEKSEER ON)
+endif()
+
 add_executable(engine
     ${ENGINE_ICON_RC}
     src/app/main.cpp
@@ -540,6 +558,7 @@ add_executable(engine
     src/render/SkyboxRenderer.cpp
     src/render/SceneViewportRenderer.cpp
     src/render/VideoPlaybackManager.cpp
+    src/render/EffectsPreviewRenderer.cpp
     src/panels/SettingsPanel.cpp
     src/render/FontInfoRenderer.cpp
     src/render/ImageInfoRenderer.cpp
@@ -572,6 +591,11 @@ target_link_libraries(engine PRIVATE
     FFmpeg::swresample
     nlohmann_json::nlohmann_json
 )
+
+if(GAMMA_WITH_EFFEKSEER)
+    target_compile_definitions(engine PRIVATE GAMMA_WITH_EFFEKSEER)
+    target_link_libraries(engine PRIVATE EffekseerRendererVulkan)
+endif()
 
 if(TARGET assimp::assimp)
     target_link_libraries(engine PRIVATE assimp::assimp)
