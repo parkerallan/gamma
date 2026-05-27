@@ -414,6 +414,8 @@ private:
         Video2DPlayMode,
         Video2DVolume,
         Video2DMuted,
+        EffectsEffectPath,
+        EffectsPlayMode,
     };
     void RefreshActiveScriptCameraSelection();
     void HandleScriptAttributeMutation(SceneObjectAttributeKind kind, ScriptAttributeAccessorId accessor_id);
@@ -464,6 +466,9 @@ private:
     static int LuaVideoIsPlaying(lua_State* lua_state);
     static int LuaVideoSetVolume(lua_State* lua_state);
     static int LuaVideoSetMuted(lua_State* lua_state);
+    static int LuaEffectPlay(lua_State* lua_state);
+    static int LuaEffectStop(lua_State* lua_state);
+    static int LuaEffectIsPlaying(lua_State* lua_state);
     bool BuildQueuedScene(
         const SceneMetadata& scene_metadata,
         const SceneObjectMetadata& active_camera_object,

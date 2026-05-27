@@ -325,6 +325,7 @@ bool RuntimeEffectsRenderer::RenderEffects(
     const SceneObjectCameraAttributes& camera,
     const std::vector<QueuedEffect>& effects,
     VkImageLayout& out_layout,
+    std::vector<std::string>* out_completed_play_once_keys,
     std::string* error_message)
 {
     out_layout = current_layout;
@@ -379,15 +380,48 @@ bool RuntimeEffectsRenderer::RenderEffects(
         }
 
         ActiveEffect& active = active_effects_[queued.key];
+        const SceneObjectEffectsPlayMode old_play_mode = active.play_mode;
         const bool changed = active.path != queued.effect_path || active.play_mode != queued.play_mode;
-        if (changed && active.handle >= 0)
+        if (changed)
         {
-            manager_->StopEffect(active.handle);
-            active.handle = -1;
+            if (active.handle >= 0)
+            {
+                // Loop->Stop should not taper. Keep the current instance alive and
+                // wait for it to finish naturally, then stop restarting it.
+                const bool finish_current_loop =
+                    old_play_mode == SceneObjectEffectsPlayMode::Loop &&
+                    queued.play_mode == SceneObjectEffectsPlayMode::Stop;
+                if (finish_current_loop)
+                {
+                    active.draining = true;
+                }
+                else
+                {
+                    manager_->StopEffect(active.handle);
+                    active.handle = -1;
+                    active.draining = false;
+                }
+            }
             active.play_once_started = false;
         }
         active.path = queued.effect_path;
         active.play_mode = queued.play_mode;
+
+        // While draining: do not stop emission. Let the effect complete naturally.
+        if (active.draining)
+        {
+            if (active.handle >= 0 && !manager_->Exists(active.handle))
+            {
+                active.handle = -1;
+                active.draining = false;
+            }
+            if (active.handle >= 0)
+            {
+                manager_->SetMatrix(active.handle, ToEffekseerMatrix43(queued.world_matrix));
+                any_playing = true;
+            }
+            continue;
+        }
 
         if (queued.play_mode == SceneObjectEffectsPlayMode::Stop)
         {
@@ -402,6 +436,17 @@ bool RuntimeEffectsRenderer::RenderEffects(
         if (active.handle >= 0 && !manager_->Exists(active.handle))
         {
             active.handle = -1;
+            if (active.play_mode == SceneObjectEffectsPlayMode::PlayOnce)
+            {
+                // Report completion so the caller can reset the attribute play_mode
+                // back to Stop. Keep play_once_started=true and continue so that
+                // should_start_once does NOT fire on this same frame.
+                if (out_completed_play_once_keys != nullptr)
+                {
+                    out_completed_play_once_keys->push_back(queued.key);
+                }
+                continue;
+            }
         }
 
         const bool should_start_loop = queued.play_mode == SceneObjectEffectsPlayMode::Loop && active.handle < 0;

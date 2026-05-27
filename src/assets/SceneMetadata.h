@@ -219,7 +219,8 @@ struct SceneObjectVideo2DAttributes
 struct SceneObjectEffectsAttributes
 {
     std::string effect_path;
-    SceneObjectEffectsPlayMode play_mode = SceneObjectEffectsPlayMode::Stop;
+    SceneObjectEffectsPlayMode trigger_mode = SceneObjectEffectsPlayMode::Loop;  // serialized: how to play when triggered
+    SceneObjectEffectsPlayMode play_mode    = SceneObjectEffectsPlayMode::Stop;  // runtime only: always starts Stop
 };
 
 struct SceneObjectAttribute

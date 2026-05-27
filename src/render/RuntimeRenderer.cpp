@@ -3916,6 +3916,8 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
         {"AudioAttr", "MinDistance", ScriptAttributeAccessorId::AudioMinDistance},
         {"AudioAttr", "MaxDistance", ScriptAttributeAccessorId::AudioMaxDistance},
         {"AudioAttr", "DopplerFactor", ScriptAttributeAccessorId::AudioDopplerFactor},
+        {"EffectsAttr", "EffectPath", ScriptAttributeAccessorId::EffectsEffectPath},
+        {"EffectsAttr", "PlayMode", ScriptAttributeAccessorId::EffectsPlayMode},
     };
 
     const auto bind_attribute_accessor = [&](const char* table_name, const char* method_name, ScriptAttributeAccessorId accessor_id)
@@ -4088,6 +4090,19 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaVideoSetMuted, 1);
     lua_setfield(script_lua_state_, -2, "SetMuted");
     lua_setglobal(script_lua_state_, "Video");
+
+    // Effect table — runtime-only API to drive Effects attribute playback.
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaEffectPlay, 1);
+    lua_setfield(script_lua_state_, -2, "Play");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaEffectStop, 1);
+    lua_setfield(script_lua_state_, -2, "Stop");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaEffectIsPlaying, 1);
+    lua_setfield(script_lua_state_, -2, "IsPlaying");
+    lua_setglobal(script_lua_state_, "Effect");
 
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
     script_last_tick_ms_ = now_ms;
@@ -6408,6 +6423,7 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         const std::uint64_t effects_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         const std::vector<RuntimeEffectsRenderer::QueuedEffect> queued_effects = BuildQueuedEffects(scene_metadata);
         VkImageLayout effects_output_layout = ray_tracing_.GetOutputLayout();
+        std::vector<std::string> completed_play_once_keys;
         std::string effects_error;
         if (!effects_renderer_.RenderEffects(
                 ray_tracing_.GetOutputImage(),
@@ -6421,9 +6437,27 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
                 camera_attribute.camera,
                 queued_effects,
                 effects_output_layout,
+                &completed_play_once_keys,
                 &effects_error))
         {
             SDL_Log("Runtime effects renderer failed: %s", effects_error.c_str());
+        }
+        // Reset play_mode to Stop for any PlayOnce effects that finished this frame
+        // so they can be re-triggered on the next Effect.Play() call.
+        for (const std::string& key : completed_play_once_keys)
+        {
+            const std::size_t hash_pos = key.rfind('#');
+            if (hash_pos == std::string::npos) { continue; }
+            const std::string obj_name = key.substr(0, hash_pos);
+            const std::size_t attr_idx = std::stoull(key.substr(hash_pos + 1));
+            for (SceneObjectMetadata& obj : cached_scene_metadata_.objects)
+            {
+                if (obj.name == obj_name && attr_idx < obj.attributes.size())
+                {
+                    obj.attributes[attr_idx].effects.play_mode = SceneObjectEffectsPlayMode::Stop;
+                    break;
+                }
+            }
         }
         ray_tracing_.SetOutputLayout(effects_output_layout);
         performance_stats_.render_time_ms += TicksToMilliseconds(

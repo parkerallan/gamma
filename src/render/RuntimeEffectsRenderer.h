@@ -48,6 +48,7 @@ public:
         const SceneObjectCameraAttributes& camera,
         const std::vector<QueuedEffect>& effects,
         VkImageLayout& out_layout,
+        std::vector<std::string>* out_completed_play_once_keys = nullptr,
         std::string* error_message = nullptr);
 
     bool IsAvailable() const;
@@ -96,6 +97,7 @@ private:
         std::filesystem::path path;
         SceneObjectEffectsPlayMode play_mode = SceneObjectEffectsPlayMode::Stop;
         bool play_once_started = false;
+        bool draining = false;  // StopRootEffect called; waiting for natural finish
     };
 
     Effekseer::FileInterfaceRef file_interface_;

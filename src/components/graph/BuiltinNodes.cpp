@@ -1395,6 +1395,18 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
         { PinIn("Name",  PinType::Object, "Cinematic"),
           PinIn("Muted", PinType::Bool,   "true") }));
 
+    const unsigned int effect_color = 0xff2f8a6fu;
+    reg.Register(MakeCallStatement("effect.Play", "Effect Play", "Effect", effect_color,
+        "Effect.Play({0})",
+        { PinIn("Name", PinType::Object, "EffectObject") }));
+    reg.Register(MakeCallStatement("effect.Stop", "Effect Stop", "Effect", effect_color,
+        "Effect.Stop({0})",
+        { PinIn("Name", PinType::Object, "EffectObject") }));
+    reg.Register(MakeCallExpression("effect.IsPlaying", "Effect Is Playing", "Effect", effect_color,
+        "Effect.IsPlaying({0})",
+        { PinIn("Name", PinType::Object, "EffectObject") },
+        PinType::Bool));
+
     // Attribute Set/Get nodes -----------------------------------------
     // ONE combined Set + ONE Get per attribute type. Every writable field of
     // the type is surfaced as a pin on the same node. Setter calls are only
@@ -1474,6 +1486,8 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
             {"Spatialize3D", AccessorKind::Bool}, {"Pitch", AccessorKind::Float},
             {"MinDistance", AccessorKind::Float}, {"MaxDistance", AccessorKind::Float},
             {"DopplerFactor", AccessorKind::Float} }},
+        {"EffectsAttr", {
+            {"EffectPath", AccessorKind::String}, {"PlayMode", AccessorKind::String} }},
         {"Animator", {
             {"ControllerPath", AccessorKind::String}, {"InitialState", AccessorKind::String},
             {"PlaybackSpeed", AccessorKind::Float}, {"AutoPlay", AccessorKind::Bool} }},
@@ -1606,40 +1620,39 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
         }
     }
 
-    // Animator specials (non-standard signatures) -----------------------
-    // Live alongside the combined Animator Set/Get under Attribute/Animator.
-    const std::string anim_cat = "Attribute/Animator";
-    reg.Register(MakeCallStatement("attr.Animator.SetBool", "Set Bool", anim_cat, attr_color,
+        // Animator runtime controls (non-attribute signatures) --------------
+        const std::string anim_cat = "Animator";
+        reg.Register(MakeCallStatement("animator.SetBool", "Set Bool", anim_cat, attr_color,
         "Engine.Animator.SetBool({0}, {1}, {2})",
         { PinIn("Name",      PinType::Object, "Target"),
           PinIn("Parameter", PinType::String, "moving"),
           PinIn("Value",     PinType::Bool,   "true") }));
-    reg.Register(MakeCallExpression("attr.Animator.GetBool", "Get Bool", anim_cat, attr_color,
+        reg.Register(MakeCallExpression("animator.GetBool", "Get Bool", anim_cat, attr_color,
         "Engine.Animator.GetBool({0}, {1})",
         { PinIn("Name",      PinType::Object, "Target"),
           PinIn("Parameter", PinType::String, "moving") },
         PinType::Bool));
-    reg.Register(MakeCallStatement("attr.Animator.SetTrigger", "Set Trigger", anim_cat, attr_color,
+        reg.Register(MakeCallStatement("animator.SetTrigger", "Set Trigger", anim_cat, attr_color,
         "Engine.Animator.SetTrigger({0}, {1})",
         { PinIn("Name",    PinType::Object, "Target"),
           PinIn("Trigger", PinType::String, "jump") }));
-    reg.Register(MakeCallStatement("attr.Animator.SetState", "Set State", anim_cat, attr_color,
+        reg.Register(MakeCallStatement("animator.SetState", "Set State", anim_cat, attr_color,
         "Engine.Animator.SetState({0}, {1})",
         { PinIn("Name",  PinType::Object, "Target"),
           PinIn("State", PinType::String, "Idle") }));
-    reg.Register(MakeCallExpression("attr.Animator.GetState", "Get State", anim_cat, attr_color,
+        reg.Register(MakeCallExpression("animator.GetState", "Get State", anim_cat, attr_color,
         "Engine.Animator.GetState({0})",
         { PinIn("Name", PinType::Object, "Target") },
         PinType::String));
-    reg.Register(MakeCallExpression("attr.Animator.StateTime", "State Time", anim_cat, attr_color,
+        reg.Register(MakeCallExpression("animator.StateTime", "State Time", anim_cat, attr_color,
         "Engine.Animator.StateTime({0})",
         { PinIn("Name", PinType::Object, "Target") },
         PinType::Number));
-    reg.Register(MakeCallStatement("attr.Animator.SetDefaultState", "Set Default State", anim_cat, attr_color,
+        reg.Register(MakeCallStatement("animator.SetDefaultState", "Set Default State", anim_cat, attr_color,
         "Engine.Animator.SetDefaultState({0}, {1})",
         { PinIn("Name",  PinType::Object, "Target"),
           PinIn("State", PinType::String, "Idle") }));
-    reg.Register(MakeCallExpression("attr.Animator.GetDefaultState", "Get Default State", anim_cat, attr_color,
+        reg.Register(MakeCallExpression("animator.GetDefaultState", "Get Default State", anim_cat, attr_color,
         "Engine.Animator.GetDefaultState({0})",
         { PinIn("Name", PinType::Object, "Target") },
         PinType::String));

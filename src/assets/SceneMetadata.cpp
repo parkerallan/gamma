@@ -2195,17 +2195,14 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         else if (StartsWith(trimmed, "AttributeEffectPlayMode:") && current_attribute != nullptr)
         {
             const std::string mode = TrimCopy(ExtractValue(trimmed, "AttributeEffectPlayMode:"));
-            if (mode == "Loop")
+            if (mode == "PlayOnce" || mode == "On")
             {
-                current_attribute->effects.play_mode = SceneObjectEffectsPlayMode::Loop;
-            }
-            else if (mode == "PlayOnce" || mode == "On")
-            {
-                current_attribute->effects.play_mode = SceneObjectEffectsPlayMode::PlayOnce;
+                current_attribute->effects.trigger_mode = SceneObjectEffectsPlayMode::PlayOnce;
             }
             else
             {
-                current_attribute->effects.play_mode = SceneObjectEffectsPlayMode::Stop;
+                // "Loop" and legacy "Stop" both default to Loop
+                current_attribute->effects.trigger_mode = SceneObjectEffectsPlayMode::Loop;
             }
         }
         else if (StartsWith(trimmed, "Model:"))
@@ -3270,9 +3267,7 @@ bool SetSceneObjectAttributeEffectsPath(const std::filesystem::path& scene_path,
 
 bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectEffectsPlayMode play_mode)
 {
-    const std::string value = (play_mode == SceneObjectEffectsPlayMode::Loop) ? "Loop"
-        : (play_mode == SceneObjectEffectsPlayMode::PlayOnce) ? "PlayOnce"
-        : "Stop";
+    const std::string value = (play_mode == SceneObjectEffectsPlayMode::PlayOnce) ? "PlayOnce" : "Loop";
     return SetSceneObjectAttributeStringValue("AttributeEffectPlayMode", scene_path, object_name, attribute_index, value);
 }
 

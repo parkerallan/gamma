@@ -142,8 +142,13 @@ Methods: `ClipPath(name[, path])`, `PlayMode(name[, value])`, `Volume(name[, val
 
 `Volume` is `0.0` (silent) to `1.0` (full) and is mapped through a perceptual cube-law curve so the slider/value feels uniform.
 
+#### `Engine.EffectsAttr`
+Methods: `EffectPath(name[, path])`, `PlayMode(name[, value])`
+
+`PlayMode` uses the strings `"Loop"` and `"PlayOnce"` for trigger behavior. Runtime play state is controlled through `Effect.Play(name)` and `Effect.Stop(name)`.
+
 #### `Engine.Animator`
-Methods (attribute accessors): `ControllerPath(name[, path])`, `InitialState(name[, stateName])`, `PlaybackSpeed(name[, value])`, `AutoPlay(name[, enabled])`, `SetDefaultState(name, stateName)`, `GetDefaultState(name)`
+Methods (attribute accessors): `ControllerPath(name[, path])`, `InitialState(name[, stateName])`, `PlaybackSpeed(name[, value])`, `AutoPlay(name[, enabled])`
 
 Example:
 
@@ -559,6 +564,43 @@ Notes:
 - All `Video.*` calls target the first `Video2D` attribute on the named object and return `false` if the object has no `Video2D` attribute.
 - Container/codec support: `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.mpg`, `.mpeg`, `.m4v` via FFmpeg (with optional D3D11VA/DXVA2 hardware decode).
 - Audio plays only while `PlayMode` is `"Loop"` or `"PlayOnce"`. `Muted` and `Volume` apply on top of `PlayMode`.
+
+---
+
+### `Effect`
+
+Runtime control over an object's **Effects** attribute (Effekseer particle effects).
+
+#### `Effect.Play(name)`
+
+Starts playback on the named object's `Effects` attribute. If `PlayMode` is currently `"Stop"`, it is switched to `"Loop"`. Has no effect if the effect is already playing. Returns `true` on success, `false` if the object has no `Effects` attribute.
+
+```lua
+Effect.Play("Explosion")
+```
+
+#### `Effect.Stop(name)`
+
+Stops playback on the named object's `Effects` attribute by setting `PlayMode` to `"Stop"`. Returns `true` on success.
+
+```lua
+Effect.Stop("Explosion")
+```
+
+#### `Effect.IsPlaying(name)`
+
+Returns `true` while the object's `Effects` attribute `PlayMode` is `"Loop"` or `"PlayOnce"`.
+
+```lua
+if Effect.IsPlaying("Explosion") then
+    -- still playing
+end
+```
+
+Notes:
+- All `Effect.*` calls target the first `Effects` attribute on the named object.
+- `Effect.Play` switches from `"Stop"` → `"Loop"`. To start a one-shot play use `Engine.EffectsAttr.PlayMode(name, "PlayOnce")` instead.
+- Use the `EffectsAttr` attribute accessor (`Engine.EffectsAttr.EffectPath`, `Engine.EffectsAttr.PlayMode`) for full read/write access to both fields.
 
 ## Callback Notes
 

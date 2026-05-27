@@ -1836,7 +1836,7 @@ bool RenderAttributeSection(
             }
 
             ImGui::TextUnformatted("Play Mode");
-            const SceneObjectEffectsPlayMode current_mode = attribute.effects.play_mode;
+            const SceneObjectEffectsPlayMode current_mode = attribute.effects.trigger_mode;
             auto effect_play_mode_radio = [&](const char* label, SceneObjectEffectsPlayMode mode)
             {
                 if (ImGui::RadioButton(label, current_mode == mode))
@@ -1847,8 +1847,6 @@ bool RenderAttributeSection(
                     }) || changed;
                 }
             };
-            effect_play_mode_radio("Stop", SceneObjectEffectsPlayMode::Stop);
-            ImGui::SameLine();
             effect_play_mode_radio("Loop", SceneObjectEffectsPlayMode::Loop);
             ImGui::SameLine();
             effect_play_mode_radio("Play Once", SceneObjectEffectsPlayMode::PlayOnce);

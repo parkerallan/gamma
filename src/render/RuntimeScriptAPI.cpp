@@ -1172,6 +1172,30 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         return access_bool(SceneObjectAttributeKind::Video2D,
             [](const SceneObjectAttribute& attribute) { return attribute.video_2d.muted; },
             [](SceneObjectAttribute& attribute, bool value) { attribute.video_2d.muted = value; });
+    case ScriptAttributeAccessorId::EffectsEffectPath:
+        return access_string(SceneObjectAttributeKind::Effects,
+            [](const SceneObjectAttribute& attribute) { return attribute.effects.effect_path; },
+            [](SceneObjectAttribute& attribute, const std::string& value) { attribute.effects.effect_path = value; });
+    case ScriptAttributeAccessorId::EffectsPlayMode:
+    {
+        if (!is_setter)
+        {
+            SceneObjectAttribute* const attr = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Effects);
+            if (attr == nullptr) { lua_pushnil(lua_state); return 1; }
+            const SceneObjectEffectsPlayMode mode = attr->effects.trigger_mode;
+            lua_pushstring(lua_state, (mode == SceneObjectEffectsPlayMode::PlayOnce) ? "PlayOnce" : "Loop");
+            return 1;
+        }
+        const char* mode_str = luaL_checkstring(lua_state, 2);
+        SceneObjectAttribute* const attr = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Effects);
+        if (attr == nullptr) { lua_pushnil(lua_state); return 1; }
+        attr->effects.trigger_mode = (std::strcmp(mode_str, "PlayOnce") == 0)
+            ? SceneObjectEffectsPlayMode::PlayOnce
+            : SceneObjectEffectsPlayMode::Loop;
+        renderer->HandleScriptAttributeMutation(SceneObjectAttributeKind::Effects, accessor_id);
+        lua_pushboolean(lua_state, 1);
+        return 1;
+    }
     default:
         return luaL_error(lua_state, "Unknown attribute accessor");
     }
@@ -2006,3 +2030,55 @@ int RuntimeRenderer::LuaVideoSetMuted(lua_State* lua_state)
     return 1;
 }
 
+int RuntimeRenderer::LuaEffectPlay(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Effects);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    // Use the editor-configured trigger_mode (Loop or PlayOnce) — never autostarts
+    attribute->effects.play_mode = attribute->effects.trigger_mode;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaEffectStop(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Effects);
+    if (attribute == nullptr)
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+    attribute->effects.play_mode = SceneObjectEffectsPlayMode::Stop;
+    lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaEffectIsPlaying(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* object_name = luaL_checkstring(lua_state, 1);
+    const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Effects);
+    const bool playing = attribute != nullptr && attribute->effects.play_mode != SceneObjectEffectsPlayMode::Stop;
+    lua_pushboolean(lua_state, playing ? 1 : 0);
+    return 1;
+}
