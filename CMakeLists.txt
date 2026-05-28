@@ -554,6 +554,7 @@ add_executable(engine
     src/render/Lighting.cpp
     src/render/Raytracing.cpp
     src/render/RuntimeRenderer.cpp
+    src/render/BoneModifiers.cpp
     src/render/RuntimeEffectsRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/render/PhysicsWorld.cpp
