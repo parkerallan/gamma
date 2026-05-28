@@ -5,6 +5,7 @@
 #include "backends/imgui_impl_vulkan.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -2706,6 +2707,13 @@ bool RayTracing::RenderFrame(
 {
     frame_submitted_last_call_ = false;
 
+    // Skin+BLAS-refit and TLAS build are recorded into closures here and
+    // replayed onto command_buffer_ below, avoiding two extra vkQueueSubmit
+    // + vkQueueWaitIdle round-trips per frame. Safe because render_fence_
+    // has already drained the previous frame at function entry.
+    std::function<void(VkCommandBuffer)> pre_render_record_skin_refit_;
+    std::function<void(VkCommandBuffer)> pre_render_record_tlas_;
+
     if (!available_ ||
         vulkan_context_ == nullptr ||
         output_image_ == VK_NULL_HANDLE ||
@@ -3058,101 +3066,95 @@ bool RayTracing::RenderFrame(
             const bool has_refits   = valid_count > 0;
             if (has_skinning || has_refits)
             {
-                const bool combined_succeeded = ExecuteImmediateCommands(*vulkan_context_, command_pool_, [&](VkCommandBuffer command_buffer)
+                // Move prep vectors into the closure; pGeometries /
+                // range_ptrs are re-anchored inside since the originals
+                // pointed into the now-moved-from locals.
+                pre_render_record_skin_refit_ = [
+                    has_skinning,
+                    has_refits,
+                    valid_count,
+                    skin_dispatches   = std::move(pending_skinning_dispatches_),
+                    geometries_local  = std::move(geometries),
+                    build_infos_local = std::move(build_infos),
+                    ranges_local      = std::move(ranges),
+                    barriers          = std::move(skinning_to_blas_barriers),
+                    rt_dispatch       = &vulkan_context_->GetRayTracingDispatch()
+                ](VkCommandBuffer cb) mutable
                 {
+                    // Re-anchor pointers into the captured copies.
+                    for (std::size_t i = 0; i < build_infos_local.size(); ++i)
+                    {
+                        build_infos_local[i].pGeometries = &geometries_local[i];
+                    }
+                    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> range_ptrs(ranges_local.size());
+                    for (std::size_t i = 0; i < ranges_local.size(); ++i)
+                    {
+                        range_ptrs[i] = &ranges_local[i];
+                    }
+
                     if (has_skinning)
                     {
                         VkPipeline last_pipeline = VK_NULL_HANDLE;
-                        VkPipelineLayout last_layout = VK_NULL_HANDLE;
-                        for (const PendingSkinningDispatch& dispatch : pending_skinning_dispatches_)
+                        for (const PendingSkinningDispatch& dispatch : skin_dispatches)
                         {
                             if (dispatch.pipeline != last_pipeline)
                             {
-                                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, dispatch.pipeline);
+                                vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, dispatch.pipeline);
                                 last_pipeline = dispatch.pipeline;
-                                last_layout = VK_NULL_HANDLE; // force re-bind below if needed
-                            }
-                            if (dispatch.pipeline_layout != last_layout)
-                            {
-                                last_layout = dispatch.pipeline_layout;
                             }
                             vkCmdBindDescriptorSets(
-                                command_buffer,
+                                cb,
                                 VK_PIPELINE_BIND_POINT_COMPUTE,
                                 dispatch.pipeline_layout,
-                                0,
-                                1,
-                                &dispatch.descriptor_set,
-                                0,
-                                nullptr);
-
+                                0, 1, &dispatch.descriptor_set,
+                                0, nullptr);
                             const std::uint32_t push[2] = {dispatch.vertex_count, dispatch.bone_count};
                             vkCmdPushConstants(
-                                command_buffer,
+                                cb,
                                 dispatch.pipeline_layout,
                                 VK_SHADER_STAGE_COMPUTE_BIT,
-                                0,
-                                sizeof(push),
-                                push);
-
-                            vkCmdDispatch(command_buffer, dispatch.group_count_x, 1, 1);
+                                0, sizeof(push), push);
+                            vkCmdDispatch(cb, dispatch.group_count_x, 1, 1);
                         }
-
-                        // Compute writes -> BLAS reads (and any other shader reads).
-                        if (!skinning_to_blas_barriers.empty())
+                        if (!barriers.empty())
                         {
                             vkCmdPipelineBarrier(
-                                command_buffer,
+                                cb,
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
                                     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                                 0,
-                                0,
-                                nullptr,
-                                static_cast<std::uint32_t>(skinning_to_blas_barriers.size()),
-                                skinning_to_blas_barriers.data(),
-                                0,
-                                nullptr);
+                                0, nullptr,
+                                static_cast<std::uint32_t>(barriers.size()),
+                                barriers.data(),
+                                0, nullptr);
                         }
                     }
 
                     if (has_refits)
                     {
-                        vulkan_context_->GetRayTracingDispatch().cmd_build_acceleration_structures(
-                            command_buffer,
+                        rt_dispatch->cmd_build_acceleration_structures(
+                            cb,
                             static_cast<std::uint32_t>(valid_count),
-                            build_infos.data(),
+                            build_infos_local.data(),
                             range_ptrs.data());
 
-                        // Make BLAS writes visible to the upcoming TLAS build.
                         VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
                         barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
                         barrier.dstAccessMask =
                             VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
                             VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
                         vkCmdPipelineBarrier(
-                            command_buffer,
+                            cb,
                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                             0,
-                            1,
-                            &barrier,
-                            0,
-                            nullptr,
-                            0,
-                            nullptr);
+                            1, &barrier,
+                            0, nullptr,
+                            0, nullptr);
                     }
-                });
-
-                if (!combined_succeeded)
-                {
-                    status_message_ = "Failed to record viewport RT skinning / BLAS update";
-                    pending_blas_refits_.clear();
-                    pending_skinning_dispatches_.clear();
-                    tlas_rebuild_pending_ = false;
-                    tlas_refit_pending_   = false;
-                    return false;
-                }
+                };
             }
             pending_blas_refits_.clear();
             pending_skinning_dispatches_.clear();
@@ -3166,43 +3168,52 @@ bool RayTracing::RenderFrame(
         {
             const std::uint32_t primitive_count =
                 static_cast<std::uint32_t>(pending_acceleration_instances_.size());
+            const VkBuildAccelerationStructureModeKHR tlas_mode =
+                (tlas_refit_pending_ && !tlas_rebuild_pending_)
+                    ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                    : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 
-            VkAccelerationStructureGeometryInstancesDataKHR instances_data = {
-                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
-            instances_data.data.deviceAddress = instance_buffer_.device_address;
-
-            VkAccelerationStructureGeometryKHR geometry = {
-                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-            geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-            geometry.geometry.instances = instances_data;
-
-            VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {
-                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-            build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-            build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                                        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-            build_geometry_info.geometryCount = 1;
-            build_geometry_info.pGeometries = &geometry;
-            if (tlas_refit_pending_ && !tlas_rebuild_pending_)
+            // Captured values are trivially-copyable device addresses /
+            // handles that outlive the frame.
+            pre_render_record_tlas_ = [
+                primitive_count,
+                tlas_mode,
+                tlas_handle   = top_level_as_.handle,
+                instance_addr = instance_buffer_.device_address,
+                scratch_addr  = tlas_scratch_buffer_.device_address,
+                rt_dispatch   = &vulkan_context_->GetRayTracingDispatch()
+            ](VkCommandBuffer cb)
             {
-                build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-                build_geometry_info.srcAccelerationStructure = top_level_as_.handle;
-            }
-            else
-            {
-                build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-            }
-            build_geometry_info.dstAccelerationStructure = top_level_as_.handle;
-            build_geometry_info.scratchData.deviceAddress = tlas_scratch_buffer_.device_address;
+                VkAccelerationStructureGeometryInstancesDataKHR instances_data = {
+                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+                instances_data.data.deviceAddress = instance_addr;
 
-            VkAccelerationStructureBuildRangeInfoKHR build_range = {};
-            build_range.primitiveCount = primitive_count;
-            const VkAccelerationStructureBuildRangeInfoKHR* build_range_ptr = &build_range;
+                VkAccelerationStructureGeometryKHR geometry = {
+                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+                geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+                geometry.geometry.instances = instances_data;
 
-            const bool build_succeeded = ExecuteImmediateCommands(*vulkan_context_, command_pool_, [&](VkCommandBuffer command_buffer)
-            {
-                vulkan_context_->GetRayTracingDispatch().cmd_build_acceleration_structures(
-                    command_buffer,
+                VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {
+                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+                build_geometry_info.type  = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+                build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                                            VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+                build_geometry_info.geometryCount = 1;
+                build_geometry_info.pGeometries   = &geometry;
+                build_geometry_info.mode          = tlas_mode;
+                if (tlas_mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR)
+                {
+                    build_geometry_info.srcAccelerationStructure = tlas_handle;
+                }
+                build_geometry_info.dstAccelerationStructure = tlas_handle;
+                build_geometry_info.scratchData.deviceAddress = scratch_addr;
+
+                VkAccelerationStructureBuildRangeInfoKHR build_range = {};
+                build_range.primitiveCount = primitive_count;
+                const VkAccelerationStructureBuildRangeInfoKHR* build_range_ptr = &build_range;
+
+                rt_dispatch->cmd_build_acceleration_structures(
+                    cb,
                     1,
                     &build_geometry_info,
                     &build_range_ptr);
@@ -3211,25 +3222,14 @@ bool RayTracing::RenderFrame(
                 barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
                 barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
                 vkCmdPipelineBarrier(
-                    command_buffer,
+                    cb,
                     VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                     VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                     0,
-                    1,
-                    &barrier,
-                    0,
-                    nullptr,
-                    0,
-                    nullptr);
-            });
-
-            if (!build_succeeded)
-            {
-                status_message_ = "Failed to build viewport RT top-level acceleration structure";
-                tlas_rebuild_pending_ = false;
-                tlas_refit_pending_ = false;
-                return false;
-            }
+                    1, &barrier,
+                    0, nullptr,
+                    0, nullptr);
+            };
         }
 
     tlas_rebuild_pending_ = false;
@@ -3255,6 +3255,16 @@ bool RayTracing::RenderFrame(
     {
         vkCmdResetQueryPool(command_buffer_, timestamp_pool_, 0, 2);
         vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_pool_, 0);
+    }
+
+    // Replay the deferred skin+BLAS-refit and TLAS-build recordings.
+    if (pre_render_record_skin_refit_)
+    {
+        pre_render_record_skin_refit_(command_buffer_);
+    }
+    if (pre_render_record_tlas_)
+    {
+        pre_render_record_tlas_(command_buffer_);
     }
 
     auto finalize_and_submit = [&]() -> bool

@@ -20,6 +20,7 @@ extern "C"
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -2048,6 +2049,7 @@ bool SampleClipBoneMatricesWithPhysics(
     {
         return false;
     }
+
     // Tolerate a missing/empty clip: when the controller has bone modifiers
     // but the active state doesn't reference an animation, fall back to the
     // bind pose so jiggle still runs (driven purely by object world-matrix
@@ -2086,7 +2088,8 @@ bool SampleClipBoneMatricesWithPhysics(
     }
 
     std::unordered_map<const aiNode*, NodeWorldRecord> world_by_node;
-    world_by_node.reserve(128);
+    // Skeletons here are ~600 nodes; pre-reserve to avoid per-frame rehash.
+    world_by_node.reserve(1024);
     EvaluateAnimationHierarchyWithWorldByPtr(
         animation,
         animation_time,
@@ -2182,21 +2185,34 @@ bool SampleClipBoneMatricesWithPhysics(
         };
     };
 
-    // Per-bone simulation: spring in world space, then apply as a pivot
-    // rotation around the parent so descendants ride with the bone. Each
-    // descendant in the chain will get its own simulate_bone call after
-    // this one, adding its own lag on top.
-    auto simulate_bone = [&](const aiNode* bone_node, const AnimatorBoneModifier& m) {
+    // Result of simulate_bone, used to drive how the modifier DFS treats
+    // descendants:
+    //   Normal        : bake own_delta; pass own_delta*parent_delta to children.
+    //   EdgeTranslate : no-parent edge case already mutated world_by_node;
+    //                   do not re-bake, reset child parent_delta to identity.
+    //   Skip          : nothing applied; descendants inherit parent_delta.
+    enum class SimulateBoneResult { Normal, EdgeTranslate, Skip };
+
+    // Spring in world space, then compute a pivot rotation around the parent.
+    // Does not mutate world_by_node for the common case: returns the delta
+    // via out_own_delta, the modifier walk accumulates it down the chain,
+    // and one post-walk pass bakes each bone. Collapses the old O(N^2)
+    // per-chain subtree-rotation loop to O(N).
+    auto simulate_bone = [&](const aiNode* bone_node, const AnimatorBoneModifier& m,
+                              const aiMatrix4x4& parent_delta, aiMatrix4x4& out_own_delta)
+        -> SimulateBoneResult {
+        out_own_delta = aiMatrix4x4();  // identity
         auto wit = world_by_node.find(bone_node);
-        if (wit == world_by_node.end()) { return; }
+        if (wit == world_by_node.end()) { return SimulateBoneResult::Skip; }
         RuntimeRenderer::JiggleSimEntry* sp = get_or_create_state(bone_node);
-        if (sp == nullptr) { return; }
+        if (sp == nullptr) { return SimulateBoneResult::Skip; }
         RuntimeRenderer::JiggleSimEntry& s = *sp;
 
-        const aiMatrix4x4& bone_model = wit->second.world;
-        const float mx = bone_model.a4;
-        const float my = bone_model.b4;
-        const float mz = bone_model.c4;
+        // Apply ancestor delta so this bone sees its corrected world position.
+        const aiMatrix4x4 corrected_bone = parent_delta * wit->second.world;
+        const float mx = corrected_bone.a4;
+        const float my = corrected_bone.b4;
+        const float mz = corrected_bone.c4;
         const auto target_world = model_point_to_world(mx, my, mz);
         const float tx = target_world[0];
         const float ty = target_world[1];
@@ -2207,7 +2223,7 @@ bool SampleClipBoneMatricesWithPhysics(
             s.sim_pos = {tx, ty, tz};
             s.sim_vel = {0.0f, 0.0f, 0.0f};
             s.initialized = true;
-            return;
+            return SimulateBoneResult::Skip;
         }
 
         const float strength = std::clamp(m.strength, 0.0f, 2.0f);
@@ -2239,14 +2255,16 @@ bool SampleClipBoneMatricesWithPhysics(
                 s.sim_pos[a] += s.sim_vel[a] * dt;
             }
 
-            // Cone limit relative to parent.
+            // Cone limit relative to parent. Parent's corrected world =
+            // parent_delta * world[parent] -- equivalent to the old eager
+            // mutation having already run for ancestors in the chain.
             if (m.angle_limit_deg < 179.5f && wit->second.parent != nullptr)
             {
                 auto pit = world_by_node.find(wit->second.parent);
                 if (pit != world_by_node.end())
                 {
-                    const aiMatrix4x4& pw_model = pit->second.world;
-                    const auto pw = model_point_to_world(pw_model.a4, pw_model.b4, pw_model.c4);
+                    const aiMatrix4x4 corrected_parent = parent_delta * pit->second.world;
+                    const auto pw = model_point_to_world(corrected_parent.a4, corrected_parent.b4, corrected_parent.c4);
                     std::array<float, 3> ad{tx - pw[0], ty - pw[1], tz - pw[2]};
                     std::array<float, 3> sd{s.sim_pos[0] - pw[0], s.sim_pos[1] - pw[1], s.sim_pos[2] - pw[2]};
                     const float al = std::sqrt(ad[0] * ad[0] + ad[1] * ad[1] + ad[2] * ad[2]);
@@ -2295,8 +2313,8 @@ bool SampleClipBoneMatricesWithPhysics(
             auto pit_len = world_by_node.find(wit->second.parent);
             if (pit_len != world_by_node.end())
             {
-                const aiMatrix4x4& pw_m = pit_len->second.world;
-                const auto pw_w = model_point_to_world(pw_m.a4, pw_m.b4, pw_m.c4);
+                const aiMatrix4x4 corrected_pl = parent_delta * pit_len->second.world;
+                const auto pw_w = model_point_to_world(corrected_pl.a4, corrected_pl.b4, corrected_pl.c4);
                 const float dxl = tx - pw_w[0];
                 const float dyl = ty - pw_w[1];
                 const float dzl = tz - pw_w[2];
@@ -2333,18 +2351,25 @@ bool SampleClipBoneMatricesWithPhysics(
         const float wdy = oy * strength;
         const float wdz = oz * strength;
         const auto md = world_vec_to_model(wdx, wdy, wdz);
-        if (md[0] == 0.0f && md[1] == 0.0f && md[2] == 0.0f) { return; }
+        if (md[0] == 0.0f && md[1] == 0.0f && md[2] == 0.0f) { return SimulateBoneResult::Skip; }
 
         auto pit_apply = world_by_node.find(wit->second.parent);
         if (pit_apply == world_by_node.end())
         {
+            // No parent in world_by_node (modifier root attached at/near the
+            // scene root). Old algorithm mutated only this bone's world
+            // matrix in place and did NOT touch descendants' world matrices
+            // -- descendants saw the shifted parent via their own world_by_node
+            // lookup. Preserve that exactly by mutating eagerly here AND
+            // signalling EdgeTranslate so the modifier walk skips an extra
+            // bake and resets child parent_delta to identity.
             wit->second.world.a4 += md[0];
             wit->second.world.b4 += md[1];
             wit->second.world.c4 += md[2];
-            return;
+            return SimulateBoneResult::EdgeTranslate;
         }
-        const aiMatrix4x4& pw_model = pit_apply->second.world;
-        const std::array<float, 3> ppos{pw_model.a4, pw_model.b4, pw_model.c4};
+        const aiMatrix4x4 corrected_parent_apply = parent_delta * pit_apply->second.world;
+        const std::array<float, 3> ppos{corrected_parent_apply.a4, corrected_parent_apply.b4, corrected_parent_apply.c4};
         const std::array<float, 3> anim_v{mx - ppos[0], my - ppos[1], mz - ppos[2]};
         const std::array<float, 3> new_v{
             mx + md[0] - ppos[0],
@@ -2353,19 +2378,19 @@ bool SampleClipBoneMatricesWithPhysics(
         };
         const float anim_len = std::sqrt(anim_v[0] * anim_v[0] + anim_v[1] * anim_v[1] + anim_v[2] * anim_v[2]);
         const float new_len = std::sqrt(new_v[0] * new_v[0] + new_v[1] * new_v[1] + new_v[2] * new_v[2]);
-        if (anim_len <= 1e-5f || new_len <= 1e-5f) { return; }
+        if (anim_len <= 1e-5f || new_len <= 1e-5f) { return SimulateBoneResult::Skip; }
         const std::array<float, 3> an{anim_v[0] / anim_len, anim_v[1] / anim_len, anim_v[2] / anim_len};
         const std::array<float, 3> nn{new_v[0] / new_len, new_v[1] / new_len, new_v[2] / new_len};
         const float cos_a = std::clamp(an[0] * nn[0] + an[1] * nn[1] + an[2] * nn[2], -1.0f, 1.0f);
         const float angle = std::acos(cos_a);
-        if (angle <= 1e-5f) { return; }
+        if (angle <= 1e-5f) { return SimulateBoneResult::Skip; }
         std::array<float, 3> axis{
             an[1] * nn[2] - an[2] * nn[1],
             an[2] * nn[0] - an[0] * nn[2],
             an[0] * nn[1] - an[1] * nn[0],
         };
         float axis_len = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
-        if (axis_len <= 1e-6f) { return; }
+        if (axis_len <= 1e-6f) { return SimulateBoneResult::Skip; }
         axis[0] /= axis_len; axis[1] /= axis_len; axis[2] /= axis_len;
         const float c = std::cos(angle);
         const float si = std::sin(angle);
@@ -2386,56 +2411,96 @@ bool SampleClipBoneMatricesWithPhysics(
         R.d1 = 0.0f; R.d2 = 0.0f; R.d3 = 0.0f; R.d4 = 1.0f;
         aiMatrix4x4 t_neg; t_neg.a4 = -ppos[0]; t_neg.b4 = -ppos[1]; t_neg.c4 = -ppos[2];
         aiMatrix4x4 t_pos; t_pos.a4 =  ppos[0]; t_pos.b4 =  ppos[1]; t_pos.c4 =  ppos[2];
-        const aiMatrix4x4 delta = t_pos * R * t_neg;
-        // Rotate the bone AND every descendant so the subtree stays attached
-        // for this step. Each descendant then gets its own simulate_bone call
-        // next in the depth-first walk, adding its own lag on top. Uses an
-        // iterative stack to avoid std::function heap allocations.
-        thread_local std::vector<const aiNode*> rotate_stack;
-        rotate_stack.clear();
-        rotate_stack.push_back(bone_node);
-        while (!rotate_stack.empty())
-        {
-            const aiNode* n = rotate_stack.back();
-            rotate_stack.pop_back();
-            auto it = world_by_node.find(n);
-            if (it != world_by_node.end())
-            {
-                it->second.world = delta * it->second.world;
-            }
-            for (unsigned int c2 = 0; c2 < n->mNumChildren; ++c2)
-            {
-                rotate_stack.push_back(n->mChildren[c2]);
-            }
-        }
+        // Return the pivot rotation as this bone's own delta. The caller
+        // bakes it into world_by_node once after the whole modifier DFS
+        // finishes, and threads (own_delta * parent_delta) to descendants
+        // so each child reads its corrected parent world through its own
+        // parent_delta -- mathematically identical to the old per-bone
+        // subtree-rotation walk, but O(N) per modifier instead of O(N^2).
+        out_own_delta = t_pos * R * t_neg;
+        return SimulateBoneResult::Normal;
     };
 
     // Process each tagged modifier. When affects_children is set, walk the
-    // chain depth-first so each child springs against its already-simulated
-    // parent — this is what produces a wave-like sway down the chain instead
-    // of a rigid swing. Iterative DFS to avoid std::function allocations.
-    thread_local std::vector<const aiNode*> walk_stack;
+    // chain depth-first, threading parent_delta (the accumulated transform
+    // of all chain-ancestors) through the DFS. Each bone gets its own
+    // simulate_bone call which sees its corrected world position via
+    // parent_delta. After the walk we bake every bone's accumulated
+    // transform into world_by_node in a single pass -- one matrix multiply
+    // per chain bone, instead of the previous O(N^2) per-bone subtree
+    // rotation. Visual result is mathematically identical.
+    struct ModifierBakeEntry { const aiNode* node; aiMatrix4x4 bake; };
+    struct ModifierWalkFrame { const aiNode* node; aiMatrix4x4 parent_delta; };
+    thread_local std::vector<ModifierWalkFrame> walk_stack;
+    thread_local std::vector<ModifierBakeEntry> walk_bakes;
+    const aiMatrix4x4 kIdentityDelta;
     for (const AnimatorBoneModifier& m : modifiers)
     {
         if (m.bone_name.empty() || m.strength <= 0.0001f) { continue; }
         const aiNode* root = anim_cache_entry.scene->mRootNode->FindNode(m.bone_name.c_str());
         if (root == nullptr) { continue; }
 
+        walk_bakes.clear();
+
         if (!m.affects_children)
         {
-            simulate_bone(root, m);
-            continue;
-        }
-        walk_stack.clear();
-        walk_stack.push_back(root);
-        while (!walk_stack.empty())
-        {
-            const aiNode* n = walk_stack.back();
-            walk_stack.pop_back();
-            simulate_bone(n, m);
-            for (unsigned int c = 0; c < n->mNumChildren; ++c)
+            aiMatrix4x4 own_delta;
+            const SimulateBoneResult r = simulate_bone(root, m, kIdentityDelta, own_delta);
+            if (r == SimulateBoneResult::Normal)
             {
-                walk_stack.push_back(n->mChildren[c]);
+                walk_bakes.push_back({root, own_delta});
+            }
+            // EdgeTranslate eagerly mutated world_by_node already; Skip did
+            // nothing. Neither needs a bake entry.
+        }
+        else
+        {
+            walk_stack.clear();
+            walk_stack.push_back({root, kIdentityDelta});
+            while (!walk_stack.empty())
+            {
+                const ModifierWalkFrame frame = walk_stack.back();
+                walk_stack.pop_back();
+                aiMatrix4x4 own_delta;
+                const SimulateBoneResult r = simulate_bone(frame.node, m, frame.parent_delta, own_delta);
+                aiMatrix4x4 child_accum;
+                switch (r)
+                {
+                    case SimulateBoneResult::Normal:
+                        child_accum = own_delta * frame.parent_delta;
+                        walk_bakes.push_back({frame.node, child_accum});
+                        break;
+                    case SimulateBoneResult::EdgeTranslate:
+                        // Old algorithm's no-parent path did not propagate
+                        // translation to descendants (their world matrices
+                        // were untouched by the subtree-rotate pass, since
+                        // that pass was skipped). Reset child accumulator
+                        // to identity; descendants will read the eagerly-
+                        // mutated parent via their own world_by_node lookup.
+                        child_accum = aiMatrix4x4();
+                        break;
+                    case SimulateBoneResult::Skip:
+                    default:
+                        // Nothing applied at this bone; descendants inherit
+                        // the ancestor accumulation unchanged.
+                        child_accum = frame.parent_delta;
+                        break;
+                }
+                for (unsigned int c = 0; c < frame.node->mNumChildren; ++c)
+                {
+                    walk_stack.push_back({frame.node->mChildren[c], child_accum});
+                }
+            }
+        }
+
+        // Bake each chain bone's accumulated transform into world_by_node
+        // exactly once: world[n] := bake * world[n].
+        for (const ModifierBakeEntry& be : walk_bakes)
+        {
+            auto it = world_by_node.find(be.node);
+            if (it != world_by_node.end())
+            {
+                it->second.world = be.bake * it->second.world;
             }
         }
     }
@@ -2477,14 +2542,21 @@ bool SampleClipBoneMatricesWithPhysics(
 
     // Emit final bone matrices from the (possibly modified) world transforms.
     out_bone_matrices.assign(anim_cache_entry.bone_offsets.size(), aiMatrix4x4());
-    for (const auto& kv : world_by_node)
+    // Iterate the bone set (small) rather than all world_by_node entries.
+    for (const auto& kv : anim_cache_entry.bone_index_by_node)
     {
-        const aiNode* node = kv.first;
-        const auto bit = anim_cache_entry.bone_index_by_node.find(node);
-        if (bit != anim_cache_entry.bone_index_by_node.end() && bit->second < out_bone_matrices.size())
+        const std::size_t bone_index = kv.second;
+        if (bone_index >= out_bone_matrices.size())
         {
-            out_bone_matrices[bit->second] = anim_cache_entry.global_inverse * kv.second.world * anim_cache_entry.bone_offsets[bit->second];
+            continue;
         }
+        const auto wit = world_by_node.find(kv.first);
+        if (wit == world_by_node.end())
+        {
+            continue;
+        }
+        out_bone_matrices[bone_index] =
+            anim_cache_entry.global_inverse * wit->second.world * anim_cache_entry.bone_offsets[bone_index];
     }
     return true;
 }
@@ -3662,20 +3734,51 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     }
 
-    if (!CreateVulkanBuffer(
-            *vulkan_context_,
-            static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex)),
-            vertex_usage,
+    vertex_usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    index_usage  |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    const VkDeviceSize vertex_size = static_cast<VkDeviceSize>(vertices.size() * sizeof(SceneGpuVertex));
+    const VkDeviceSize index_size  = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+
+    GpuBuffer stage_vertex{}, stage_index{};
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* alloc = vulkan_context_->GetAllocator();
+    const VkCommandPool upload_pool = ray_tracing_.GetCommandPool();
+
+    const bool upload_ok =
+        CreateVulkanBuffer(*vulkan_context_, vertex_size, vertex_usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, cache_entry.vertex_buffer) &&
+        CreateVulkanBuffer(*vulkan_context_, index_size, index_usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, cache_entry.index_buffer) &&
+        CreateVulkanBuffer(*vulkan_context_, vertex_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            cache_entry.vertex_buffer) ||
-        !CreateVulkanBuffer(
-            *vulkan_context_,
-            static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t)),
-            index_usage,
+            stage_vertex) &&
+        CreateVulkanBuffer(*vulkan_context_, index_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            cache_entry.index_buffer) ||
-        !UploadBufferData(vulkan_context_->GetDevice(), cache_entry.vertex_buffer, vertices.data(), vertices.size() * sizeof(SceneGpuVertex)) ||
-        !UploadBufferData(vulkan_context_->GetDevice(), cache_entry.index_buffer, indices.data(), indices.size() * sizeof(std::uint32_t)))
+            stage_index) &&
+        UploadBufferData(device, stage_vertex, vertices.data(), static_cast<std::size_t>(vertex_size)) &&
+        UploadBufferData(device, stage_index, indices.data(), static_cast<std::size_t>(index_size)) &&
+        upload_pool != VK_NULL_HANDLE &&
+        ExecuteImmediateCommands(device, upload_pool, vulkan_context_->GetQueue(),
+            [&](VkCommandBuffer cb)
+            {
+                VkBufferCopy c{};
+                c.size = vertex_size;
+                vkCmdCopyBuffer(cb, stage_vertex.buffer, cache_entry.vertex_buffer.buffer, 1, &c);
+                c.size = index_size;
+                vkCmdCopyBuffer(cb, stage_index.buffer, cache_entry.index_buffer.buffer, 1, &c);
+            });
+
+    auto release_stage = [&](GpuBuffer& b)
+    {
+        if (b.memory != VK_NULL_HANDLE) vkFreeMemory(device, b.memory, alloc);
+        if (b.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, b.buffer, alloc);
+        b = GpuBuffer{};
+    };
+    release_stage(stage_vertex);
+    release_stage(stage_index);
+
+    if (!upload_ok)
     {
         ReleaseMeshCacheEntry(cache_entry);
         return false;
@@ -6823,12 +6926,12 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
 
                     const bool buffers_ok =
                         CreateVulkanBuffer(*vulkan_context_, bind_size,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             resources.bind_pose_buffer) &&
                         CreateVulkanBuffer(*vulkan_context_, inf_size,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             resources.influence_buffer) &&
                         CreateVulkanBuffer(*vulkan_context_, palette_size,
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -6836,8 +6939,9 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                             resources.palette_buffer) &&
                         CreateVulkanBuffer(*vulkan_context_, prev_pos_size,
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             resources.prev_position_buffer);
 
                     // Seed the prev-position buffer with the bind-pose positions
@@ -6854,14 +6958,79 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                             prev_pose_seed[v * 3u + 2u] = src.position[2];
                         }
                     }
-                    bool uploaded_static =
-                        buffers_ok &&
-                        UploadBufferData(vulkan_context_->GetDevice(), resources.bind_pose_buffer,
-                            bind_pose_vertices.data(), static_cast<std::size_t>(bind_size)) &&
-                        UploadBufferData(vulkan_context_->GetDevice(), resources.influence_buffer,
-                            influence_storage.data(), static_cast<std::size_t>(inf_size)) &&
-                        UploadBufferData(vulkan_context_->GetDevice(), resources.prev_position_buffer,
-                            prev_pose_seed.data(), static_cast<std::size_t>(prev_pos_size));
+                    bool uploaded_static = buffers_ok;
+                    if (uploaded_static)
+                    {
+                        // Stage all 3 skinning buffers through one immediate
+                        // submit. DEVICE_LOCAL is required: the compute
+                        // shader reads these every frame and HOST_VISIBLE
+                        // pinned skinning at ~8ms across PCIe.
+                        const VkDevice device = vulkan_context_->GetDevice();
+                        const VkAllocationCallbacks* alloc = vulkan_context_->GetAllocator();
+                        const VkCommandPool upload_pool = ray_tracing_.GetCommandPool();
+
+                        GpuBuffer stage_bind{}, stage_inf{}, stage_prev{};
+                        const bool staging_ok =
+                            CreateVulkanBuffer(*vulkan_context_, bind_size,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                stage_bind) &&
+                            CreateVulkanBuffer(*vulkan_context_, inf_size,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                stage_inf) &&
+                            CreateVulkanBuffer(*vulkan_context_, prev_pos_size,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                stage_prev) &&
+                            UploadBufferData(device, stage_bind,
+                                bind_pose_vertices.data(), static_cast<std::size_t>(bind_size)) &&
+                            UploadBufferData(device, stage_inf,
+                                influence_storage.data(), static_cast<std::size_t>(inf_size)) &&
+                            UploadBufferData(device, stage_prev,
+                                prev_pose_seed.data(), static_cast<std::size_t>(prev_pos_size));
+
+                        if (staging_ok && upload_pool != VK_NULL_HANDLE)
+                        {
+                            uploaded_static = ExecuteImmediateCommands(
+                                device, upload_pool, vulkan_context_->GetQueue(),
+                                [&](VkCommandBuffer cb)
+                                {
+                                    VkBufferCopy c{};
+                                    c.size = bind_size;
+                                    vkCmdCopyBuffer(cb, stage_bind.buffer,
+                                                    resources.bind_pose_buffer.buffer, 1, &c);
+                                    c.size = inf_size;
+                                    vkCmdCopyBuffer(cb, stage_inf.buffer,
+                                                    resources.influence_buffer.buffer, 1, &c);
+                                    c.size = prev_pos_size;
+                                    vkCmdCopyBuffer(cb, stage_prev.buffer,
+                                                    resources.prev_position_buffer.buffer, 1, &c);
+                                });
+                        }
+                        else
+                        {
+                            uploaded_static = false;
+                        }
+
+                        // Free staging now that the immediate submit's
+                        // wait has guaranteed the copy is done.
+                        auto release_stage = [&](GpuBuffer& b)
+                        {
+                            if (b.memory != VK_NULL_HANDLE)
+                            {
+                                vkFreeMemory(device, b.memory, alloc);
+                            }
+                            if (b.buffer != VK_NULL_HANDLE)
+                            {
+                                vkDestroyBuffer(device, b.buffer, alloc);
+                            }
+                            b = GpuBuffer{};
+                        };
+                        release_stage(stage_bind);
+                        release_stage(stage_inf);
+                        release_stage(stage_prev);
+                    }
 
                     VkDescriptorSet desc_set = VK_NULL_HANDLE;
                     if (uploaded_static)
