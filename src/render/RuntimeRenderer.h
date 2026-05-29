@@ -208,6 +208,7 @@ public:
         SceneVector3 position = {0.0f, 0.0f, 0.0f};
         SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
         SceneVector3 scale = {1.0f, 1.0f, 1.0f};
+        std::vector<std::string> tags;
     };
 
     struct ScriptTimer
@@ -443,6 +444,11 @@ private:
     static int LuaWorldExists(lua_State* lua_state);
     static int LuaWorldGetAll(lua_State* lua_state);
     static int LuaWorldFindByPrefix(lua_State* lua_state);
+    static int LuaWorldFindByTag(lua_State* lua_state);
+    static int LuaGetObjectTags(lua_State* lua_state);
+    static int LuaObjectHasTag(lua_State* lua_state);
+    static int LuaAddObjectTag(lua_State* lua_state);
+    static int LuaRemoveObjectTag(lua_State* lua_state);
     static int LuaWorldGetCollisions(lua_State* lua_state);
     static int LuaWorldGetCollisionsFor(lua_State* lua_state);
     static int LuaWorldGetCollisionsByPhase(lua_State* lua_state);

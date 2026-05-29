@@ -1060,6 +1060,30 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
         "World.LoadScene({0})",
         { PinIn("Scene", PinType::String, "Level2") }));
 
+    // Tags --------------------------------------------------------------
+    const unsigned int tag_color = 0xff4a9a7au;
+    reg.Register(MakeCallExpression("tag.FindByTag", "Find By Tag", "Tag", tag_color,
+        "World.FindByTag({0})",
+        { PinIn("Tag", PinType::String, "Enemy") },
+        PinType::Any, "Names"));
+    reg.Register(MakeCallExpression("tag.GetObjectTags", "Get Object Tags", "Tag", tag_color,
+        "World.GetObjectTags({0})",
+        { PinIn("Name", PinType::Object, "Target") },
+        PinType::Any, "Tags"));
+    reg.Register(MakeCallExpression("tag.ObjectHasTag", "Object Has Tag", "Tag", tag_color,
+        "World.ObjectHasTag({0}, {1})",
+        { PinIn("Name", PinType::Object, "Target"),
+          PinIn("Tag",  PinType::String, "Enemy") },
+        PinType::Bool));
+    reg.Register(MakeCallStatement("tag.AddObjectTag", "Add Object Tag", "Tag", tag_color,
+        "World.AddObjectTag({0}, {1})",
+        { PinIn("Name", PinType::Object, "Target"),
+          PinIn("Tag",  PinType::String, "Enemy") }));
+    reg.Register(MakeCallStatement("tag.RemoveObjectTag", "Remove Object Tag", "Tag", tag_color,
+        "World.RemoveObjectTag({0}, {1})",
+        { PinIn("Name", PinType::Object, "Target"),
+          PinIn("Tag",  PinType::String, "Enemy") }));
+
     // Timers ------------------------------------------------------------
     // Helper used by SetTimeout/SetInterval emit() to wrap the downstream
     // exec branch in a Lua closure while keeping the closure's data-node

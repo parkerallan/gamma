@@ -368,6 +368,49 @@ Quick summary: Returns object names that start with the prefix.
 local enemies = World.FindByPrefix("Enemy_")
 ```
 
+#### `World.FindByTag(tag)`
+Quick summary: Returns the names of all enabled, non-destroyed objects that carry the given tag.
+
+```lua
+local enemies = World.FindByTag("Enemy")
+for i, name in ipairs(enemies) do
+    Engine.Log(name)
+end
+```
+
+#### `World.GetObjectTags(objectName)`
+Quick summary: Returns the array of tags currently assigned to the object (empty table if none / not found).
+
+```lua
+local tags = World.GetObjectTags("Player")
+```
+
+#### `World.ObjectHasTag(objectName, tag)`
+Quick summary: Returns true if the object carries the given tag.
+
+```lua
+if World.ObjectHasTag("Player", "Invincible") then ... end
+```
+
+#### `World.AddObjectTag(objectName, tag)`
+Quick summary: Adds a tag to the runtime view of the object. Returns true if the tag was added.
+
+```lua
+World.AddObjectTag("Enemy_01", "Stunned")
+```
+
+#### `World.RemoveObjectTag(objectName, tag)`
+Quick summary: Removes a tag from the runtime view of the object. Returns true if a tag was removed.
+
+```lua
+World.RemoveObjectTag("Enemy_01", "Stunned")
+```
+
+##### Tag notes
+- Tags are defined per-object in the scene file and shared in a project-wide registry stored in the `.engineproj` manifest (`projectTags`).
+- Runtime tag changes via `AddObjectTag` / `RemoveObjectTag` are not persisted; they reset when Play stops or the scene reloads.
+- Tag matching is case-sensitive and exact.
+
 #### `World.GetCollisions([objectName], [phase])`
 Quick summary: Returns collision events for the current frame, optionally filtered.
 

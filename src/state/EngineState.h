@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -160,6 +161,9 @@ struct EngineState
     bool graph_reload_requested = false;
     std::vector<std::string> log_messages;
     std::vector<std::filesystem::path> recent_projects;
+    std::vector<std::string> project_tags;
+    mutable std::vector<std::string> sorted_project_tags_cache_;
+    mutable bool sorted_project_tags_dirty_ = true;
 
     void AddLog(const std::string& message)
     {
@@ -349,6 +353,8 @@ struct EngineState
         build_target_platform = EngineBuildPlatform::Windows;
         build_output_root.clear();
         build_app_icon_path.clear();
+        project_tags.clear();
+        sorted_project_tags_dirty_ = true;
         auto_open_startup_scene = true;
         confirm_before_delete = true;
         highlight_drop_targets = true;
@@ -727,6 +733,116 @@ struct EngineState
         value.erase(std::remove(value.begin(), value.end(), '\r'), value.end());
         value.erase(std::remove(value.begin(), value.end(), '\n'), value.end());
         return value;
+    }
+
+    static std::string TrimProjectTagInternal(std::string value)
+    {
+        value.erase(std::remove(value.begin(), value.end(), ','), value.end());
+        value.erase(std::remove(value.begin(), value.end(), '"'), value.end());
+        value.erase(std::remove(value.begin(), value.end(), '\r'), value.end());
+        value.erase(std::remove(value.begin(), value.end(), '\n'), value.end());
+        const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+        value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+        value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+        return value;
+    }
+
+    const std::vector<std::string>& GetSortedProjectTags() const
+    {
+        if (sorted_project_tags_dirty_)
+        {
+            sorted_project_tags_cache_ = project_tags;
+            std::sort(sorted_project_tags_cache_.begin(), sorted_project_tags_cache_.end(),
+                [](const std::string& a, const std::string& b)
+                {
+                    const std::size_t n = std::min(a.size(), b.size());
+                    for (std::size_t i = 0; i < n; ++i)
+                    {
+                        const int ca = std::tolower(static_cast<unsigned char>(a[i]));
+                        const int cb = std::tolower(static_cast<unsigned char>(b[i]));
+                        if (ca != cb)
+                        {
+                            return ca < cb;
+                        }
+                    }
+                    return a.size() < b.size();
+                });
+            sorted_project_tags_dirty_ = false;
+        }
+        return sorted_project_tags_cache_;
+    }
+
+    bool RegisterProjectTag(const std::string& tag)
+    {
+        const std::string sanitized = TrimProjectTagInternal(tag);
+        if (sanitized.empty())
+        {
+            return false;
+        }
+        if (std::find(project_tags.begin(), project_tags.end(), sanitized) != project_tags.end())
+        {
+            return false;
+        }
+        project_tags.push_back(sanitized);
+        sorted_project_tags_dirty_ = true;
+        SaveProjectTagsToManifest();
+        return true;
+    }
+
+    bool RemoveProjectTagFromRegistry(const std::string& tag)
+    {
+        const std::string sanitized = TrimProjectTagInternal(tag);
+        if (sanitized.empty())
+        {
+            return false;
+        }
+        const auto it = std::find(project_tags.begin(), project_tags.end(), sanitized);
+        if (it == project_tags.end())
+        {
+            return false;
+        }
+        project_tags.erase(it);
+        sorted_project_tags_dirty_ = true;
+        SaveProjectTagsToManifest();
+        return true;
+    }
+
+    bool SaveProjectTagsToManifest()
+    {
+        if (project_file_path.empty())
+        {
+            return false;
+        }
+        std::ifstream input(project_file_path, std::ios::binary);
+        if (!input.is_open())
+        {
+            return false;
+        }
+        std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        input.close();
+
+        std::string joined;
+        for (const std::string& tag : project_tags)
+        {
+            if (!joined.empty())
+            {
+                joined += ',';
+            }
+            joined += tag;
+        }
+
+        if (!UpsertProjectValue(contents, "projectTags", SanitizeProjectValue(joined)))
+        {
+            return false;
+        }
+
+        std::ofstream output(project_file_path, std::ios::binary | std::ios::trunc);
+        if (!output.is_open())
+        {
+            return false;
+        }
+        output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        return true;
     }
 
     static bool IsPathWithin(const std::filesystem::path& parent, const std::filesystem::path& candidate)
@@ -1211,6 +1327,27 @@ struct EngineState
             }
             build_app_icon_path = app_icon_path.lexically_normal();
         }
+
+        project_tags.clear();
+        const std::string project_tags_value = ExtractProjectValue(manifest_contents, "projectTags");
+        if (!project_tags_value.empty())
+        {
+            std::istringstream tags_stream(project_tags_value);
+            std::string token;
+            while (std::getline(tags_stream, token, ','))
+            {
+                const std::string sanitized = TrimProjectTagInternal(std::move(token));
+                if (sanitized.empty())
+                {
+                    continue;
+                }
+                if (std::find(project_tags.begin(), project_tags.end(), sanitized) == project_tags.end())
+                {
+                    project_tags.push_back(sanitized);
+                }
+            }
+        }
+        sorted_project_tags_dirty_ = true;
 
         project_root = resolved_project_root;
         project_file_path = manifest_path;

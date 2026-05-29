@@ -1673,6 +1673,240 @@ int RuntimeRenderer::LuaWorldFindByPrefix(lua_State* lua_state)
     return 1;
 }
 
+int RuntimeRenderer::LuaWorldFindByTag(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* tag_cstr = luaL_optstring(lua_state, 1, "");
+    const std::string tag = tag_cstr != nullptr ? tag_cstr : "";
+
+    lua_newtable(lua_state);
+    int lua_index = 1;
+
+    if (tag.empty())
+    {
+        return 1;
+    }
+
+    for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
+    {
+        if (!object.enabled_in_hierarchy)
+        {
+            continue;
+        }
+        if (renderer->runtime_destroyed_objects_.find(object.name) != renderer->runtime_destroyed_objects_.end())
+        {
+            continue;
+        }
+        if (std::find(object.tags.begin(), object.tags.end(), tag) == object.tags.end())
+        {
+            continue;
+        }
+        lua_pushstring(lua_state, object.name.c_str());
+        lua_rawseti(lua_state, -2, lua_index++);
+    }
+
+    for (const auto& [name, spawned] : renderer->runtime_spawned_objects_)
+    {
+        if (renderer->runtime_destroyed_objects_.find(name) != renderer->runtime_destroyed_objects_.end())
+        {
+            continue;
+        }
+        if (std::find(spawned.tags.begin(), spawned.tags.end(), tag) == spawned.tags.end())
+        {
+            continue;
+        }
+        lua_pushstring(lua_state, name.c_str());
+        lua_rawseti(lua_state, -2, lua_index++);
+    }
+
+    return 1;
+}
+
+int RuntimeRenderer::LuaGetObjectTags(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* name_cstr = luaL_optstring(lua_state, 1, "");
+    const std::string object_name = name_cstr != nullptr ? name_cstr : "";
+
+    lua_newtable(lua_state);
+    int lua_index = 1;
+
+    if (object_name.empty())
+    {
+        return 1;
+    }
+
+    const std::vector<std::string>* tags_ptr = nullptr;
+    for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
+    {
+        if (object.name == object_name)
+        {
+            tags_ptr = &object.tags;
+            break;
+        }
+    }
+    if (tags_ptr == nullptr)
+    {
+        const auto it = renderer->runtime_spawned_objects_.find(object_name);
+        if (it != renderer->runtime_spawned_objects_.end())
+        {
+            tags_ptr = &it->second.tags;
+        }
+    }
+    if (tags_ptr != nullptr)
+    {
+        for (const std::string& tag : *tags_ptr)
+        {
+            lua_pushstring(lua_state, tag.c_str());
+            lua_rawseti(lua_state, -2, lua_index++);
+        }
+    }
+    return 1;
+}
+
+int RuntimeRenderer::LuaObjectHasTag(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* name_cstr = luaL_optstring(lua_state, 1, "");
+    const char* tag_cstr = luaL_optstring(lua_state, 2, "");
+    const std::string object_name = name_cstr != nullptr ? name_cstr : "";
+    const std::string tag = tag_cstr != nullptr ? tag_cstr : "";
+
+    if (object_name.empty() || tag.empty())
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+
+    for (const SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
+    {
+        if (object.name == object_name)
+        {
+            lua_pushboolean(lua_state, std::find(object.tags.begin(), object.tags.end(), tag) != object.tags.end() ? 1 : 0);
+            return 1;
+        }
+    }
+    const auto it = renderer->runtime_spawned_objects_.find(object_name);
+    if (it != renderer->runtime_spawned_objects_.end())
+    {
+        lua_pushboolean(lua_state, std::find(it->second.tags.begin(), it->second.tags.end(), tag) != it->second.tags.end() ? 1 : 0);
+        return 1;
+    }
+    lua_pushboolean(lua_state, 0);
+    return 1;
+}
+
+int RuntimeRenderer::LuaAddObjectTag(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* name_cstr = luaL_optstring(lua_state, 1, "");
+    const char* tag_cstr = luaL_optstring(lua_state, 2, "");
+    const std::string object_name = name_cstr != nullptr ? name_cstr : "";
+    const std::string sanitized = SanitizeSceneObjectTag(tag_cstr != nullptr ? tag_cstr : "");
+
+    if (object_name.empty() || sanitized.empty())
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+
+    for (SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
+    {
+        if (object.name == object_name)
+        {
+            if (std::find(object.tags.begin(), object.tags.end(), sanitized) == object.tags.end())
+            {
+                object.tags.push_back(sanitized);
+                lua_pushboolean(lua_state, 1);
+                return 1;
+            }
+            lua_pushboolean(lua_state, 0);
+            return 1;
+        }
+    }
+    const auto it = renderer->runtime_spawned_objects_.find(object_name);
+    if (it != renderer->runtime_spawned_objects_.end())
+    {
+        if (std::find(it->second.tags.begin(), it->second.tags.end(), sanitized) == it->second.tags.end())
+        {
+            it->second.tags.push_back(sanitized);
+            lua_pushboolean(lua_state, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(lua_state, 0);
+    return 1;
+}
+
+int RuntimeRenderer::LuaRemoveObjectTag(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* name_cstr = luaL_optstring(lua_state, 1, "");
+    const char* tag_cstr = luaL_optstring(lua_state, 2, "");
+    const std::string object_name = name_cstr != nullptr ? name_cstr : "";
+    const std::string sanitized = SanitizeSceneObjectTag(tag_cstr != nullptr ? tag_cstr : "");
+
+    if (object_name.empty() || sanitized.empty())
+    {
+        lua_pushboolean(lua_state, 0);
+        return 1;
+    }
+
+    for (SceneObjectMetadata& object : renderer->cached_scene_metadata_.objects)
+    {
+        if (object.name == object_name)
+        {
+            const auto erase_it = std::remove(object.tags.begin(), object.tags.end(), sanitized);
+            if (erase_it != object.tags.end())
+            {
+                object.tags.erase(erase_it, object.tags.end());
+                lua_pushboolean(lua_state, 1);
+                return 1;
+            }
+            lua_pushboolean(lua_state, 0);
+            return 1;
+        }
+    }
+    const auto it = renderer->runtime_spawned_objects_.find(object_name);
+    if (it != renderer->runtime_spawned_objects_.end())
+    {
+        const auto erase_it = std::remove(it->second.tags.begin(), it->second.tags.end(), sanitized);
+        if (erase_it != it->second.tags.end())
+        {
+            it->second.tags.erase(erase_it, it->second.tags.end());
+            lua_pushboolean(lua_state, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(lua_state, 0);
+    return 1;
+}
+
 int RuntimeRenderer::LuaWorldGetCollisions(lua_State* lua_state)
 {
     RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));

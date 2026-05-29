@@ -618,6 +618,144 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     ImGui::SameLine();
     ImGui::TextUnformatted(selected_object.name.c_str());
 
+    // ---- Tags ---------------------------------------------------------
+    ImGui::PushID("ObjectTags");
+    {
+        const bool scene_dirty_blocks_tag_edits = state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty;
+        const std::filesystem::path scene_path = state.selected_item_path;
+        const std::string object_name = selected_object.name;
+
+        ImGui::TextUnformatted("Tags:");
+
+        bool tag_removed = false;
+        for (std::size_t tag_index = 0; tag_index < selected_object.tags.size(); ++tag_index)
+        {
+            ImGui::PushID(static_cast<int>(tag_index));
+            const std::string label = selected_object.tags[tag_index] + " x";
+            if (ImGui::SmallButton(label.c_str()))
+            {
+                if (!scene_dirty_blocks_tag_edits && RemoveSceneObjectTag(scene_path, object_name, selected_object.tags[tag_index]))
+                {
+                    selected_object.tags.erase(selected_object.tags.begin() + static_cast<std::ptrdiff_t>(tag_index));
+                    has_cached_scene_metadata_ = false;
+                    if (state.HasOpenFile() && state.open_file_path == scene_path)
+                    {
+                        state.OpenTextFile(scene_path);
+                    }
+                    tag_removed = true;
+                    ImGui::PopID();
+                    break;
+                }
+            }
+            ImGui::PopID();
+            ImGui::SameLine();
+        }
+        if (!selected_object.tags.empty())
+        {
+            ImGui::NewLine();
+        }
+        (void)tag_removed;
+
+        const std::vector<std::string>& registry_tags = state.GetSortedProjectTags();
+        std::vector<std::string> selectable_tags;
+        selectable_tags.reserve(registry_tags.size());
+        for (const std::string& tag : registry_tags)
+        {
+            if (std::find(selected_object.tags.begin(), selected_object.tags.end(), tag) == selected_object.tags.end())
+            {
+                selectable_tags.push_back(tag);
+            }
+        }
+
+        bool request_open_new_tag_popup = false;
+        ImGui::SetNextItemWidth(160.0f);
+        if (ImGui::BeginCombo("##AddTagCombo", "Add tag..."))
+        {
+            for (const std::string& tag : selectable_tags)
+            {
+                if (ImGui::Selectable(tag.c_str()))
+                {
+                    if (!scene_dirty_blocks_tag_edits && AddSceneObjectTag(scene_path, object_name, tag))
+                    {
+                        selected_object.tags.push_back(tag);
+                        has_cached_scene_metadata_ = false;
+                        if (state.HasOpenFile() && state.open_file_path == scene_path)
+                        {
+                            state.OpenTextFile(scene_path);
+                        }
+                    }
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("<New tag...>"))
+            {
+                request_open_new_tag_popup = true;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+ New tag"))
+        {
+            request_open_new_tag_popup = true;
+        }
+
+        if (request_open_new_tag_popup)
+        {
+            ImGui::OpenPopup("NewTagPopup");
+        }
+
+        if (ImGui::BeginPopup("NewTagPopup"))
+        {
+            static char new_tag_buffer[64] = {0};
+            static bool popup_initialized = false;
+            if (!popup_initialized)
+            {
+                new_tag_buffer[0] = '\0';
+                popup_initialized = true;
+                ImGui::SetKeyboardFocusHere();
+            }
+            const bool entered = ImGui::InputText("##NewTagText", new_tag_buffer, sizeof(new_tag_buffer), ImGuiInputTextFlags_EnterReturnsTrue);
+            bool commit = entered;
+            if (ImGui::Button("Add"))
+            {
+                commit = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+            {
+                popup_initialized = false;
+                ImGui::CloseCurrentPopup();
+            }
+
+            if (commit)
+            {
+                const std::string sanitized = SanitizeSceneObjectTag(new_tag_buffer);
+                if (!sanitized.empty() && !scene_dirty_blocks_tag_edits)
+                {
+                    state.RegisterProjectTag(sanitized);
+                    if (AddSceneObjectTag(scene_path, object_name, sanitized))
+                    {
+                        selected_object.tags.push_back(sanitized);
+                        has_cached_scene_metadata_ = false;
+                        if (state.HasOpenFile() && state.open_file_path == scene_path)
+                        {
+                            state.OpenTextFile(scene_path);
+                        }
+                    }
+                }
+                popup_initialized = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        if (scene_dirty_blocks_tag_edits)
+        {
+            ImGui::TextDisabled("(save scene to edit tags)");
+        }
+    }
+    ImGui::PopID();
+
     ImGui::Spacing();
     ImGui::SeparatorText("Transform");
 

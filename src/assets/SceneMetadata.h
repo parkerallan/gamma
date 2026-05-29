@@ -271,6 +271,7 @@ struct SceneObjectMetadata
     SceneVector3 physics_half_extent = {0.5f, 0.5f, 0.5f};
     float physics_linear_damping = 0.05f;
     float physics_angular_damping = 0.05f;
+    std::vector<std::string> tags;
 };
 
 struct SceneMetadata
@@ -327,6 +328,10 @@ bool SetSceneObjectPhysicsRadius(const std::filesystem::path& scene_path, const 
 bool SetSceneObjectPhysicsHalfExtent(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& half_extent);
 bool SetSceneObjectPhysicsLinearDamping(const std::filesystem::path& scene_path, const std::string& object_name, float linear_damping);
 bool SetSceneObjectPhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, float angular_damping);
+std::string SanitizeSceneObjectTag(const std::string& tag);
+bool SetSceneObjectTags(const std::filesystem::path& scene_path, const std::string& object_name, const std::vector<std::string>& tags);
+bool AddSceneObjectTag(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& tag);
+bool RemoveSceneObjectTag(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& tag);
 bool AddSceneObjectAttribute(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectAttributeKind kind);
 bool RemoveSceneObjectAttribute(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index);
 bool SetSceneObjectAttributeKind(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectAttributeKind kind);

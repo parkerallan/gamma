@@ -1765,6 +1765,25 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseScalar(ExtractValue(trimmed, "PhysicsAngularDamping:"), current_object->physics_angular_damping);
         }
+        else if (StartsWith(trimmed, "Tags:"))
+        {
+            current_object->tags.clear();
+            const std::string tags_value = ExtractValue(trimmed, "Tags:");
+            std::stringstream tags_stream(tags_value);
+            std::string token;
+            while (std::getline(tags_stream, token, ','))
+            {
+                const std::string sanitized = SanitizeSceneObjectTag(token);
+                if (sanitized.empty())
+                {
+                    continue;
+                }
+                if (std::find(current_object->tags.begin(), current_object->tags.end(), sanitized) == current_object->tags.end())
+                {
+                    current_object->tags.push_back(sanitized);
+                }
+            }
+        }
         else if (StartsWith(trimmed, "Attributes:"))
         {
             current_object->attributes.push_back(MakeDefaultSceneObjectAttribute(ParseSceneObjectAttributeKind(ExtractValue(trimmed, "Attributes:"))));
@@ -2427,6 +2446,124 @@ bool SetSceneObjectPhysicsLinearDamping(const std::filesystem::path& scene_path,
 bool SetSceneObjectPhysicsAngularDamping(const std::filesystem::path& scene_path, const std::string& object_name, float angular_damping)
 {
     return SetSceneObjectScalar(scene_path, object_name, "PhysicsAngularDamping", angular_damping);
+}
+
+std::string SanitizeSceneObjectTag(const std::string& tag)
+{
+    std::string result;
+    result.reserve(tag.size());
+    for (const char ch : tag)
+    {
+        const unsigned char uc = static_cast<unsigned char>(ch);
+        if (ch == ',' || ch == '\n' || ch == '\r')
+        {
+            continue;
+        }
+        if (std::isspace(uc) && (result.empty() || result.back() == ' '))
+        {
+            continue;
+        }
+        result.push_back(std::isspace(uc) ? ' ' : ch);
+    }
+    while (!result.empty() && result.back() == ' ')
+    {
+        result.pop_back();
+    }
+    return result;
+}
+
+bool SetSceneObjectTags(const std::filesystem::path& scene_path, const std::string& object_name, const std::vector<std::string>& tags)
+{
+    return RewriteSceneObjectLines(scene_path, object_name, [&](std::vector<std::string>& lines, std::size_t object_start, std::size_t object_end)
+    {
+        std::string joined;
+        for (const std::string& tag : tags)
+        {
+            const std::string sanitized = SanitizeSceneObjectTag(tag);
+            if (sanitized.empty())
+            {
+                continue;
+            }
+            if (!joined.empty())
+            {
+                joined += ',';
+            }
+            joined += sanitized;
+        }
+
+        const std::string key_prefix = "Tags:";
+        for (std::size_t index = object_start + 1; index < object_end; ++index)
+        {
+            if (StartsWith(TrimCopy(lines[index]), key_prefix))
+            {
+                if (joined.empty())
+                {
+                    lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(index));
+                }
+                else
+                {
+                    lines[index] = "Tags: " + joined;
+                }
+                return;
+            }
+        }
+
+        if (!joined.empty())
+        {
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(object_end), "Tags: " + joined);
+        }
+    });
+}
+
+bool AddSceneObjectTag(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& tag)
+{
+    const std::string sanitized = SanitizeSceneObjectTag(tag);
+    if (sanitized.empty())
+    {
+        return false;
+    }
+
+    const SceneMetadata scene = LoadSceneMetadata(scene_path);
+    const auto it = std::find_if(scene.objects.begin(), scene.objects.end(),
+        [&](const SceneObjectMetadata& obj) { return obj.name == object_name; });
+    if (it == scene.objects.end())
+    {
+        return false;
+    }
+
+    std::vector<std::string> updated = it->tags;
+    if (std::find(updated.begin(), updated.end(), sanitized) != updated.end())
+    {
+        return false;
+    }
+    updated.push_back(sanitized);
+    return SetSceneObjectTags(scene_path, object_name, updated);
+}
+
+bool RemoveSceneObjectTag(const std::filesystem::path& scene_path, const std::string& object_name, const std::string& tag)
+{
+    const std::string sanitized = SanitizeSceneObjectTag(tag);
+    if (sanitized.empty())
+    {
+        return false;
+    }
+
+    const SceneMetadata scene = LoadSceneMetadata(scene_path);
+    const auto it = std::find_if(scene.objects.begin(), scene.objects.end(),
+        [&](const SceneObjectMetadata& obj) { return obj.name == object_name; });
+    if (it == scene.objects.end())
+    {
+        return false;
+    }
+
+    std::vector<std::string> updated = it->tags;
+    const auto erase_it = std::remove(updated.begin(), updated.end(), sanitized);
+    if (erase_it == updated.end())
+    {
+        return false;
+    }
+    updated.erase(erase_it, updated.end());
+    return SetSceneObjectTags(scene_path, object_name, updated);
 }
 
 bool AddSceneObjectAttribute(const std::filesystem::path& scene_path, const std::string& object_name, SceneObjectAttributeKind kind)
