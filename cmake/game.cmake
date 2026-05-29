@@ -130,6 +130,7 @@ add_executable(game
     src/render/RuntimeRenderer.cpp
     src/render/RuntimeEffectsRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
+    src/render/BoneModifiers.cpp
     src/render/VideoPlaybackManager.cpp
     src/vfs/AssetVFS.cpp
     src/components/graph/NodeSpec.cpp

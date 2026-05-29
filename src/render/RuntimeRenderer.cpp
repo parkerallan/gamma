@@ -1,4 +1,4 @@
-#include "render/RuntimeRenderer.h"
+﻿#include "render/RuntimeRenderer.h"
 #include "render/BoneModifiers.h"
 #include "render/RuntimeAnimationCache.h"
 #include "components/graph/GraphTranspiler.h"
@@ -2235,7 +2235,7 @@ void RuntimeRenderer::Shutdown()
     physics_object_transforms_prev_.clear();
     physics_object_transforms_curr_.clear();
     physics_accumulator_seconds_ = 0.0f;
-    physics_last_tick_ms_ = 0;
+    physics_last_tick_counter_ = 0;
     physics_has_curr_snapshot_ = false;
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
@@ -2312,7 +2312,7 @@ bool RuntimeRenderer::StartSession(
     physics_object_transforms_prev_.clear();
     physics_object_transforms_curr_.clear();
     physics_accumulator_seconds_ = 0.0f;
-    physics_last_tick_ms_ = 0;
+    physics_last_tick_counter_ = 0;
     physics_has_curr_snapshot_ = false;
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
@@ -2919,7 +2919,7 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
         physics_object_transforms_prev_.clear();
         physics_object_transforms_curr_.clear();
         physics_accumulator_seconds_ = 0.0f;
-        physics_last_tick_ms_ = 0;
+        physics_last_tick_counter_ = 0;
         physics_has_curr_snapshot_ = false;
     }
 
@@ -4145,7 +4145,7 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
         physics_object_transforms_prev_.clear();
         physics_object_transforms_curr_.clear();
         physics_accumulator_seconds_ = 0.0f;
-        physics_last_tick_ms_ = 0;
+        physics_last_tick_counter_ = 0;
         physics_has_curr_snapshot_ = false;
         cached_scene_path_.clear();
         cached_scene_metadata_ = SceneMetadata{};
@@ -4765,7 +4765,7 @@ bool RuntimeRenderer::SetScriptObjectEnabled(const std::string& object_name, boo
             physics_object_transforms_prev_.clear();
             physics_object_transforms_curr_.clear();
             physics_accumulator_seconds_ = 0.0f;
-            physics_last_tick_ms_ = 0;
+            physics_last_tick_counter_ = 0;
             physics_has_curr_snapshot_ = false;
         }
         RefreshActiveScriptCameraSelection();
@@ -5222,7 +5222,7 @@ void RuntimeRenderer::HandleScriptAttributeMutation(SceneObjectAttributeKind kin
         physics_object_transforms_prev_.clear();
         physics_object_transforms_curr_.clear();
         physics_accumulator_seconds_ = 0.0f;
-        physics_last_tick_ms_ = 0;
+        physics_last_tick_counter_ = 0;
         physics_has_curr_snapshot_ = false;
         break;
 
@@ -5755,11 +5755,18 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     if (physics_world_.IsInitialized())
     {
         const std::uint64_t physics_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
-        const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
-        const float raw_phys_dt = (physics_last_tick_ms_ != 0 && now_ms >= physics_last_tick_ms_)
-            ? static_cast<float>(now_ms - physics_last_tick_ms_) / 1000.0f
+        // Sub-millisecond precision matters: at 300-400 FPS, SDL_GetTicks()'s 1 ms
+        // granularity makes per-frame dt jitter 2/3/4 ms, which pumps an uneven
+        // alpha into the interpolation accumulator and reads on screen as stutter.
+        const std::uint64_t now_counter = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+        const std::uint64_t counter_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+        const float raw_phys_dt = (physics_last_tick_counter_ != 0
+                                   && now_counter >= physics_last_tick_counter_
+                                   && counter_freq != 0)
+            ? static_cast<float>(static_cast<double>(now_counter - physics_last_tick_counter_)
+                                 / static_cast<double>(counter_freq))
             : 0.0f;
-        physics_last_tick_ms_ = now_ms;
+        physics_last_tick_counter_ = now_counter;
 
         // Cap the per-frame delta. A periodic editor hitch can otherwise dump
         // a huge dt into the accumulator and cause physics to "catch up" with
@@ -5767,8 +5774,12 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         constexpr float kMaxFrameDt = 1.0f / 30.0f;
         const float frame_dt = (std::min)(raw_phys_dt, kMaxFrameDt);
 
-        constexpr float kFixedStepSeconds = 1.0f / 60.0f;
-        constexpr int kMaxStepsPerFrame = 4;
+        // Physics step rate must be > the display refresh, otherwise render dt
+        // sits right on the step boundary and jitter causes 0/1 steps per frame
+        // alternation that reads as stutter (especially in the standalone game,
+        // which caps the render loop at the monitor refresh).
+        constexpr float kFixedStepSeconds = 1.0f / 120.0f;
+        constexpr int kMaxStepsPerFrame = 8;
 
         physics_accumulator_seconds_ += frame_dt;
         int steps_taken = 0;

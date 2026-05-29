@@ -542,7 +542,7 @@ private:
     std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_prev_;
     std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_curr_;
     float physics_accumulator_seconds_ = 0.0f;
-    std::uint64_t physics_last_tick_ms_ = 0;
+    std::uint64_t physics_last_tick_counter_ = 0;
     bool physics_has_curr_snapshot_ = false;
     std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_rotation_overrides_;
