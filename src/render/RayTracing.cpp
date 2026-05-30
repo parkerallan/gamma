@@ -3503,7 +3503,10 @@ bool RayTracing::RenderFrame(
     // long-term accumulated viewport result. When temporal averaging is
     // active we leave it at 0 so the shader falls back to the smaller
     // baseline count and lets accumulation do the smoothing for free.
-    const std::uint32_t shadow_sample_override = accumulation_enable_history == 0u ? 16u : 0u;
+    const std::uint32_t shadow_sample_override =
+        accumulation_enable_history == 0u
+            ? static_cast<std::uint32_t>(std::clamp(taa_debug_.dynamic_shadow_samples, 1, 16))
+            : 0u;
     uniforms.accumulation_data = {
         dynamic_geometry_present_ ? 0u : accumulation_frame_count_,
         accumulation_enable_history,

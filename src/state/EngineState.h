@@ -130,6 +130,10 @@ struct EngineState
     bool  taa_adaptive_enabled = false;
     int   taa_adaptive_max_samples = 2;     // 1..8
     float taa_adaptive_threshold = 0.25f;   // relative luma contrast, 0..1
+    // Per-pixel soft-shadow ray count when temporal accumulation is unavailable
+    // (playmode / dynamic geometry). Lower = much cheaper, TAA smooths residual
+    // noise. 1..16, default 4.
+    int   rt_dynamic_shadow_samples = 4;
     // 0 = pure average (clean, but subpixel strands look semi-transparent);
     // 1 = bias toward the brightest sample where samples disagree strongly,
     // restoring hair/highlight opacity while keeping smooth surfaces stable.
@@ -1054,6 +1058,7 @@ struct EngineState
             else if (key == "taaJitterCompensation") taa_jitter_compensation = parse_float(value, 0.0f);
             else if (key == "taaAdaptiveEnabled") taa_adaptive_enabled = parse_bool(value);
             else if (key == "taaAdaptiveMaxSamples") taa_adaptive_max_samples = parse_int(value, 2);
+            else if (key == "rtDynamicShadowSamples") rt_dynamic_shadow_samples = parse_int(value, 4);
             else if (key == "taaAdaptiveThreshold") taa_adaptive_threshold = parse_float(value, 0.25f);
             else if (key == "taaAdaptivePreservation") taa_adaptive_preservation = parse_float(value, 0.7f);
         }
@@ -1121,6 +1126,7 @@ struct EngineState
         output << "taaJitterCompensation=" << taa_jitter_compensation << "\n";
         output << "taaAdaptiveEnabled=" << write_bool(taa_adaptive_enabled) << "\n";
         output << "taaAdaptiveMaxSamples=" << taa_adaptive_max_samples << "\n";
+        output << "rtDynamicShadowSamples=" << rt_dynamic_shadow_samples << "\n";
         output << "taaAdaptiveThreshold=" << taa_adaptive_threshold << "\n";
         output << "taaAdaptivePreservation=" << taa_adaptive_preservation << "\n";
 

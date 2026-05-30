@@ -370,14 +370,14 @@ bool GameApplication::Init(int argc, char* argv[])
         SDL_Log("Continuing without custom app icon");
     }
 
-    // Pass prefer_low_latency=true so the standalone game's swapchain uses
-    // MAILBOX instead of FIFO. With FIFO, frames where GPU time exceeds the
-    // vsync interval back-pressure the queue and inflate input-to-photon
-    // latency while the present rate counter still reads the refresh rate.
-    // The editor's runtime window already uses this path; without it the
-    // built game feels laggy (and 'less laggy when the window is smaller'
-    // because a smaller window fits within the vsync budget).
-    if (!vulkan_context_.Initialize(window_, /*prefer_low_latency=*/true))
+    // Use FIFO (vsync) for the standalone game. With a single swapchain there is
+    // no editor back-pressure to worry about, and FIFO blocks at the hardware
+    // vblank, giving deterministic 60 Hz pacing that pairs cleanly with the
+    // 1/120 Hz physics fixed step (exactly 2 deterministic steps per frame, alpha
+    // near 0). Running uncapped MAILBOX at several hundred FPS cycles the TAA
+    // jitter sequence fast enough to read as shimmer trailing fast movers
+    // (especially when the camera is parented to the player).
+    if (!vulkan_context_.Initialize(window_, /*prefer_low_latency=*/false))
     {
         SDL_Log("VulkanContext::Initialize failed");
         return false;
@@ -463,22 +463,12 @@ bool GameApplication::Init(int argc, char* argv[])
 
 void GameApplication::RunLoop()
 {
-    // Query the display refresh once. Fall back to 60 Hz if SDL can't tell.
-    float refresh_hz = 60.0f;
-    if (window_ != nullptr)
-    {
-        const SDL_DisplayID display_id = SDL_GetDisplayForWindow(window_);
-        if (display_id != 0)
-        {
-            const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display_id);
-            if (mode != nullptr && mode->refresh_rate > 0.0f)
-            {
-                refresh_hz = mode->refresh_rate;
-            }
-        }
-    }
-    const Uint64 frame_period_ns = static_cast<Uint64>(1.0e9 / static_cast<double>(refresh_hz));
-    Uint64 next_frame_deadline_ns = SDL_GetTicksNS();
+    // Frame pacing is owned by the swapchain present mode (MAILBOX — see
+    // Initialize). Adding a software SDL_DelayNS deadline on top makes the
+    // submission phase drift across the hardware vblank because the sleep has
+    // ~1 ms of OS scheduler jitter, which is what produced the slow-rotating
+    // "smooth → stuttery → smooth" motion users reported. Run the loop free
+    // and let MAILBOX present the freshest image at each vblank.
 
     while (running_)
     {
@@ -506,7 +496,6 @@ void GameApplication::RunLoop()
         if ((SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED) != 0)
         {
             SDL_Delay(10);
-            next_frame_deadline_ns = SDL_GetTicksNS();
             continue;
         }
 
@@ -516,7 +505,6 @@ void GameApplication::RunLoop()
         if (width <= 0 || height <= 0)
         {
             SDL_Delay(10);
-            next_frame_deadline_ns = SDL_GetTicksNS();
             continue;
         }
 
@@ -539,26 +527,6 @@ void GameApplication::RunLoop()
                 renderer_.GetOutputHeight()))
         {
             SDL_Log("PresentImageToMainWindow failed");
-        }
-
-        // Hold the render cadence at the display refresh. Sleep up to the
-        // next deadline; if we already fell more than 3 periods behind
-        // (alt-tab, long stall, etc.) resync to now to avoid a runaway
-        // catch-up burst.
-        next_frame_deadline_ns += frame_period_ns;
-        const Uint64 now_ns = SDL_GetTicksNS();
-        if (now_ns + 3ull * frame_period_ns < next_frame_deadline_ns)
-        {
-            // Clock moved backward or sleep overshot wildly — clamp.
-            next_frame_deadline_ns = now_ns + frame_period_ns;
-        }
-        else if (now_ns > next_frame_deadline_ns + 3ull * frame_period_ns)
-        {
-            next_frame_deadline_ns = now_ns;
-        }
-        else if (now_ns < next_frame_deadline_ns)
-        {
-            SDL_DelayNS(next_frame_deadline_ns - now_ns);
         }
     }
 }

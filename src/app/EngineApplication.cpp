@@ -1056,6 +1056,7 @@ void EngineApplication::RenderRuntimeWindow()
         taa_dbg.adaptive_max_samples = state_.taa_adaptive_max_samples;
         taa_dbg.adaptive_threshold   = state_.taa_adaptive_threshold;
         taa_dbg.adaptive_preservation= state_.taa_adaptive_preservation;
+        taa_dbg.dynamic_shadow_samples = state_.rt_dynamic_shadow_samples;
         runtime_renderer_.SetTaaDebugSettings(taa_dbg);
     }
     runtime_renderer_.SetTranspiledLuaDumpEnabled(state_.show_transpiled_lua);

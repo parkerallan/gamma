@@ -2740,6 +2740,7 @@ void SceneViewportRenderer::RenderUi(
     taa_dbg.adaptive_max_samples = state.taa_adaptive_max_samples;
     taa_dbg.adaptive_threshold = state.taa_adaptive_threshold;
     taa_dbg.adaptive_preservation = state.taa_adaptive_preservation;
+    taa_dbg.dynamic_shadow_samples = state.rt_dynamic_shadow_samples;
     ray_tracing_.SetTaaDebugSettings(taa_dbg);
 
     constexpr const char* kBuildButtonLabel = ICON_CI_RUN_WITH_DEPS;

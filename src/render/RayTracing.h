@@ -176,6 +176,9 @@ public:
         bool  adaptive_enabled       = false;
         int   adaptive_max_samples   = 2;     // 1..8 primary rays for high-contrast pixels
         float adaptive_threshold     = 0.25f; // relative luma contrast trigger
+        // Per-pixel soft-shadow ray count when temporal accumulation is
+        // unavailable (playmode / dynamic geometry). 1..16, default 4.
+        int   dynamic_shadow_samples = 4;
         // 0 = pure average across samples (clean, but subpixel strands look
         // transparent because most samples miss them). 1 = bias toward the
         // brightest sample on high-spread pixels (preserves hair/highlight

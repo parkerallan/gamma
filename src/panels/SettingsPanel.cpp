@@ -161,6 +161,12 @@ void SettingsPanel::Render(EngineState& state)
         ImGui::TextDisabled("0 = pure average (clean, but subpixel strands look semi-transparent).\n1 = bias toward brightest sample where samples disagree (keeps hair opaque, may amplify HDR fireflies).");
 
         ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Dynamic-scene shadow rays (playmode / no accumulation)");
+        settings_changed |= ImGui::SliderInt("Soft-shadow samples", &state.rt_dynamic_shadow_samples, 1, 16);
+        ImGui::TextDisabled("Shadow rays per pixel per soft light when temporal accumulation is unavailable.\nHigh values dominate GPU cost on busy scenes. TAA smooths residual noise.");
+
+        ImGui::Spacing();
         if (ImGui::SmallButton("Revert TAA defaults"))
         {
             state.taa_enabled = true;
@@ -174,6 +180,7 @@ void SettingsPanel::Render(EngineState& state)
             state.taa_adaptive_max_samples = 2;
             state.taa_adaptive_threshold = 0.25f;
             state.taa_adaptive_preservation = 0.7f;
+            state.rt_dynamic_shadow_samples = 4;
             settings_changed = true;
         }
     }
