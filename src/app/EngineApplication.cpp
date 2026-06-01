@@ -15,6 +15,7 @@
 #include <functional>
 #include <system_error>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <stb_image.h>
 #ifdef _WIN32
@@ -1988,6 +1989,107 @@ bool EngineApplication::StageBuiltGame(
     {
         out_error = "Packed 0 files from content root: " + content_root.generic_string();
         return false;
+    }
+
+    // -----------------------------------------------------------------
+    // Pack builtin shapes referenced by Shape3D attributes in all scenes.
+    // Shapes live in src/shapes/ which is outside the project content_root
+    // and are not picked up by the directory walk above. We resolve them by
+    // scanning every packed scene, then copy each unique shape file into the
+    // pak under Shapes/<filename> so RuntimeRenderer can find it via the VFS.
+    // -----------------------------------------------------------------
+    {
+        const std::filesystem::path engine_shapes_dir =
+            std::filesystem::path(__FILE__).parent_path().parent_path() / "shapes";
+
+        std::unordered_set<std::string> seen_shape_files;
+
+        // Collect every .scene file that was just packed.
+        std::vector<std::filesystem::path> packed_scene_files;
+        {
+            std::vector<std::filesystem::path> scan_dirs;
+            scan_dirs.push_back(content_root);
+            while (!scan_dirs.empty())
+            {
+                const std::filesystem::path scan_dir = scan_dirs.back();
+                scan_dirs.pop_back();
+                std::error_code scan_err;
+                std::filesystem::directory_iterator it(scan_dir,
+                    std::filesystem::directory_options::skip_permission_denied, scan_err);
+                for (; it != std::filesystem::directory_iterator(); it.increment(scan_err))
+                {
+                    if (scan_err) { break; }
+                    const std::filesystem::path p = it->path();
+                    if (it->is_directory(scan_err))
+                    {
+                        if (!ShouldSkipStagedProjectEntry(p, stage_directory, external_build_directory))
+                        {
+                            scan_dirs.push_back(p);
+                        }
+                    }
+                    else if (it->is_regular_file(scan_err))
+                    {
+                        if (ToLowerCopy(p.extension().string()) == ".scene")
+                        {
+                            packed_scene_files.push_back(p);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (const std::filesystem::path& scene_file : packed_scene_files)
+        {
+            const SceneMetadata scene_meta = LoadSceneMetadata(scene_file);
+            if (!scene_meta.parsed)
+            {
+                continue;
+            }
+            for (const SceneObjectMetadata& obj : scene_meta.objects)
+            {
+                // Determine the shape filename: prefer the explicit attribute field,
+                // fall back to the filename embedded in model_path for legacy scenes.
+                std::string shape_file_name;
+                for (const SceneObjectAttribute& attr : obj.attributes)
+                {
+                    if (attr.kind == SceneObjectAttributeKind::Shape3D)
+                    {
+                        if (!attr.shape_3d.shape_path.empty())
+                        {
+                            shape_file_name = attr.shape_3d.shape_path;
+                        }
+                        else if (!obj.model_path.empty())
+                        {
+                            shape_file_name = std::filesystem::path(obj.model_path).filename().string();
+                        }
+                        break;
+                    }
+                }
+
+                if (shape_file_name.empty() || !seen_shape_files.insert(shape_file_name).second)
+                {
+                    continue;
+                }
+
+                const std::filesystem::path shape_src = engine_shapes_dir / shape_file_name;
+                std::error_code shape_err;
+                if (!std::filesystem::exists(shape_src, shape_err) || !std::filesystem::is_regular_file(shape_src, shape_err))
+                {
+                    log("[Build] Warning: builtin shape not found on disk, skipping: " + shape_src.generic_string());
+                    continue;
+                }
+
+                const std::string pak_key = "Shapes/" + shape_file_name;
+                if (!pak.AddFile(pak_key, shape_src))
+                {
+                    out_error = "Failed to add builtin shape to pak: " + pak_key;
+                    return false;
+                }
+
+                ++packed_file_count;
+                log("[Build] Added builtin shape: " + pak_key);
+            }
+        }
     }
 
     if (!request.app_icon_path.empty())

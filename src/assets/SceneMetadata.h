@@ -45,6 +45,7 @@ enum class SceneObjectAttributeKind
 
 enum class SceneObjectShaderType
 {
+    None,
     Water,
 };
 
@@ -229,9 +230,14 @@ struct SceneObjectEffectsAttributes
     SceneObjectEffectsPlayMode play_mode    = SceneObjectEffectsPlayMode::Stop;  // runtime only: always starts Stop
 };
 
+struct SceneObjectShape3DAttributes
+{
+    std::string shape_path;
+};
+
 struct SceneObjectShaderAttributes
 {
-    SceneObjectShaderType type = SceneObjectShaderType::Water;
+    SceneObjectShaderType type = SceneObjectShaderType::None;
 };
 
 struct SceneObjectAttribute
@@ -251,6 +257,7 @@ struct SceneObjectAttribute
     SceneObjectSkyboxAttributes skybox{};
     SceneObjectAudioAttributes audio{};
     SceneObjectVideo2DAttributes video_2d{};
+    SceneObjectShape3DAttributes shape_3d{};
     SceneObjectEffectsAttributes effects{};
     SceneObjectShaderAttributes shader{};
 };
@@ -426,6 +433,7 @@ bool SetSceneObjectAttributeVideo2DMuted(const std::filesystem::path& scene_path
 bool SetSceneObjectAttributeEffectsPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& effect_path);
 bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectEffectsPlayMode play_mode);
 bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectShaderType type);
+bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
 bool SetSceneObjectModelVisualOffset(const std::filesystem::path& scene_path, const std::string& object_name, const SceneVector3& model_visual_offset);

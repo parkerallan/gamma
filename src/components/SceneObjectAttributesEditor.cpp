@@ -219,13 +219,34 @@ bool AddAttributeAttachment(EngineState& state, const SceneObjectMetadata& objec
             return false;
         }
 
+        const std::size_t new_attribute_index = object.attributes.size();
+
         if (kind == SceneObjectAttributeKind::Shape3D)
         {
-            return SetSceneObjectModel(
+            if (!SetSceneObjectModel(
+                    state.selected_item_path,
+                    object.name,
+                    state.project_root,
+                    GetBuiltInShapePath(kShape3DOptions[0].file_name)))
+            {
+                return false;
+            }
+            SetSceneObjectAttributeShape3DPath(
                 state.selected_item_path,
                 object.name,
-                state.project_root,
-                GetBuiltInShapePath(kShape3DOptions[0].file_name));
+                new_attribute_index,
+                kShape3DOptions[0].file_name);
+            return true;
+        }
+
+        if (kind == SceneObjectAttributeKind::Shader)
+        {
+            SetSceneObjectAttributeShaderType(
+                state.selected_item_path,
+                object.name,
+                new_attribute_index,
+                SceneObjectShaderType::Water);
+            return true;
         }
 
         return true;
@@ -583,11 +604,20 @@ bool RenderAttributeSection(
                         selected_shape_index = shape_index;
                         changed = SaveSceneObjectAttributeEdit(state, object, "3D shape", [&]()
                         {
-                            return SetSceneObjectModel(
+                            if (!SetSceneObjectModel(
+                                    state.selected_item_path,
+                                    object.name,
+                                    state.project_root,
+                                    GetBuiltInShapePath(kShape3DOptions[shape_index].file_name)))
+                            {
+                                return false;
+                            }
+                            SetSceneObjectAttributeShape3DPath(
                                 state.selected_item_path,
                                 object.name,
-                                state.project_root,
-                                GetBuiltInShapePath(kShape3DOptions[shape_index].file_name));
+                                attribute_index,
+                                kShape3DOptions[shape_index].file_name);
+                            return true;
                         }) || changed;
                     }
                     if (selected)
@@ -604,11 +634,20 @@ bool RenderAttributeSection(
                 {
                     changed = SaveSceneObjectAttributeEdit(state, object, "3D shape", [&]()
                     {
-                        return SetSceneObjectModel(
+                        if (!SetSceneObjectModel(
+                                state.selected_item_path,
+                                object.name,
+                                state.project_root,
+                                GetBuiltInShapePath(kShape3DOptions[selected_shape_index].file_name)))
+                        {
+                            return false;
+                        }
+                        SetSceneObjectAttributeShape3DPath(
                             state.selected_item_path,
                             object.name,
-                            state.project_root,
-                            GetBuiltInShapePath(kShape3DOptions[selected_shape_index].file_name));
+                            attribute_index,
+                            kShape3DOptions[selected_shape_index].file_name);
+                        return true;
                     }) || changed;
                 }
             }
@@ -1868,6 +1907,7 @@ bool RenderAttributeSection(
                 SceneObjectShaderType type;
             };
             constexpr ShaderTypeOption kShaderTypeOptions[] = {
+                {"None", SceneObjectShaderType::None},
                 {"Water", SceneObjectShaderType::Water},
             };
 

@@ -68,18 +68,7 @@ bool IsWaterSurfaceObject(const SceneObjectMetadata& object)
         }
     }
 
-    if (!has_shape3d || !has_water_shader || object.model_path.empty())
-    {
-        return false;
-    }
-
-    std::string file_name = std::filesystem::path(object.model_path).filename().string();
-    for (char& ch : file_name)
-    {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-
-    return file_name == "plane.glb" || file_name == "plane.gltf" || file_name == "plane.fbx";
+    return has_shape3d && has_water_shader && !object.model_path.empty();
 }
 
 Vec3 ToVec3(const SceneVector3& value)

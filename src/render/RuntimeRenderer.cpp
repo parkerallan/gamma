@@ -59,18 +59,7 @@ bool IsWaterSurfaceObject(const SceneObjectMetadata& object)
         }
     }
 
-    if (!has_shape3d || !has_water_shader || object.model_path.empty())
-    {
-        return false;
-    }
-
-    std::string file_name = std::filesystem::path(object.model_path).filename().string();
-    for (char& ch : file_name)
-    {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-
-    return file_name == "plane.glb" || file_name == "plane.gltf" || file_name == "plane.fbx";
+    return has_shape3d && has_water_shader && !object.model_path.empty();
 }
 
 float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
@@ -5392,7 +5381,42 @@ bool RuntimeRenderer::BuildQueuedScene(
         bool has_renderable_model = false;
         if (!object.model_path.empty())
         {
-            const std::filesystem::path model_path = project_root_ / object.model_path;
+            // In the built game (g_asset_reader != nullptr) builtin shapes are packed
+            // under "Shapes/<filename>" rather than at their source tree path.
+            // Resolve the pak key from the Shape3D attribute when available.
+            std::filesystem::path model_path;
+            if (g_asset_reader != nullptr)
+            {
+                std::string shape_file_name;
+                for (const SceneObjectAttribute& attr : object.attributes)
+                {
+                    if (attr.kind == SceneObjectAttributeKind::Shape3D)
+                    {
+                        if (!attr.shape_3d.shape_path.empty())
+                        {
+                            shape_file_name = attr.shape_3d.shape_path;
+                        }
+                        else
+                        {
+                            shape_file_name = std::filesystem::path(object.model_path).filename().string();
+                        }
+                        break;
+                    }
+                }
+                if (!shape_file_name.empty())
+                {
+                    model_path = std::filesystem::path("Shapes") / shape_file_name;
+                }
+                else
+                {
+                    model_path = project_root_ / object.model_path;
+                }
+            }
+            else
+            {
+                model_path = project_root_ / object.model_path;
+            }
+
             const CachedModelAssetEntry& model_asset_entry = GetModelAssetEntry(model_path);
             if (model_asset_entry.asset.loaded && EnsureMeshCacheEntry(model_path, model_asset_entry))
             {

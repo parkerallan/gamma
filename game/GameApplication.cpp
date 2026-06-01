@@ -281,9 +281,33 @@ bool GameApplication::Init(int argc, char* argv[])
         model_paths.reserve(preloaded_scene.objects.size());
         for (const SceneObjectMetadata& object : preloaded_scene.objects)
         {
-            if (!object.model_path.empty() && seen_models.insert(object.model_path).second)
+            // Builtin shapes are packed under "Shapes/<filename>" — resolve the pak
+            // key from the Shape3D attribute when available so preloading matches
+            // the key used by RuntimeRenderer at runtime.
+            std::string model_key;
+            for (const SceneObjectAttribute& attr : object.attributes)
             {
-                model_paths.emplace_back(object.model_path);
+                if (attr.kind == SceneObjectAttributeKind::Shape3D)
+                {
+                    if (!attr.shape_3d.shape_path.empty())
+                    {
+                        model_key = "Shapes/" + attr.shape_3d.shape_path;
+                    }
+                    else if (!object.model_path.empty())
+                    {
+                        model_key = "Shapes/" + std::filesystem::path(object.model_path).filename().string();
+                    }
+                    break;
+                }
+            }
+            if (model_key.empty() && !object.model_path.empty())
+            {
+                model_key = object.model_path;
+            }
+
+            if (!model_key.empty() && seen_models.insert(model_key).second)
+            {
+                model_paths.emplace_back(model_key);
             }
             for (const SceneObjectAttribute& attr : object.attributes)
             {

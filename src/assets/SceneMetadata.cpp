@@ -632,7 +632,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeVideo2DMuted:") ||
     StartsWith(line, "AttributeEffectPath:") ||
     StartsWith(line, "AttributeEffectPlayMode:") ||
-    StartsWith(line, "AttributeShaderType:");
+    StartsWith(line, "AttributeShaderType:") ||
+    StartsWith(line, "AttributeShape3DPath:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -2240,6 +2241,14 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             {
                 current_attribute->shader.type = SceneObjectShaderType::Water;
             }
+            else
+            {
+                current_attribute->shader.type = SceneObjectShaderType::None;
+            }
+        }
+        else if (StartsWith(trimmed, "AttributeShape3DPath:") && current_attribute != nullptr)
+        {
+            current_attribute->shape_3d.shape_path = TrimCopy(ExtractValue(trimmed, "AttributeShape3DPath:"));
         }
         else if (StartsWith(trimmed, "Model:"))
         {
@@ -3427,8 +3436,18 @@ bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_p
 
 bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectShaderType type)
 {
-    const std::string value = (type == SceneObjectShaderType::Water) ? "Water" : "Water";
+    std::string value;
+    switch (type)
+    {
+    case SceneObjectShaderType::Water: value = "Water"; break;
+    default:                           value = "None";  break;
+    }
     return SetSceneObjectAttributeStringValue("AttributeShaderType", scene_path, object_name, attribute_index, value);
+}
+
+bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path)
+{
+    return SetSceneObjectAttributeStringValue("AttributeShape3DPath", scene_path, object_name, attribute_index, shape_path);
 }
 
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height)
