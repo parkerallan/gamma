@@ -9,10 +9,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <vector>
 
@@ -48,6 +50,37 @@ bool CreateVulkanImage(
     VkImage& image,
     VkDeviceMemory& memory,
     VkImageView& image_view);
+
+bool IsWaterSurfaceObject(const SceneObjectMetadata& object)
+{
+    bool has_shape3d = false;
+    bool has_water_shader = false;
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shape3D)
+        {
+            has_shape3d = true;
+        }
+        else if (attribute.kind == SceneObjectAttributeKind::Shader &&
+                 attribute.shader.type == SceneObjectShaderType::Water)
+        {
+            has_water_shader = true;
+        }
+    }
+
+    if (!has_shape3d || !has_water_shader || object.model_path.empty())
+    {
+        return false;
+    }
+
+    std::string file_name = std::filesystem::path(object.model_path).filename().string();
+    for (char& ch : file_name)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+
+    return file_name == "plane.glb" || file_name == "plane.gltf" || file_name == "plane.fbx";
+}
 
 Vec3 ToVec3(const SceneVector3& value)
 {
@@ -2710,6 +2743,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
+        instance_input.shader_type = object.is_water_surface ? 1u : 0u;
         BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -3090,6 +3124,7 @@ void SceneViewportRenderer::RenderUi(
         QueuedSceneObject queued_object;
         queued_object.name = object.name;
         queued_object.model_visual_offset = object.model_visual_offset;
+        queued_object.is_water_surface = IsWaterSurfaceObject(object);
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;
@@ -4070,6 +4105,9 @@ void SceneViewportRenderer::RenderGpu()
     // editor does not advance video playback time.
     if (ray_tracing_.WasFrameSubmittedLastCall())
     {
+        VkImageLayout water_output_layout = ray_tracing_.GetOutputLayout();
+        ray_tracing_.SetOutputLayout(water_output_layout);
+
         video_playback_manager_.Update(0.0f, pending_scene_metadata_, pending_project_root_);
         scene_2d_renderer_.CompositeOverlay(
             pending_scene_metadata_,

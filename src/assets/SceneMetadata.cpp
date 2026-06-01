@@ -631,7 +631,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeVideo2DVolume:") ||
     StartsWith(line, "AttributeVideo2DMuted:") ||
     StartsWith(line, "AttributeEffectPath:") ||
-    StartsWith(line, "AttributeEffectPlayMode:");
+    StartsWith(line, "AttributeEffectPlayMode:") ||
+    StartsWith(line, "AttributeShaderType:");
 }
 
 bool IsAttributeLine(std::string_view line)
@@ -1201,6 +1202,8 @@ const char* ToDisplayName(SceneObjectAttributeKind kind)
         return "Video 2D";
     case SceneObjectAttributeKind::Effects:
         return "Effects";
+    case SceneObjectAttributeKind::Shader:
+        return "Shader";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -1249,6 +1252,8 @@ const char* ToStorageName(SceneObjectAttributeKind kind)
         return "Video2D";
     case SceneObjectAttributeKind::Effects:
         return "Effects";
+    case SceneObjectAttributeKind::Shader:
+        return "Shader";
     case SceneObjectAttributeKind::None:
     default:
         return "None";
@@ -1333,6 +1338,10 @@ SceneObjectAttributeKind ParseSceneObjectAttributeKind(std::string_view value)
     if (trimmed == "Effects")
     {
         return SceneObjectAttributeKind::Effects;
+    }
+    if (trimmed == "Shader")
+    {
+        return SceneObjectAttributeKind::Shader;
     }
 
     return SceneObjectAttributeKind::None;
@@ -2222,6 +2231,14 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             {
                 // "Loop" and legacy "Stop" both default to Loop
                 current_attribute->effects.trigger_mode = SceneObjectEffectsPlayMode::Loop;
+            }
+        }
+        else if (StartsWith(trimmed, "AttributeShaderType:") && current_attribute != nullptr)
+        {
+            const std::string type_name = TrimCopy(ExtractValue(trimmed, "AttributeShaderType:"));
+            if (type_name == "Water")
+            {
+                current_attribute->shader.type = SceneObjectShaderType::Water;
             }
         }
         else if (StartsWith(trimmed, "Model:"))
@@ -3406,6 +3423,12 @@ bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_p
 {
     const std::string value = (play_mode == SceneObjectEffectsPlayMode::PlayOnce) ? "PlayOnce" : "Loop";
     return SetSceneObjectAttributeStringValue("AttributeEffectPlayMode", scene_path, object_name, attribute_index, value);
+}
+
+bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectShaderType type)
+{
+    const std::string value = (type == SceneObjectShaderType::Water) ? "Water" : "Water";
+    return SetSceneObjectAttributeStringValue("AttributeShaderType", scene_path, object_name, attribute_index, value);
 }
 
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height)

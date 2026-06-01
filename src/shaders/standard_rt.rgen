@@ -43,11 +43,14 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    vec4 animation_time_data;
     mat4 prev_view_projection;
     mat4 current_view_projection;
     vec4 taa_params;       // .x = enabled, .y = variance, .z = anti_sparkle, .w = jitter_compensation
     vec4 jitter_offset;    // .xy = current sub-pixel jitter (px), .zw = previous
     vec4 adaptive_params;  // .x = enabled (0/1), .y = max_samples, .z = contrast_threshold, .w = reserved
+    vec4 underwater_data;  // .x = has water, .y = base water height
+    mat4 underwater_world_to_local;
 } scene_uniforms;
 
 layout(location = 0) rayPayloadEXT PrimaryPayload primary_payload;
@@ -62,6 +65,59 @@ uint pcg_hash(uint value)
 float hash_to_unit_float(uint value)
 {
     return float(pcg_hash(value)) * (1.0 / 4294967296.0);
+}
+
+const int WATER_ITER_FRAGMENT = 5;
+const mat2 WATER_OCTAVE_M = mat2(vec2(1.6, 1.2), vec2(-1.2, 1.6));
+const float WATER_PLANE_HALF_EXTENT = 1.0005;
+
+float water_hash12(vec2 p)
+{
+    uvec2 q = uvec2(ivec2(p)) * uvec2(1597334677u, 3812015801u);
+    uint n = (q.x ^ q.y) * 1597334677u;
+    return float(n) * (1.0 / 4294967295.0);
+}
+
+float water_noise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return -1.0 + 2.0 * mix(
+        mix(water_hash12(i + vec2(0.0, 0.0)), water_hash12(i + vec2(1.0, 0.0)), u.x),
+        mix(water_hash12(i + vec2(0.0, 1.0)), water_hash12(i + vec2(1.0, 1.0)), u.x),
+        u.y);
+}
+
+float water_sea_octave(vec2 uv, float choppy)
+{
+    uv += water_noise(uv);
+    vec2 wv = 1.0 - abs(sin(uv));
+    vec2 swv = abs(cos(uv));
+    wv = mix(wv, swv, wv);
+    return pow(1.0 - pow(wv.x * wv.y, 0.65), choppy);
+}
+
+float water_wave_height(vec2 xz, float time_seconds)
+{
+    float freq = 0.18;
+    float amp = 0.55;
+    float choppy = 4.0;
+    float speed = 0.85;
+    vec2 uv = xz;
+    uv.x *= 0.75;
+    float h = 0.0;
+    for (int i = 0; i < WATER_ITER_FRAGMENT; ++i)
+    {
+        float d = water_sea_octave((uv + time_seconds * speed) * freq, choppy);
+        d += water_sea_octave((uv - time_seconds * speed) * freq, choppy);
+        h += d * amp;
+        uv *= WATER_OCTAVE_M;
+        freq *= 1.9;
+        amp *= 0.22;
+        choppy = mix(choppy, 1.0, 0.2);
+    }
+    return h;
 }
 
 // Halton(base) low-discrepancy sequence in [0, 1). The (2, 3) pair gives a
@@ -226,6 +282,45 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
 
     vec3 shaded = primary_payload.color.rgb;
     shaded += evaluate_point_light_emitter(world_origin, world_direction, primary_payload.hit_distance);
+
+    if (scene_uniforms.underwater_data.x > 0.5)
+    {
+        vec3 camera_local = (scene_uniforms.underwater_world_to_local * vec4(world_origin, 1.0)).xyz;
+        bool inside_water_footprint =
+            abs(camera_local.x) <= WATER_PLANE_HALF_EXTENT &&
+            abs(camera_local.z) <= WATER_PLANE_HALF_EXTENT;
+        float time_seconds = scene_uniforms.animation_time_data.x;
+        float water_surface_local_y = water_wave_height(camera_local.xz, time_seconds);
+        if (inside_water_footprint && camera_local.y < water_surface_local_y)
+        {
+            // Thickness = actual ray-traced path length through water (same fix as surface shader).
+            // Camera is inside the water volume so the entire path to geometry is through water.
+            float thickness = primary_payload.hit_distance < 1e29 ? primary_payload.hit_distance : 5.0;
+
+            // Normalise thickness to [0,1] over max_depth before Beer-Lambert.
+            // Raw world-unit absorption over-attenuates because the ray travels obliquely.
+            const float max_depth  = 10.0;
+            float depth_ratio      = clamp(thickness / max_depth, 0.0, 1.0);
+            vec3 transmittance     = exp(-depth_ratio * vec3(1.5, 0.3, 0.1));
+
+            // base_tint is vec3(1.0): at thickness=0 geometry is completely unmodified (truly clear).
+            // Only deep_color adds tint as depth grows; max_depth=5 suits cliff/pool scenarios.
+            vec3 deep_color        = vec3(0.0,   0.341, 0.29);
+            vec3 underwater_fog    = vec3(0.02,  0.18,  0.25);
+
+            // Volume color: neutral at surface, deep_color-tinted when deep
+            vec3 water_volume_color    = mix(vec3(1.0), deep_color, depth_ratio);
+            vec3 apparent_seabed_color = shaded * water_volume_color;
+
+            // Primary blend: clear geometry when shallow, fog dominates when deep
+            shaded = mix(underwater_fog, apparent_seabed_color, transmittance);
+
+            // Secondary fog falloff, normalised so it doesn't darken shallow water
+            float deep_fog = 1.0 - exp(-depth_ratio * 2.45);
+            shaded = mix(shaded, underwater_fog, deep_fog * 0.85);
+        }
+    }
+
     return shaded;
 }
 

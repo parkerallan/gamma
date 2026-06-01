@@ -92,6 +92,7 @@ public:
         std::string key;
         std::string mesh_key;
         std::array<float, 16> transform = {};
+        std::uint32_t shader_type = 0; // 0=default, 1=water
         // Optional caller-supplied previous-frame transform. If the caller
         // does not supply one (left default-initialized to all zeros), the
         // ray tracer uses its own cached previous transform for this
@@ -271,6 +272,7 @@ private:
                                                    0.0f, 1.0f, 0.0f, 0.0f,
                                                    0.0f, 0.0f, 1.0f, 0.0f,
                                                    0.0f, 0.0f, 0.0f, 1.0f};
+        std::array<std::uint32_t, 4> shader_data = {0, 0, 0, 0};
     };
 
     struct SectionRecordGpu
@@ -335,6 +337,7 @@ private:
         std::uint32_t section_count = 0;
         std::uint32_t texture_count = 0;
         std::array<std::uint32_t, 4> accumulation_data = {0, 0, 0, 0};
+        std::array<float, 4> animation_time_data = {0.0f, 0.0f, 0.0f, 0.0f};
         // Row-major previous-frame view*projection matrix used by the ray-gen
         // shader to compute camera-space motion vectors for TAA reprojection.
         std::array<float, 16> prev_view_projection = {1.0f, 0.0f, 0.0f, 0.0f,
@@ -356,6 +359,15 @@ private:
         // .x = enabled (0/1), .y = max_samples (float, 1..8),
         // .z = contrast_threshold (e.g. 0.25), .w = feature_preservation (0..1).
         std::array<float, 4> adaptive_params = {0.0f, 1.0f, 0.25f, 0.7f};
+        // Global water surface controls for full-screen underwater shading.
+        // .x = has water surface (0/1), .y = base water height in world Y.
+        std::array<float, 4> underwater_data = {0.0f, 0.0f, 0.0f, 0.0f};
+        // World->local transform of the water plane used to confine
+        // underwater logic to the plane footprint.
+        std::array<float, 16> underwater_world_to_local = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                           0.0f, 1.0f, 0.0f, 0.0f,
+                                                           0.0f, 0.0f, 1.0f, 0.0f,
+                                                           0.0f, 0.0f, 0.0f, 1.0f};
     };
 
     // CPU-side parameters fed into the TAA compute UBO each frame.
@@ -431,6 +443,12 @@ private:
     // instances use their current transform as their first prev (so the
     // first frame collapses motion to camera-only reprojection).
     std::unordered_map<std::string, std::array<float, 16>> prev_instance_transforms_;
+    bool has_water_surface_ = false;
+    float water_surface_base_height_ = 0.0f;
+    std::array<float, 16> water_surface_world_to_local_ = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                            0.0f, 1.0f, 0.0f, 0.0f,
+                                                            0.0f, 0.0f, 1.0f, 0.0f,
+                                                            0.0f, 0.0f, 0.0f, 1.0f};
     VkImage fallback_texture_image_ = VK_NULL_HANDLE;
     VkDeviceMemory fallback_texture_memory_ = VK_NULL_HANDLE;
     VkImageView fallback_texture_view_ = VK_NULL_HANDLE;
@@ -454,6 +472,7 @@ private:
     bool accumulation_reference_uniforms_valid_ = false;
     std::uint32_t accumulation_frame_count_ = 0;
     std::uint32_t raw_frame_count_ = 0;
+    std::uint64_t animation_time_start_ticks_ = 0;
     bool accumulation_reset_requested_ = true;
     bool dynamic_geometry_present_ = false;
     std::uint64_t scene_signature_ = 0;

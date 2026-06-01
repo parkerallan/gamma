@@ -128,6 +128,7 @@ public:
         SceneVector3 bounds_max = {0.0f, 0.0f, 0.0f};
         bool has_bounds = false;
         bool selected = false;
+        bool is_water_surface = false;
     };
 
 private:

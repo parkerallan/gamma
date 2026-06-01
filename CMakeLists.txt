@@ -450,6 +450,10 @@ add_engine_shader(animator_preview.vert vert)
 add_engine_shader(animator_preview.frag frag)
 add_engine_shader(effects_depth.vert vert)
 add_engine_shader(effects_depth.frag frag)
+add_engine_shader(water_surface.vert vert)
+add_engine_shader(water_surface.frag frag)
+add_engine_shader(water_underwater.vert vert)
+add_engine_shader(water_underwater.frag frag)
 
 add_custom_target(engine_scene_shaders
     DEPENDS ${ENGINE_SHADER_OUTPUTS}

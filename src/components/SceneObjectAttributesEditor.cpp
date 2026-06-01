@@ -34,6 +34,7 @@ constexpr SceneObjectAttributeKind kAttachableAttributeKinds[] = {
     SceneObjectAttributeKind::Skybox,
     SceneObjectAttributeKind::Audio,
     SceneObjectAttributeKind::Effects,
+    SceneObjectAttributeKind::Shader,
 };
 
 constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
@@ -389,7 +390,8 @@ bool RenderAttributeSection(
             attribute.kind != SceneObjectAttributeKind::Color2D &&
             attribute.kind != SceneObjectAttributeKind::Video2D &&
             attribute.kind != SceneObjectAttributeKind::Skybox &&
-            attribute.kind != SceneObjectAttributeKind::Effects)
+            attribute.kind != SceneObjectAttributeKind::Effects &&
+            attribute.kind != SceneObjectAttributeKind::Shader)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
             {
@@ -1850,6 +1852,54 @@ bool RenderAttributeSection(
             effect_play_mode_radio("Loop", SceneObjectEffectsPlayMode::Loop);
             ImGui::SameLine();
             effect_play_mode_radio("Play Once", SceneObjectEffectsPlayMode::PlayOnce);
+
+            break;
+        }
+
+        case SceneObjectAttributeKind::Shader:
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Settings");
+            ImGui::TextDisabled("Applies to the object's 3D Shape.");
+
+            struct ShaderTypeOption
+            {
+                const char* label;
+                SceneObjectShaderType type;
+            };
+            constexpr ShaderTypeOption kShaderTypeOptions[] = {
+                {"Water", SceneObjectShaderType::Water},
+            };
+
+            int selected_shader_index = 0;
+            for (int i = 0; i < static_cast<int>(std::size(kShaderTypeOptions)); ++i)
+            {
+                if (kShaderTypeOptions[i].type == attribute.shader.type)
+                {
+                    selected_shader_index = i;
+                    break;
+                }
+            }
+
+            if (ImGui::BeginCombo("Type", kShaderTypeOptions[selected_shader_index].label))
+            {
+                for (int i = 0; i < static_cast<int>(std::size(kShaderTypeOptions)); ++i)
+                {
+                    const bool selected = i == selected_shader_index;
+                    if (ImGui::Selectable(kShaderTypeOptions[i].label, selected))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "shader type", [&]()
+                        {
+                            return SetSceneObjectAttributeShaderType(state.selected_item_path, object.name, attribute_index, kShaderTypeOptions[i].type);
+                        }) || changed;
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
 
             break;
         }

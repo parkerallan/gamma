@@ -42,6 +42,37 @@ std::string ToDisplayString(const aiString& value)
     return value.length > 0 ? std::string(value.C_Str()) : std::string();
 }
 
+bool IsWaterSurfaceObject(const SceneObjectMetadata& object)
+{
+    bool has_shape3d = false;
+    bool has_water_shader = false;
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shape3D)
+        {
+            has_shape3d = true;
+        }
+        else if (attribute.kind == SceneObjectAttributeKind::Shader &&
+                 attribute.shader.type == SceneObjectShaderType::Water)
+        {
+            has_water_shader = true;
+        }
+    }
+
+    if (!has_shape3d || !has_water_shader || object.model_path.empty())
+    {
+        return false;
+    }
+
+    std::string file_name = std::filesystem::path(object.model_path).filename().string();
+    for (char& ch : file_name)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+
+    return file_name == "plane.glb" || file_name == "plane.gltf" || file_name == "plane.fbx";
+}
+
 float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
 {
     if (end_ticks <= start_ticks)
@@ -5337,6 +5368,7 @@ bool RuntimeRenderer::BuildQueuedScene(
 
         QueuedSceneObject queued_object;
         queued_object.name = object.name;
+        queued_object.is_water_surface = IsWaterSurfaceObject(object);
         queued_object.script_paths.reserve(object.script_paths.size());
         for (const std::string& script_path : object.script_paths)
         {
@@ -5369,7 +5401,9 @@ bool RuntimeRenderer::BuildQueuedScene(
             }
         }
 
-        if (!has_renderable_model && queued_object.script_paths.empty() && queued_object.graph_paths.empty())
+        if (!has_renderable_model &&
+            queued_object.script_paths.empty() &&
+            queued_object.graph_paths.empty())
         {
             continue;
         }
@@ -5607,6 +5641,7 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
         instance_input.transform = object.model_matrix;
+        instance_input.shader_type = object.is_water_surface ? 1u : 0u;
         ApplyLocalModelOffset(instance_input.transform.data(), object.model_visual_offset);
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -5915,15 +5950,18 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
 
     if (ray_tracing_.WasFrameSubmittedLastCall())
     {
+        VkImageLayout post_ray_tracing_layout = ray_tracing_.GetOutputLayout();
+        ray_tracing_.SetOutputLayout(post_ray_tracing_layout);
+
         const std::uint64_t effects_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         const std::vector<RuntimeEffectsRenderer::QueuedEffect> queued_effects = BuildQueuedEffects(scene_metadata);
-        VkImageLayout effects_output_layout = ray_tracing_.GetOutputLayout();
+        VkImageLayout effects_output_layout = post_ray_tracing_layout;
         std::vector<std::string> completed_play_once_keys;
         std::string effects_error;
         if (!effects_renderer_.RenderEffects(
                 ray_tracing_.GetOutputImage(),
                 ray_tracing_.GetOutputImageView(),
-                ray_tracing_.GetOutputLayout(),
+                post_ray_tracing_layout,
                 ray_tracing_.GetOutputWidth(),
                 ray_tracing_.GetOutputHeight(),
                 ray_tracing_.GetCurrentDepthImage(),

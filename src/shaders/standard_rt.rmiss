@@ -33,10 +33,14 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    vec4 animation_time_data;
     mat4 prev_view_projection;
     mat4 current_view_projection;
     vec4 taa_params;
     vec4 jitter_offset;
+    vec4 adaptive_params;
+    vec4 underwater_data;
+    mat4 underwater_world_to_local;
 } scene_uniforms;
 
 layout(set = 0, binding = 8) uniform sampler2D skybox_texture;

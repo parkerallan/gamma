@@ -1434,8 +1434,21 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     new_instance_records.reserve(instances.size());
     std::vector<std::pair<std::string, std::array<float, 16>>> instance_curr_for_cache;
     instance_curr_for_cache.reserve(instances.size());
+    bool found_water_surface = false;
+    float water_surface_height = 0.0f;
+    std::array<float, 16> water_world_to_local = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                  0.0f, 1.0f, 0.0f, 0.0f,
+                                                  0.0f, 0.0f, 1.0f, 0.0f,
+                                                  0.0f, 0.0f, 0.0f, 1.0f};
     for (const InstanceInput& instance : instances)
     {
+        if (instance.shader_type == 1u && !found_water_surface)
+        {
+            found_water_surface = true;
+            water_surface_height = instance.transform[13];
+            Invert4x4(instance.transform, water_world_to_local);
+        }
+
         const auto mesh_it = bottom_level_cache_.find(instance.mesh_key);
         const auto mesh_index_it = mesh_index_by_key.find(instance.mesh_key);
         if (mesh_it == bottom_level_cache_.end() ||
@@ -1468,12 +1481,19 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             record.prev_transform =
                 (cached != prev_instance_transforms_.end()) ? cached->second : instance.transform;
         }
+        record.shader_data[0] = instance.shader_type;
         new_instance_records.push_back(record);
         instance_curr_for_cache.emplace_back(instance.key, instance.transform);
     }
 
     if (new_instances.empty())
     {
+        has_water_surface_ = false;
+        water_surface_base_height_ = 0.0f;
+        water_surface_world_to_local_ = {1.0f, 0.0f, 0.0f, 0.0f,
+                                         0.0f, 1.0f, 0.0f, 0.0f,
+                                         0.0f, 0.0f, 1.0f, 0.0f,
+                                         0.0f, 0.0f, 0.0f, 1.0f};
         pending_acceleration_instances_.clear();
         tlas_rebuild_pending_         = true;
         tlas_refit_pending_           = false;
@@ -1483,6 +1503,15 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         status_message_ = "RT scene has no buildable instances";
         return true;
     }
+
+    has_water_surface_ = found_water_surface;
+    water_surface_base_height_ = found_water_surface ? water_surface_height : 0.0f;
+    water_surface_world_to_local_ = found_water_surface
+        ? water_world_to_local
+        : std::array<float, 16>{1.0f, 0.0f, 0.0f, 0.0f,
+                                0.0f, 1.0f, 0.0f, 0.0f,
+                                0.0f, 0.0f, 1.0f, 0.0f,
+                                0.0f, 0.0f, 0.0f, 1.0f};
 
     // Topology signature hashes BLAS device-addresses and instance count.
     // This is stable during a gizmo drag, enabling a cheap TLAS refit instead of a rebuild.
@@ -3474,9 +3503,30 @@ bool RayTracing::RenderFrame(
         static_cast<float>(taa_debug_.adaptive_max_samples),
         taa_debug_.adaptive_threshold,
         taa_debug_.adaptive_preservation};
+    uniforms.underwater_data = {
+        has_water_surface_ ? 1.0f : 0.0f,
+        water_surface_base_height_,
+        0.0f,
+        0.0f};
+    uniforms.underwater_world_to_local = water_surface_world_to_local_;
+
+    const std::uint64_t now_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+    if (animation_time_start_ticks_ == 0)
+    {
+        animation_time_start_ticks_ = now_ticks;
+    }
+    const std::uint64_t perf_frequency = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+    const float elapsed_seconds =
+        (perf_frequency != 0 && now_ticks >= animation_time_start_ticks_)
+            ? static_cast<float>(
+                static_cast<double>(now_ticks - animation_time_start_ticks_) /
+                static_cast<double>(perf_frequency))
+            : 0.0f;
+    uniforms.animation_time_data = {elapsed_seconds, 0.0f, 0.0f, 0.0f};
 
     UniformBlock accumulation_reference = uniforms;
     accumulation_reference.accumulation_data = {0, 0, 0, 0};
+    accumulation_reference.animation_time_data = {0.0f, 0.0f, 0.0f, 0.0f};
     // The TAA fields change every frame by design; zero them out before the
     // accumulation comparison so they do not falsely trigger a reset.
     accumulation_reference.prev_view_projection = {};

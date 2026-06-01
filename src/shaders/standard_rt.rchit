@@ -40,10 +40,14 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 skybox_data;
     uvec4 counts;
     uvec4 accumulation_data;
+    vec4 animation_time_data;
     mat4 prev_view_projection;
     mat4 current_view_projection;
     vec4 taa_params;
     vec4 jitter_offset;
+    vec4 adaptive_params;
+    vec4 underwater_data;
+    mat4 underwater_world_to_local;
 } scene_uniforms;
 
 struct SceneVertex
@@ -152,6 +156,7 @@ struct InstanceRecord
 {
     mat4 current_transform;
     mat4 prev_transform;
+    uvec4 shader_data;
 };
 
 layout(set = 0, binding = 10, std430) readonly buffer InstanceRecordBuffer
@@ -160,8 +165,68 @@ layout(set = 0, binding = 10, std430) readonly buffer InstanceRecordBuffer
 };
 
 const float PI = 3.1415926535897932384626433832795;
+const int WATER_ITER_FRAGMENT = 5;
+const mat2 WATER_OCTAVE_M = mat2(vec2(1.6, 1.2), vec2(-1.2, 1.6));
+const float WATER_PLANE_HALF_EXTENT = 1.0005;
 const uint SOFT_SHADOW_SAMPLE_COUNT = 6u;
 const uint ROUGH_TRANSMISSION_SAMPLE_COUNT = 1u;
+
+float water_hash12(vec2 p)
+{
+    uvec2 q = uvec2(ivec2(p)) * uvec2(1597334677u, 3812015801u);
+    uint n = (q.x ^ q.y) * 1597334677u;
+    return float(n) * (1.0 / 4294967295.0);
+}
+
+float water_noise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return -1.0 + 2.0 * mix(
+        mix(water_hash12(i + vec2(0.0, 0.0)), water_hash12(i + vec2(1.0, 0.0)), u.x),
+        mix(water_hash12(i + vec2(0.0, 1.0)), water_hash12(i + vec2(1.0, 1.0)), u.x),
+        u.y);
+}
+
+float water_sea_octave(vec2 uv, float choppy)
+{
+    uv += water_noise(uv);
+    vec2 wv = 1.0 - abs(sin(uv));
+    vec2 swv = abs(cos(uv));
+    wv = mix(wv, swv, wv);
+    return pow(1.0 - pow(wv.x * wv.y, 0.65), choppy);
+}
+
+float water_wave_height(vec2 xz, float time_seconds)
+{
+    float freq = 0.18;
+    float amp = 0.55;
+    float choppy = 4.0;
+    float speed = 0.85;
+    vec2 uv = xz;
+    uv.x *= 0.75;
+    float h = 0.0;
+    for (int i = 0; i < WATER_ITER_FRAGMENT; ++i)
+    {
+        float d = water_sea_octave((uv + time_seconds * speed) * freq, choppy);
+        d += water_sea_octave((uv - time_seconds * speed) * freq, choppy);
+        h += d * amp;
+        uv *= WATER_OCTAVE_M;
+        freq *= 1.9;
+        amp *= 0.22;
+        choppy = mix(choppy, 1.0, 0.2);
+    }
+    return h;
+}
+
+vec3 water_normal_detail(vec3 world_position, float eps, float time_seconds)
+{
+    float h = water_wave_height(world_position.xz, time_seconds);
+    float hx = water_wave_height(world_position.xz + vec2(eps, 0.0), time_seconds);
+    float hz = water_wave_height(world_position.xz + vec2(0.0, eps), time_seconds);
+    return normalize(vec3(h - hx, eps, h - hz));
+}
 
 // Resolve the per-frame shadow sample count for a primary-depth shadow ray.
 // When the host sets accumulation_data.z it acts as a minimum override -- this
@@ -1423,6 +1488,135 @@ void main()
             0);
         shaded_color = mix(primary_payload.color.rgb, shaded_color, alpha);
         primary_payload.depth = current_depth;
+    }
+
+    uint shader_type = instance_records[gl_InstanceID].shader_data.x;
+    if (shader_type == 1u)
+    {
+        float time_seconds = scene_uniforms.animation_time_data.x;
+        float distance_to_ray_origin = length(world_position - gl_WorldRayOriginEXT);
+        float eps = max(0.03, distance_to_ray_origin * 0.0025);
+        vec3 wave_normal = water_normal_detail(world_position, eps, time_seconds);
+        vec3 water_normal = normalize(mix(world_normal, wave_normal, 0.9));
+
+        float wave_height = water_wave_height(world_position.xz, time_seconds);
+        float wave_band = clamp(0.5 + wave_height * 0.35, 0.0, 1.0);
+
+        // water_thickness = ray-traced path length from surface to background geometry.
+        // Set to refracted_distance once the refraction ray hits something.
+        float water_thickness = 2.0;
+
+        float ndotv = max(dot(water_normal, view_direction), 0.0);
+        float fresnel = pow(1.0 - ndotv, 5.0);
+        vec3 reflection_tint = mix(vec3(0.25, 0.55, 0.75), vec3(0.55, 0.78, 0.92), fresnel);
+
+        vec3 light_direction = normalize(-scene_uniforms.directional_light_direction.xyz);
+        vec3 half_vector = normalize(light_direction + view_direction);
+        float sun_specular = pow(max(dot(water_normal, half_vector), 0.0), 140.0);
+        sun_specular *= scene_uniforms.directional_light_color.a;
+
+        vec3 camera_local = (scene_uniforms.underwater_world_to_local * vec4(gl_WorldRayOriginEXT, 1.0)).xyz;
+        bool camera_inside_water =
+            abs(camera_local.x) <= WATER_PLANE_HALF_EXTENT &&
+            abs(camera_local.z) <= WATER_PLANE_HALF_EXTENT;
+        float camera_wave_height_local = water_wave_height(camera_local.xz, time_seconds);
+        bool camera_underwater = camera_inside_water && (camera_local.y < camera_wave_height_local);
+
+        vec3 refracted_color = shaded_color;
+        float refracted_distance = 2.0;
+        if (primary_payload.depth < 6u)
+        {
+            bool front_face = dot(water_normal, view_direction) > 0.0;
+            vec3 transmission_normal = front_face ? water_normal : -water_normal;
+            float eta = front_face ? (1.0 / 1.333) : 1.333;
+            vec3 refraction_direction = refract(gl_WorldRayDirectionEXT, transmission_normal, eta);
+            if (dot(refraction_direction, refraction_direction) <= 0.0001)
+            {
+                refraction_direction = reflect(gl_WorldRayDirectionEXT, transmission_normal);
+            }
+
+            const uint current_depth = primary_payload.depth;
+            primary_payload.color = vec4(0.02, 0.05, 0.08, 1.0);
+            primary_payload.hit_distance = 1e30;
+            primary_payload.depth = current_depth + 1u;
+            // Offset along the REFRACTION direction (not vertically through the water slab) with
+            // a tiny offset and tmin=0 so beach geometry sitting only millimetres below the water
+            // surface at the shoreline can still register as a hit.
+            vec3 refraction_dir_n  = normalize(refraction_direction);
+            vec3 refraction_origin = world_position + refraction_dir_n * 0.0005;
+            traceRayEXT(
+                top_level_as,
+                gl_RayFlagsNoneEXT,
+                0xFF,
+                0,
+                1,
+                0,
+                refraction_origin,
+                0.0,
+                refraction_dir_n,
+                10000.0,
+                0);
+            refracted_color = primary_payload.color.rgb;
+            float actual_hit_dist = primary_payload.hit_distance;
+            refracted_distance = actual_hit_dist < 9e29 ? actual_hit_dist : 2.0;
+
+            // Water thickness = VERTICAL Y-drop from water surface to the hit point.
+            // This is the correct measure of visual water depth regardless of view angle:
+            //   - shallow seabed or cliff face near waterline → hit_y ≈ surface_y → near 0 → clear
+            //   - cliff face deep below surface               → hit_y << surface_y → large  → dark
+            //   - oblique grazing views no longer over-attenuate because Y-drop is view-angle-independent
+            if (actual_hit_dist < 9e29)
+            {
+                vec3 hit_world_pos = refraction_origin + refraction_dir_n * actual_hit_dist;
+                water_thickness = max(0.0, world_position.y - hit_world_pos.y);
+            }
+            else
+            {
+                // No geometry hit → treat as deep open water
+                water_thickness = 10.0;
+            }
+            primary_payload.depth = current_depth;
+        }
+
+        // Article Beer-Lambert: red absorbed fastest, blue slowest.
+        // water_thickness ≈ 0 (geometry near surface/edge) → transmittance ≈ 1 → clear.
+        // water_thickness large (deep geometry)            → transmittance → 0 → fog colour dominates.
+        // Normalise thickness to [0,1] over max_depth so shallow water is truly clear.
+        // Using raw world-unit thickness in exp() directly over-attenuates because the
+        // refracted ray travels obliquely — more units than the vertical water depth.
+        const float max_depth = 10.0;
+        float depth_ratio     = clamp(water_thickness / max_depth, 0.0, 1.0);
+        // Beer-Lambert over normalised depth: depth_ratio=0 → transmittance=1 (clear), depth_ratio=1 → fully absorbed.
+        vec3 transmittance    = exp(-depth_ratio * vec3(3.0, 0.8, 0.2));
+        vec3 deep_color_v     = vec3(0.02,  0.25,  0.75);
+        vec3 underwater_fog_v = vec3(0.05,  0.35,  0.80);
+        vec3 water_volume_color    = mix(vec3(1.0), deep_color_v, depth_ratio);
+        vec3 apparent_seabed_color = refracted_color * water_volume_color;
+        vec3 transmitted_water     = mix(underwater_fog_v, apparent_seabed_color, transmittance);
+
+        // Crest foam (wave tops)
+        float crest = smoothstep(0.72, 0.98, wave_band) * pow(1.0 - ndotv, 1.8);
+        vec3 crest_foam = vec3(0.92, 0.96, 1.0) * crest * 0.45;
+
+        // Shoreline foam: solid white where Y-drop from surface to terrain is near zero (terrain at waterline).
+        float shore_foam      = 1.0 - smoothstep(0.0, 0.15, water_thickness);
+        vec3 shore_foam_color = vec3(1.0) * shore_foam;
+
+        float reflection_weight = camera_underwater ? (1.0 - fresnel) * 0.2 : fresnel * 0.78;
+        vec3 surface_color = mix(transmitted_water, reflection_tint, clamp(reflection_weight, 0.0, 0.95)) +
+            scene_uniforms.directional_light_color.rgb * sun_specular * 0.75 +
+            crest_foam + shore_foam_color;
+
+        if (camera_underwater)
+        {
+            // Use water_thickness for consistency; for upward (sky) refraction rays it will be 0 → no fog.
+            float fog_factor  = 1.0 - exp(-water_thickness * 0.35 * 0.7);
+            vec3 underwater_tint = vec3(0.02, 0.18, 0.25);
+            surface_color = mix(surface_color, underwater_tint, clamp(fog_factor * 0.85, 0.0, 0.9));
+        }
+
+        shaded_color = surface_color;
+        world_normal = water_normal;
     }
 
     primary_payload.color = vec4(shaded_color, 1.0);

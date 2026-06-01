@@ -176,6 +176,7 @@ public:
         std::array<float, 16> model_matrix{};
         std::vector<std::filesystem::path> script_paths;
         std::vector<std::filesystem::path> graph_paths;
+        bool is_water_surface = false;
     };
 
     struct CachedScriptSourceEntry

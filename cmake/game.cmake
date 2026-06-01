@@ -76,6 +76,10 @@ add_game_shader(overlay2d.vert vert)
 add_game_shader(overlay2d.frag frag)
 add_game_shader(effects_depth.vert vert)
 add_game_shader(effects_depth.frag frag)
+add_game_shader(water_surface.vert vert)
+add_game_shader(water_surface.frag frag)
+add_game_shader(water_underwater.vert vert)
+add_game_shader(water_underwater.frag frag)
 
 add_custom_target(game_shaders
     DEPENDS ${GAME_SHADER_OUTPUTS}
