@@ -1909,6 +1909,7 @@ bool RenderAttributeSection(
             constexpr ShaderTypeOption kShaderTypeOptions[] = {
                 {"None", SceneObjectShaderType::None},
                 {"Water", SceneObjectShaderType::Water},
+                {"Cloud", SceneObjectShaderType::Cloud},
             };
 
             int selected_shader_index = 0;

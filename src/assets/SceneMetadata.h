@@ -47,6 +47,7 @@ enum class SceneObjectShaderType
 {
     None,
     Water,
+    Cloud,
 };
 
 enum class SceneObjectAudioPlayMode

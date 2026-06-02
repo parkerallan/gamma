@@ -155,6 +155,7 @@ public:
         float grid_extent);
     void SetSkyboxTexture(VkImageView skybox_view);
     void SetSkyboxRotation(float rotation_degrees);
+    void SetClouds(const std::vector<std::array<float, 4>>& clouds);
 
     // TAA (temporal anti-aliasing) controls. Off by default until the host
     // explicitly opts in (the editor viewport and the runtime renderer both
@@ -368,6 +369,10 @@ private:
                                                            0.0f, 1.0f, 0.0f, 0.0f,
                                                            0.0f, 0.0f, 1.0f, 0.0f,
                                                            0.0f, 0.0f, 0.0f, 1.0f};
+        // Cloud volumes: up to 8 clouds, each xyz=world-space center, w=radius.
+        // cloud_count.x = number of active clouds (0 = disabled).
+        std::array<std::uint32_t, 4> cloud_count = {0, 0, 0, 0};
+        std::array<float, 32> cloud_params = {};  // 8 * vec4
     };
 
     // CPU-side parameters fed into the TAA compute UBO each frame.
@@ -449,6 +454,7 @@ private:
                                                             0.0f, 1.0f, 0.0f, 0.0f,
                                                             0.0f, 0.0f, 1.0f, 0.0f,
                                                             0.0f, 0.0f, 0.0f, 1.0f};
+    std::vector<std::array<float, 4>> clouds_;
     VkImage fallback_texture_image_ = VK_NULL_HANDLE;
     VkDeviceMemory fallback_texture_memory_ = VK_NULL_HANDLE;
     VkImageView fallback_texture_view_ = VK_NULL_HANDLE;

@@ -41,6 +41,8 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     vec4 adaptive_params;
     vec4 underwater_data;
     mat4 underwater_world_to_local;
+    uvec4 cloud_count;       // .x = number of active clouds
+    vec4 cloud_params[8];    // xyz=center, w=radius per cloud
 } scene_uniforms;
 
 layout(set = 0, binding = 8) uniform sampler2D skybox_texture;
@@ -131,9 +133,141 @@ vec3 unjittered_ray_direction(vec2 pixel_center)
     return normalize((scene_uniforms.view_inverse * vec4(view_direction, 0.0)).xyz);
 }
 
+// ---- Volumetric cloud helpers (clouds.txt port, runs in miss shader = no proxy mesh) ----
+
+#define CLOUD_MAX_STEPS  120
+#define CLOUD_MAX_LIGHT  6
+#define CLOUD_ABSORPTION 0.9
+#define CLOUD_ANISO      0.3
+#define CLOUD_PI         3.14159265359
+
+float cloud_hash(float n)
+{
+    return fract(sin(n) * 753.5453123);
+}
+
+float cloud_noise(vec3 x)
+{
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = p.x + p.y * 157.0 + 113.0 * p.z;
+    return mix(
+        mix(mix(cloud_hash(n + 0.0),   cloud_hash(n + 1.0),   f.x),
+            mix(cloud_hash(n + 157.0), cloud_hash(n + 158.0), f.x), f.y),
+        mix(mix(cloud_hash(n + 113.0), cloud_hash(n + 114.0), f.x),
+            mix(cloud_hash(n + 270.0), cloud_hash(n + 271.0), f.x), f.y),
+        f.z) * 2.0 - 1.0;
+}
+
+float cloud_fbm(vec3 p, bool lowRes)
+{
+    float t = scene_uniforms.animation_time_data.x;
+    vec3  q = p + t * 0.02 * vec3(1.0, -0.2, -1.0);
+    float f = 0.0, scale = 0.8, factor = 2.02;
+    for (int i = 0; i < 6; i++)
+    {
+        if (lowRes && i >= 3) break;
+        f     += scale * cloud_noise(q);
+        q     *= factor;
+        factor += 0.21;
+        scale  *= 0.5;
+    }
+    return f;
+}
+
+float cloud_density(vec3 p_world, vec3 center, float radius, bool lowRes)
+{
+    vec3  p = (p_world - center) / radius;
+    float r = length(p);
+    if (r > 2.8) return 0.0;
+    vec3 seed = fract(center * 0.137) * 10.0;
+    return -(r - 1.2) + cloud_fbm(p + seed, lowRes);
+}
+
+float cloud_lightmarch(vec3 pos, vec3 sunDir, vec3 center, float radius)
+{
+    float total = 0.0, ms = 0.03 * radius;
+    for (int i = 0; i < CLOUD_MAX_LIGHT; i++)
+    {
+        pos   += sunDir * ms * float(i);
+        total += cloud_density(pos, center, radius, true);
+    }
+    return exp(-total * CLOUD_ABSORPTION);
+}
+
+bool cloud_hit_sphere(vec3 ro, vec3 rd, vec3 c, float r, out float t0, out float t1)
+{
+    vec3  oc   = ro - c;
+    float b    = dot(oc, rd);
+    float disc = b * b - dot(oc, oc) + r * r;
+    if (disc < 0.0) return false;
+    float sq = sqrt(disc);
+    t0 = -b - sq;
+    t1 = -b + sq;
+    return t1 > 0.0;
+}
+
+float cloud_HG(float g, float mu)
+{
+    float gg = g * g;
+    return (1.0 / (4.0 * CLOUD_PI)) * ((1.0 - gg) / pow(1.0 + gg - 2.0 * g * mu, 1.5));
+}
+
+void cloud_raymarch(vec3 ro, vec3 rd, vec3 sunDir, vec3 center, float radius, inout vec3 color)
+{
+    float t0, t1;
+    if (!cloud_hit_sphere(ro, rd, center, radius * 2.8, t0, t1) || t1 < 0.0) return;
+    t0 = max(t0, 0.0);
+
+    float ms    = 0.08 * radius;       // step size
+    float phase = cloud_HG(CLOUD_ANISO, dot(rd, sunDir));
+    float T     = 1.0;                 // view-ray transmittance (1=fully transparent)
+    vec3  Lc    = vec3(0.0);           // accumulated cloud radiance
+    float depth = t0;
+    vec3  p     = ro + depth * rd;
+
+    for (int i = 0; i < CLOUD_MAX_STEPS; i++)
+    {
+        if (depth > t1 || T < 0.01) break;
+        float d = cloud_density(p, center, radius, false);
+        if (d > 0.0)
+        {
+            // extinction per step: exp(-density * sigma * stepSize)
+            float dT = exp(-d * 0.5 * ms);
+            float lt = cloud_lightmarch(p, sunDir, center, radius);
+            // scattered radiance: sun-lit (phase-weighted) + ambient sky bounce
+            vec3 Ls = vec3(0.95, 0.95, 1.0) * lt * (1.0 + phase)
+                    + vec3(0.35, 0.40, 0.50);
+            Lc += T * (1.0 - dT) * Ls;
+            T  *= dT;
+        }
+        depth += ms;
+        p      = ro + depth * rd;
+    }
+    // composite: sky attenuated by cloud opacity, cloud radiance added
+    color = color * T + Lc;
+}
+
+// ---- end cloud helpers ----
+
 void main()
 {
     vec3 color = evaluate_sky(normalize(gl_WorldRayDirectionEXT));
+
+    // Volumetric clouds – composited over sky, no proxy mesh needed.
+    {
+        vec3 sunDir = normalize(-scene_uniforms.directional_light_direction.xyz);
+        vec3 ro = gl_WorldRayOriginEXT;
+        vec3 rd_n = normalize(gl_WorldRayDirectionEXT);
+        for (int ci = 0; ci < int(scene_uniforms.cloud_count.x); ci++)
+        {
+            cloud_raymarch(ro, rd_n, sunDir,
+                scene_uniforms.cloud_params[ci].xyz,
+                scene_uniforms.cloud_params[ci].w,
+                color);
+        }
+    }
 
     vec3 origin = gl_WorldRayOriginEXT;
     vec2 px_c   = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);

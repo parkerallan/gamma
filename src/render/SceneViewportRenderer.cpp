@@ -71,6 +71,19 @@ bool IsWaterSurfaceObject(const SceneObjectMetadata& object)
     return has_shape3d && has_water_shader && !object.model_path.empty();
 }
 
+bool IsCloudObject(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Cloud)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 Vec3 ToVec3(const SceneVector3& value)
 {
     return Vec3{value[0], value[1], value[2]};
@@ -2687,6 +2700,26 @@ void SceneViewportRenderer::SyncRayTracingScene()
     instance_inputs.reserve(queued_objects_.size());
     mesh_index_by_key.reserve(queued_objects_.size());
 
+    // Collect all cloud-tagged objects (up to 8).
+    {
+        std::vector<std::array<float, 4>> clouds;
+        for (const QueuedSceneObject& cobj : queued_objects_)
+        {
+            if (!cobj.is_cloud) continue;
+            float cx = cobj.model_matrix[12];
+            float cy = cobj.model_matrix[13];
+            float cz = cobj.model_matrix[14];
+            float sx = std::sqrt(cobj.model_matrix[0]*cobj.model_matrix[0] + cobj.model_matrix[1]*cobj.model_matrix[1] + cobj.model_matrix[2]*cobj.model_matrix[2]);
+            float sy = std::sqrt(cobj.model_matrix[4]*cobj.model_matrix[4] + cobj.model_matrix[5]*cobj.model_matrix[5] + cobj.model_matrix[6]*cobj.model_matrix[6]);
+            float sz = std::sqrt(cobj.model_matrix[8]*cobj.model_matrix[8] + cobj.model_matrix[9]*cobj.model_matrix[9] + cobj.model_matrix[10]*cobj.model_matrix[10]);
+            float cr = std::max({sx, sy, sz});
+            if (cr < 0.1f) cr = 10.0f;
+            clouds.push_back({cx, cy, cz, cr});
+            if (clouds.size() >= 8) break;
+        }
+        ray_tracing_.SetClouds(clouds);
+    }
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
         const auto mesh_entry_it = mesh_cache_.find(object.model_path);
@@ -2732,7 +2765,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
-        instance_input.shader_type = object.is_water_surface ? 1u : 0u;
+        instance_input.shader_type = object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u);
         BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -3114,6 +3147,7 @@ void SceneViewportRenderer::RenderUi(
         queued_object.name = object.name;
         queued_object.model_visual_offset = object.model_visual_offset;
         queued_object.is_water_surface = IsWaterSurfaceObject(object);
+        queued_object.is_cloud = IsCloudObject(object);
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;

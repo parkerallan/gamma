@@ -177,6 +177,7 @@ public:
         std::vector<std::filesystem::path> script_paths;
         std::vector<std::filesystem::path> graph_paths;
         bool is_water_surface = false;
+        bool is_cloud = false;
     };
 
     struct CachedScriptSourceEntry

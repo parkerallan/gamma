@@ -62,6 +62,19 @@ bool IsWaterSurfaceObject(const SceneObjectMetadata& object)
     return has_shape3d && has_water_shader && !object.model_path.empty();
 }
 
+bool IsCloudObject(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Cloud)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
 {
     if (end_ticks <= start_ticks)
@@ -5358,6 +5371,7 @@ bool RuntimeRenderer::BuildQueuedScene(
         QueuedSceneObject queued_object;
         queued_object.name = object.name;
         queued_object.is_water_surface = IsWaterSurfaceObject(object);
+        queued_object.is_cloud = IsCloudObject(object);
         queued_object.script_paths.reserve(object.script_paths.size());
         for (const std::string& script_path : object.script_paths)
         {
@@ -5427,7 +5441,8 @@ bool RuntimeRenderer::BuildQueuedScene(
 
         if (!has_renderable_model &&
             queued_object.script_paths.empty() &&
-            queued_object.graph_paths.empty())
+            queued_object.graph_paths.empty() &&
+            !queued_object.is_cloud)
         {
             continue;
         }
@@ -5591,6 +5606,26 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
     mesh_inputs.reserve(queued_objects_.size());
     instance_inputs.reserve(queued_objects_.size());
 
+    // Collect all cloud-tagged objects (up to 8).
+    {
+        std::vector<std::array<float, 4>> clouds;
+        for (const QueuedSceneObject& cobj : queued_objects_)
+        {
+            if (!cobj.is_cloud) continue;
+            float cx = cobj.model_matrix[12];
+            float cy = cobj.model_matrix[13];
+            float cz = cobj.model_matrix[14];
+            float sx = std::sqrt(cobj.model_matrix[0]*cobj.model_matrix[0] + cobj.model_matrix[1]*cobj.model_matrix[1] + cobj.model_matrix[2]*cobj.model_matrix[2]);
+            float sy = std::sqrt(cobj.model_matrix[4]*cobj.model_matrix[4] + cobj.model_matrix[5]*cobj.model_matrix[5] + cobj.model_matrix[6]*cobj.model_matrix[6]);
+            float sz = std::sqrt(cobj.model_matrix[8]*cobj.model_matrix[8] + cobj.model_matrix[9]*cobj.model_matrix[9] + cobj.model_matrix[10]*cobj.model_matrix[10]);
+            float cr = std::max({sx, sy, sz});
+            if (cr < 0.1f) cr = 10.0f;
+            clouds.push_back({cx, cy, cz, cr});
+            if (clouds.size() >= 8) break;
+        }
+        ray_tracing_.SetClouds(clouds);
+    }
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
         const std::uint64_t skinning_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
@@ -5665,7 +5700,7 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
         instance_input.transform = object.model_matrix;
-        instance_input.shader_type = object.is_water_surface ? 1u : 0u;
+        instance_input.shader_type = object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u);
         ApplyLocalModelOffset(instance_input.transform.data(), object.model_visual_offset);
         instance_inputs.push_back(std::move(instance_input));
     }

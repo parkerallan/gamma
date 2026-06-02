@@ -2241,6 +2241,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             {
                 current_attribute->shader.type = SceneObjectShaderType::Water;
             }
+            else if (type_name == "Cloud")
+            {
+                current_attribute->shader.type = SceneObjectShaderType::Cloud;
+            }
             else
             {
                 current_attribute->shader.type = SceneObjectShaderType::None;
@@ -3440,6 +3444,7 @@ bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, 
     switch (type)
     {
     case SceneObjectShaderType::Water: value = "Water"; break;
+    case SceneObjectShaderType::Cloud: value = "Cloud"; break;
     default:                           value = "None";  break;
     }
     return SetSceneObjectAttributeStringValue("AttributeShaderType", scene_path, object_name, attribute_index, value);
