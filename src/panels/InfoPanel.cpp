@@ -1,5 +1,6 @@
 #include "panels/InfoPanel.h"
 
+#include "assets/PrefabAsset.h"
 #include "components/SceneObjectAttributesEditor.h"
 #include "imgui.h"
 
@@ -617,6 +618,49 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     ImGui::PopID();
     ImGui::SameLine();
     ImGui::TextUnformatted(selected_object.name.c_str());
+
+    // ---- Save as Prefab ----------------------------------------------
+    {
+        const bool scene_dirty_blocks_prefab_save = state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty;
+        ImGui::SameLine();
+        ImGui::PushID("SaveAsPrefab");
+        if (scene_dirty_blocks_prefab_save)
+        {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::SmallButton("Save as Prefab"))
+        {
+            if (state.project_root.empty())
+            {
+                state.AddLog("Cannot save prefab: no project is loaded");
+            }
+            else
+            {
+                std::string saved_name;
+                if (AddSceneObjectAsPrefab(state.project_root, state.selected_item_path, selected_object.name, &saved_name))
+                {
+                    state.AddLog("Saved prefab: " + saved_name);
+                }
+                else
+                {
+                    state.AddLog("Failed to save prefab from object: " + selected_object.name);
+                }
+            }
+        }
+        if (scene_dirty_blocks_prefab_save)
+        {
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                ImGui::SetTooltip("Save the open scene before creating a prefab");
+            }
+        }
+        else if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Save this object (and its children) as a reusable prefab under Assets/Prefabs");
+        }
+        ImGui::PopID();
+    }
 
     // ---- Tags ---------------------------------------------------------
     ImGui::PushID("ObjectTags");

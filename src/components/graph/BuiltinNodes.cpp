@@ -1038,6 +1038,54 @@ void RegisterApiNodes(NodeSpecRegistry& reg)
           PinIn("Y",      PinType::Number, "0"),
           PinIn("Z",      PinType::Number, "0") }));
 
+    // Spawn Prefab -----------------------------------------------------
+    // Instantiates the named prefab (root object only) into the current
+    // scene at runtime. Exposes the spawned object's actual name on the
+    // SpawnedName data-output pin so downstream nodes can address it
+    // (the runtime uniquifies the name when it collides with an existing
+    // object). Position pins override the prefab's stored position.
+    {
+        NodeSpec s;
+        s.type_key = "world.SpawnPrefab";
+        s.display_name = "Spawn Prefab";
+        s.category = "World";
+        s.is_exec_node = true;
+        s.header_color = world_color;
+        s.inputs  = { ExecIn(),
+                      PinIn("Prefab", PinType::String, "MyPrefab"),
+                      PinIn("X",      PinType::Number, "0"),
+                      PinIn("Y",      PinType::Number, "0"),
+                      PinIn("Z",      PinType::Number, "0") };
+        s.outputs = { ExecOut("Then"),
+                      PinOut("SpawnedName", PinType::String) };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            const std::string spawned_local = std::string("spawned_") + std::to_string(node.id);
+
+            // Data-eval path: another node is reading SpawnedName.
+            if (ctx.RequestedOutputPin() == "SpawnedName")
+            {
+                return spawned_local;
+            }
+
+            const std::string prefab_expr = ctx.EvalInput(node, "Prefab");
+            const std::string x_expr      = ctx.EvalInput(node, "X");
+            const std::string y_expr      = ctx.EvalInput(node, "Y");
+            const std::string z_expr      = ctx.EvalInput(node, "Z");
+
+            // Forward-declare so EvalInput("SpawnedName") works from any
+            // downstream node in the same event function scope.
+            ctx.EmitPrelude(std::string("local ") + spawned_local);
+
+            std::string body;
+            body += spawned_local + " = World.SpawnPrefab(" + prefab_expr
+                 + ", " + x_expr + ", " + y_expr + ", " + z_expr + ")\n";
+            body += ctx.EmitFromExec(node, "Then");
+            return body;
+        };
+        reg.Register(std::move(s));
+    }
+
     reg.Register(MakeCallStatement("world.Destroy", "Destroy", "World", world_color,
         "World.Destroy({0})",
         { PinIn("Name", PinType::Object, "Target") }));

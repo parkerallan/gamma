@@ -329,6 +329,20 @@ Quick summary: Spawns from an existing object template.
 World.SpawnFromObject("EnemyTemplate", "Enemy_02", 6.0, 0.0, -2.0)
 ```
 
+#### `World.SpawnPrefab(prefabName[, x, y, z])`
+Quick summary: Instantiates the root object of the named prefab (from `Assets/Prefabs/Prefabs.metadata`) into the current scene at runtime. Returns the actual spawned object name (auto-uniquified if a name collision occurs), or raises a Lua error on failure.
+
+```lua
+local name = World.SpawnPrefab("Cloud", 0.0, 5.0, 0.0)
+Engine.Log("Spawned " .. name)
+```
+
+Notes:
+- Position arguments are optional. When omitted, the prefab's stored root position is used.
+- Spawns the prefab's **root object only** — child objects in the prefab's subtree are ignored at runtime. (Runtime spawned objects are flat; they don't carry a parent chain.)
+- The root object's `Model`, `ModelVisualOffset`, `Rotation`, `Scale`, first `Script`, and `Tag` lines are applied. Attribute blocks (`Attributes:`) are not currently transferred to runtime spawned objects.
+- Returned name is suitable to feed into `Engine.SetObjectPosition`, `Physics.SetVelocity`, `World.Destroy`, etc.
+
 #### `World.Destroy(name)`
 Quick summary: Marks an object for runtime destruction.
 

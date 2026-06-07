@@ -3496,6 +3496,9 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSpawnFromObject, 1);
     lua_setfield(script_lua_state_, -2, "SpawnFromObject");
     lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldSpawnPrefab, 1);
+    lua_setfield(script_lua_state_, -2, "SpawnPrefab");
+    lua_pushlightuserdata(script_lua_state_, this);
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldDestroy, 1);
     lua_setfield(script_lua_state_, -2, "Destroy");
     lua_pushlightuserdata(script_lua_state_, this);
@@ -5509,6 +5512,20 @@ bool RuntimeRenderer::BuildQueuedScene(
         QueuedSceneObject queued_object;
         queued_object.name = spawned.name;
         queued_object.model_visual_offset = spawned.model_visual_offset;
+
+        // Carry attribute-driven render flags over from the prefab (or any
+        // future attribute-aware spawn path). Build a minimal proxy with the
+        // fields the helpers inspect so we reuse the exact same detection
+        // logic as scene-loaded objects.
+        if (!spawned.attributes.empty())
+        {
+            SceneObjectMetadata attr_proxy;
+            attr_proxy.name = spawned.name;
+            attr_proxy.model_path = spawned.model_path;
+            attr_proxy.attributes = spawned.attributes;
+            queued_object.is_water_surface = IsWaterSurfaceObject(attr_proxy);
+            queued_object.is_cloud = IsCloudObject(attr_proxy);
+        }
 
         if (!spawned.model_path.empty())
         {

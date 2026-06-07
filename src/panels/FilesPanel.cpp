@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 
+#include "assets/PrefabAsset.h"
 #include "assets/SceneMetadata.h"
 #include "ui/Codicons.h"
 
@@ -396,6 +397,16 @@ FileTreeNode FilesPanel::BuildNode(const std::filesystem::path& path) const
             continue;
         }
 
+        if (IsPrefabMetadataFile(entry.path()))
+        {
+            std::vector<FileTreeNode> prefab_children = BuildPrefabEntryNodes(entry.path());
+            for (FileTreeNode& child : prefab_children)
+            {
+                node.children.push_back(std::move(child));
+            }
+            continue;
+        }
+
         node.children.push_back(BuildNode(entry.path()));
     }
 
@@ -464,6 +475,40 @@ std::vector<FileTreeNode> FilesPanel::BuildSceneObjectNodes(const std::filesyste
     return build_child_nodes(build_child_nodes, std::string{});
 }
 
+std::vector<FileTreeNode> FilesPanel::BuildPrefabEntryNodes(const std::filesystem::path& metadata_path) const
+{
+    if (current_root_.empty())
+    {
+        return {};
+    }
+    if (GetPrefabMetadataPath(current_root_) != metadata_path)
+    {
+        return {};
+    }
+
+    const PrefabMetadata metadata = LoadPrefabMetadata(current_root_);
+    if (!metadata.parsed)
+    {
+        return {};
+    }
+
+    std::vector<FileTreeNode> entries;
+    entries.reserve(metadata.prefabs.size());
+    for (const PrefabEntry& entry : metadata.prefabs)
+    {
+        FileTreeNode node;
+        node.path = metadata_path;
+        node.label = entry.name;
+        node.is_prefab_entry = true;
+        entries.push_back(std::move(node));
+    }
+    std::sort(entries.begin(), entries.end(), [](const FileTreeNode& a, const FileTreeNode& b)
+    {
+        return a.label < b.label;
+    });
+    return entries;
+}
+
 void FilesPanel::RenderNode(
     const FileTreeNode& node,
     EngineState& state,
@@ -478,10 +523,10 @@ void FilesPanel::RenderNode(
     }
 
     const std::string full_path = state.GetDisplayPath(node.path);
-    const std::string tree_id = node.is_scene_object
+    const std::string tree_id = (node.is_scene_object || node.is_prefab_entry)
         ? full_path + "##" + node.label
         : full_path;
-    const bool is_scene_file = !node.is_directory && !node.is_scene_object && IsSceneFile(node.path);
+    const bool is_scene_file = !node.is_directory && !node.is_scene_object && !node.is_prefab_entry && IsSceneFile(node.path);
     const bool filter_active = !filter.empty();
     const bool is_selected = node.is_scene_object
         ? state.selected_item_path == node.path && state.selected_scene_object_name == node.label
@@ -549,7 +594,25 @@ void FilesPanel::RenderNode(
         const float mouse_x = ImGui::GetIO().MousePos.x;
         released_on_arrow = mouse_x >= arrow_hit_x1 && mouse_x < arrow_hit_x2;
     }
-    const bool moved_from_source = node.is_scene_object ? RenderSceneObjectMoveSource(node, state) : RenderMoveSource(node, state);
+    bool moved_from_source = false;
+    if (node.is_scene_object)
+    {
+        moved_from_source = RenderSceneObjectMoveSource(node, state);
+    }
+    else if (node.is_prefab_entry)
+    {
+        if (ImGui::BeginDragDropSource())
+        {
+            ImGui::SetDragDropPayload(kPrefabDragDropPayload, node.label.c_str(), node.label.size() + 1);
+            ImGui::Text("Instantiate prefab %s", node.label.c_str());
+            ImGui::EndDragDropSource();
+            moved_from_source = true;
+        }
+    }
+    else
+    {
+        moved_from_source = RenderMoveSource(node, state);
+    }
     bool moved_to_directory = false;
     bool scene_object_parent_changed = false;
 
@@ -559,6 +622,27 @@ void FilesPanel::RenderNode(
         {
             refresh_requested_ = true;
         }
+    }
+    else if (node.is_prefab_entry)
+    {
+        ImGui::PushID((std::string("PrefabEntryMenu") + node.label).c_str());
+        if (ImGui::BeginPopupContextItem("PrefabEntryContextMenu"))
+        {
+            if (ImGui::MenuItem("Delete"))
+            {
+                if (RemovePrefabByName(state.project_root, node.label))
+                {
+                    state.AddLog("Deleted prefab: " + node.label);
+                    refresh_requested_ = true;
+                }
+                else
+                {
+                    state.AddLog("Failed to delete prefab: " + node.label);
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
     }
     else if (file_context_menu_.RenderItemMenu(node.path, node.is_directory, state))
     {
@@ -575,6 +659,34 @@ void FilesPanel::RenderNode(
         if (scene_object_parent_changed)
         {
             refresh_requested_ = true;
+        }
+        if (!scene_object_parent_changed && ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kPrefabDragDropPayload))
+            {
+                const std::string prefab_name(static_cast<const char*>(payload->Data));
+                if (!CanMutateSceneObject(state, node.path))
+                {
+                    state.AddLog("Save the open scene before instantiating a prefab");
+                }
+                else
+                {
+                    std::string instantiated_name;
+                    if (InstantiatePrefabIntoScene(state.project_root, prefab_name, node.path, node.label, &instantiated_name))
+                    {
+                        state.OpenTextFile(node.path);
+                        state.SetSelectedSceneObject(node.path, instantiated_name);
+                        refresh_requested_ = true;
+                        scene_object_parent_changed = true;
+                        state.AddLog("Instantiated prefab '" + prefab_name + "' under " + node.label);
+                    }
+                    else
+                    {
+                        state.AddLog("Failed to instantiate prefab: " + prefab_name);
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
         }
     }
     else if (is_scene_file)
@@ -601,6 +713,30 @@ void FilesPanel::RenderNode(
                     }
                 }
             }
+            else if (const ImGuiPayload* prefab_payload = ImGui::AcceptDragDropPayload(kPrefabDragDropPayload))
+            {
+                const std::string prefab_name(static_cast<const char*>(prefab_payload->Data));
+                if (!CanMutateSceneObject(state, node.path))
+                {
+                    state.AddLog("Save the open scene before instantiating a prefab");
+                }
+                else
+                {
+                    std::string instantiated_name;
+                    if (InstantiatePrefabIntoScene(state.project_root, prefab_name, node.path, std::string{}, &instantiated_name))
+                    {
+                        state.OpenTextFile(node.path);
+                        state.SetSelectedSceneObject(node.path, instantiated_name);
+                        refresh_requested_ = true;
+                        scene_object_parent_changed = true;
+                        state.AddLog("Instantiated prefab '" + prefab_name + "' in " + node.label);
+                    }
+                    else
+                    {
+                        state.AddLog("Failed to instantiate prefab: " + prefab_name);
+                    }
+                }
+            }
             ImGui::EndDragDropTarget();
         }
     }
@@ -613,6 +749,10 @@ void FilesPanel::RenderNode(
             state.OpenTextFile(node.path);
             state.RequestTab(WorkspaceTab::Scene);
             state.AddLog("Selected scene object: " + node.label + " in " + full_path);
+        }
+        else if (node.is_prefab_entry)
+        {
+            // No-op: prefab entries are drag-only.
         }
         else if (node.is_directory)
         {

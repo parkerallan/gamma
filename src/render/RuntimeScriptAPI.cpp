@@ -1,5 +1,7 @@
 #include "render/RuntimeRenderer.h"
 
+#include "assets/PrefabAsset.h"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -1497,6 +1499,101 @@ int RuntimeRenderer::LuaWorldSpawnFromObject(lua_State* lua_state)
     }
 
     lua_pushboolean(lua_state, 1);
+    return 1;
+}
+
+int RuntimeRenderer::LuaWorldSpawnPrefab(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    const char* prefab_name_cstr = luaL_checkstring(lua_state, 1);
+    const std::string prefab_name = prefab_name_cstr != nullptr ? prefab_name_cstr : "";
+
+    const bool has_position =
+        !lua_isnoneornil(lua_state, 2) &&
+        !lua_isnoneornil(lua_state, 3) &&
+        !lua_isnoneornil(lua_state, 4);
+
+    SceneVector3 position_override = {0.0f, 0.0f, 0.0f};
+    if (has_position)
+    {
+        position_override = {
+            static_cast<float>(luaL_checknumber(lua_state, 2)),
+            static_cast<float>(luaL_checknumber(lua_state, 3)),
+            static_cast<float>(luaL_checknumber(lua_state, 4))};
+    }
+
+    const PrefabMetadata store = LoadPrefabMetadata(renderer->project_root_);
+    if (!store.parsed)
+    {
+        return luaL_error(lua_state, "World.SpawnPrefab failed to load prefab store: %s",
+            store.error_message.c_str());
+    }
+
+    const auto entry_it = std::find_if(store.prefabs.begin(), store.prefabs.end(),
+        [&prefab_name](const PrefabEntry& e) { return e.name == prefab_name; });
+    if (entry_it == store.prefabs.end())
+    {
+        return luaL_error(lua_state, "World.SpawnPrefab unknown prefab: %s", prefab_name.c_str());
+    }
+
+    const PrefabEntry& entry = *entry_it;
+
+    // Parse the prefab body through the full SceneMetadata loader so every
+    // attribute kind (Shader/Cloud, lights, 2D overlays, audio, rigidbodies,
+    // animator, ...) is captured exactly as if the object had been authored
+    // in a scene file. The runtime queue loop reads `attributes` to drive
+    // procedural shader passes (e.g. is_cloud) and other attribute-based
+    // rendering.
+    SceneObjectMetadata root_metadata;
+    std::string parse_error;
+    if (!LoadPrefabRootMetadata(renderer->project_root_, prefab_name, &root_metadata, &parse_error))
+    {
+        return luaL_error(lua_state, "World.SpawnPrefab failed to parse prefab '%s': %s",
+            prefab_name.c_str(), parse_error.c_str());
+    }
+
+    RuntimeSpawnedObject object;
+    object.name                = root_metadata.name;
+    object.model_path          = root_metadata.model_path;
+    object.model_visual_offset = root_metadata.model_visual_offset;
+    object.position            = root_metadata.position;
+    object.rotation            = root_metadata.rotation;
+    object.scale               = root_metadata.scale;
+    object.tags                = root_metadata.tags;
+    object.attributes          = root_metadata.attributes;
+    if (!root_metadata.script_paths.empty())
+    {
+        object.script_path = root_metadata.script_paths.front();
+    }
+
+    if (has_position)
+    {
+        object.position = position_override;
+    }
+
+    // Uniquify the name against scene + already-spawned objects.
+    const std::string base_name = entry.root_object_name.empty() ? prefab_name : entry.root_object_name;
+    std::string candidate = base_name;
+    int suffix = 1;
+    while (renderer->RuntimeObjectExists(candidate))
+    {
+        candidate = base_name + "_" + std::to_string(suffix);
+        ++suffix;
+    }
+    object.name = candidate;
+
+    std::string error_message;
+    if (!renderer->SpawnRuntimeObject(object, &error_message))
+    {
+        return luaL_error(lua_state, "%s", error_message.c_str());
+    }
+
+    lua_pushstring(lua_state, object.name.c_str());
     return 1;
 }
 

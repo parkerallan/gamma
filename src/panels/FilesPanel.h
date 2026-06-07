@@ -20,6 +20,7 @@ struct FileTreeNode
     std::string label;
     bool is_directory = false;
     bool is_scene_object = false;
+    bool is_prefab_entry = false;
     bool has_camera_attribute = false;
     bool is_active_camera = false;
     bool enabled_in_hierarchy = true;
@@ -36,6 +37,7 @@ public:
 private:
     static constexpr const char* kFileTreeDragDropPayload = "FILE_TREE_PATH";
     static constexpr const char* kSceneObjectDragDropPayload = "SCENE_OBJECT_PATH";
+    static constexpr const char* kPrefabDragDropPayload = "PREFAB_NAME";
 
     std::filesystem::path current_root_;
     std::vector<FileTreeNode> roots_;
@@ -63,6 +65,7 @@ private:
     static std::string TrimCopy(std::string value);
     FileTreeNode BuildNode(const std::filesystem::path& path) const;
     std::vector<FileTreeNode> BuildSceneObjectNodes(const std::filesystem::path& scene_path) const;
+    std::vector<FileTreeNode> BuildPrefabEntryNodes(const std::filesystem::path& metadata_path) const;
     void RenderNode(
         const FileTreeNode& node,
         EngineState& state,

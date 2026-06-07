@@ -531,6 +531,7 @@ add_executable(engine
     src/assets/ModelAsset.cpp
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp
+    src/assets/PrefabAsset.cpp
     src/assets/SceneMetadata.cpp
     src/audio/AudioEngine.cpp
     src/vfs/AssetVFS.cpp

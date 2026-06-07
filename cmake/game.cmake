@@ -125,6 +125,7 @@ add_executable(game
     src/assets/ModelAsset.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp
+    src/assets/PrefabAsset.cpp
     src/audio/AudioEngine.cpp
     src/vfs/PakArchive.cpp
     src/render/Lighting.cpp

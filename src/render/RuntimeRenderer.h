@@ -211,6 +211,11 @@ public:
         SceneVector3 rotation = {0.0f, 0.0f, 0.0f};
         SceneVector3 scale = {1.0f, 1.0f, 1.0f};
         std::vector<std::string> tags;
+        // Optional: full attribute block carried over from a prefab spawn.
+        // Empty for World.Spawn / World.SpawnFromObject. Used by the runtime
+        // queue loop to drive attribute-based rendering paths (procedural
+        // shaders like Cloud/Water, etc.).
+        std::vector<SceneObjectAttribute> attributes;
     };
 
     struct ScriptTimer
@@ -441,6 +446,7 @@ private:
     static int LuaWorldEmit(lua_State* lua_state);
     static int LuaWorldSpawn(lua_State* lua_state);
     static int LuaWorldSpawnFromObject(lua_State* lua_state);
+    static int LuaWorldSpawnPrefab(lua_State* lua_state);
     static int LuaWorldDestroy(lua_State* lua_state);
     static int LuaWorldDestroyByPrefix(lua_State* lua_state);
     static int LuaWorldExists(lua_State* lua_state);
