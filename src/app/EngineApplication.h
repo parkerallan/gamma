@@ -9,6 +9,7 @@
 #include "panels/InfoPanel.h"
 #include "panels/LogPanel.h"
 #include "panels/PerformancePanel.h"
+#include "panels/MappingPanel.h"
 #include "panels/SettingsPanel.h"
 #include "panels/VersionControlPanel.h"
 #include "panels/WorkspacePanel.h"
@@ -49,6 +50,7 @@ private:
     AnimatorPanel animator_panel_;
     SequencerPanel sequencer_panel_;
     SettingsPanel settings_panel_;
+    MappingPanel mapping_panel_;
     InfoPanel info_panel_;
     LogPanel log_panel_;
     PerformancePanel performance_panel_;

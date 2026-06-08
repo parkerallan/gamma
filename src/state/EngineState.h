@@ -71,10 +71,12 @@ struct EngineState
     bool show_effects_panel = true;
     bool show_animator_panel = true;
     bool show_sequencer_panel = true;
+    bool show_mapping_panel = true;
     bool show_settings_panel = true;
     bool show_info_panel = true;
     bool show_log_panel = true;
     bool show_performance_panel = true;
+    std::vector<std::string> key_controller_mappings;
     std::filesystem::path workspace_root;
     std::filesystem::path project_root;
     std::filesystem::path project_file_path;

@@ -1133,6 +1133,7 @@ void EngineApplication::RenderUI()
     effects_panel_.Render(state_, &vulkan_context_);
     animator_panel_.Render(state_, &vulkan_context_);
     sequencer_panel_.Render(state_, &vulkan_context_);
+    mapping_panel_.Render(state_);
     settings_panel_.Render(state_);
     info_panel_.Render(state_, &vulkan_context_);
 
@@ -1328,6 +1329,7 @@ void EngineApplication::RenderMainMenuBar()
         ImGui::MenuItem("Effects", nullptr, &state_.show_effects_panel);
         ImGui::MenuItem("Animator", nullptr, &state_.show_animator_panel);
         ImGui::MenuItem("Sequencer", nullptr, &state_.show_sequencer_panel);
+        ImGui::MenuItem("Mapping", nullptr, &state_.show_mapping_panel);
         ImGui::MenuItem("Settings", nullptr, &state_.show_settings_panel);
         ImGui::MenuItem("Info", nullptr, &state_.show_info_panel);
         ImGui::MenuItem("Log", nullptr, &state_.show_log_panel);
@@ -1452,6 +1454,7 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
     ImGui::DockBuilderDockWindow("Effects", center_id);
     ImGui::DockBuilderDockWindow("Animator", center_id);
     ImGui::DockBuilderDockWindow("Sequencer", center_id);
+    ImGui::DockBuilderDockWindow("Mapping", center_id);
     ImGui::DockBuilderDockWindow("Settings", center_id);
     ImGui::DockBuilderDockWindow("Info", right_id);
     ImGui::DockBuilderDockWindow("Performance", bottom_id);

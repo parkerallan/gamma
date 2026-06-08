@@ -570,6 +570,7 @@ add_executable(engine
     src/render/SceneViewportRenderer.cpp
     src/render/VideoPlaybackManager.cpp
     src/render/EffectsPreviewRenderer.cpp
+    src/panels/MappingPanel.cpp
     src/panels/SettingsPanel.cpp
     src/render/FontInfoRenderer.cpp
     src/render/ImageInfoRenderer.cpp
