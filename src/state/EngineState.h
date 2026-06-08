@@ -70,6 +70,7 @@ struct EngineState
     bool show_workspace_panel = true;
     bool show_effects_panel = true;
     bool show_animator_panel = true;
+    bool show_sequencer_panel = true;
     bool show_settings_panel = true;
     bool show_info_panel = true;
     bool show_log_panel = true;

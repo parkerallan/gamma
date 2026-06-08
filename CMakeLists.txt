@@ -552,6 +552,7 @@ add_executable(engine
     src/panels/FilesPanel.cpp
     src/panels/EffectsPanel.cpp
     src/panels/AnimatorPanel.cpp
+    src/panels/SequencerPanel.cpp
     src/panels/AnimatorPreviewRenderer.cpp
     src/panels/InfoPanel.cpp
     src/panels/LogPanel.cpp

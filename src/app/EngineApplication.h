@@ -5,6 +5,7 @@
 #include "panels/AnimatorPanel.h"
 #include "panels/FilesPanel.h"
 #include "panels/EffectsPanel.h"
+#include "panels/SequencerPanel.h"
 #include "panels/InfoPanel.h"
 #include "panels/LogPanel.h"
 #include "panels/PerformancePanel.h"
@@ -46,6 +47,7 @@ private:
     WorkspacePanel workspace_panel_;
     EffectsPanel effects_panel_;
     AnimatorPanel animator_panel_;
+    SequencerPanel sequencer_panel_;
     SettingsPanel settings_panel_;
     InfoPanel info_panel_;
     LogPanel log_panel_;
