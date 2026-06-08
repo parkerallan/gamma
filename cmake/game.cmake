@@ -127,6 +127,7 @@ add_executable(game
     src/assets/SceneMetadata.cpp
     src/assets/PrefabAsset.cpp
     src/audio/AudioEngine.cpp
+    src/input/ControllerMapping.cpp
     src/vfs/PakArchive.cpp
     src/render/Lighting.cpp
     src/render/Raytracing.cpp

@@ -1203,8 +1203,63 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
     }
 }
 
+bool RuntimeRenderer::IsControllerBindingActive(const input::ControllerBinding& binding) const
+{
+    for (SDL_Gamepad* pad : open_gamepads_)
+    {
+        if (pad == nullptr)
+        {
+            continue;
+        }
+        if (binding.kind == input::ControllerBinding::Kind::Button)
+        {
+            if (SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(binding.index)))
+            {
+                return true;
+            }
+        }
+        else
+        {
+            const Sint16 value = SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(binding.index));
+            const bool active = binding.positive
+                ? (value > input::kAxisThreshold)
+                : (value < -input::kAxisThreshold);
+            if (active)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool RuntimeRenderer::EffectiveKeyDown(SDL_Scancode scancode) const
+{
+    int num_keys = 0;
+    const bool* keys = SDL_GetKeyboardState(&num_keys);
+    if (static_cast<int>(scancode) < num_keys && keys[scancode])
+    {
+        return true;
+    }
+
+    const auto it = controller_mappings_.find(static_cast<int>(scancode));
+    if (it != controller_mappings_.end())
+    {
+        for (const input::ControllerBinding& binding : it->second)
+        {
+            if (IsControllerBindingActive(binding))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 int RuntimeRenderer::LuaInputIsKeyDown(lua_State* lua_state)
 {
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+
     const char* key_name = luaL_checkstring(lua_state, 1);
     const SDL_Scancode scancode = SDL_GetScancodeFromName(key_name);
     if (scancode == SDL_SCANCODE_UNKNOWN)
@@ -1213,9 +1268,17 @@ int RuntimeRenderer::LuaInputIsKeyDown(lua_State* lua_state)
         return 1;
     }
 
-    int num_keys = 0;
-    const bool* keys = SDL_GetKeyboardState(&num_keys);
-    const bool is_down = (static_cast<int>(scancode) < num_keys) && keys[scancode];
+    bool is_down = false;
+    if (renderer != nullptr)
+    {
+        is_down = renderer->EffectiveKeyDown(scancode);
+    }
+    else
+    {
+        int num_keys = 0;
+        const bool* keys = SDL_GetKeyboardState(&num_keys);
+        is_down = (static_cast<int>(scancode) < num_keys) && keys[scancode];
+    }
     lua_pushboolean(lua_state, is_down ? 1 : 0);
     return 1;
 }
@@ -1254,10 +1317,8 @@ int RuntimeRenderer::LuaInputWasKeyPressed(lua_State* lua_state)
         return 1;
     }
 
-    int num_keys = 0;
-    const bool* keys = SDL_GetKeyboardState(&num_keys);
     const int idx = static_cast<int>(scancode);
-    const bool is_down_now = (idx < num_keys) && keys[idx];
+    const bool is_down_now = renderer->EffectiveKeyDown(scancode);
     const bool was_down = (idx < static_cast<int>(renderer->script_prev_keys_down_.size())) && renderer->script_prev_keys_down_[idx];
     lua_pushboolean(lua_state, (is_down_now && !was_down) ? 1 : 0);
     return 1;
@@ -1273,11 +1334,88 @@ int RuntimeRenderer::LuaInputMousePosition(lua_State* lua_state)
     return 2;
 }
 
+float RuntimeRenderer::ControllerBindingMagnitude(const input::ControllerBinding& binding) const
+{
+    float magnitude = 0.0f;
+    for (SDL_Gamepad* pad : open_gamepads_)
+    {
+        if (pad == nullptr)
+        {
+            continue;
+        }
+        if (binding.kind == input::ControllerBinding::Kind::Button)
+        {
+            if (SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(binding.index)))
+            {
+                magnitude = 1.0f;
+            }
+        }
+        else
+        {
+            const Sint16 raw = SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(binding.index));
+            const int directional = binding.positive ? raw : -raw;
+            if (directional > 0)
+            {
+                const float normalized = static_cast<float>(directional) / 32767.0f;
+                magnitude = (normalized > magnitude) ? normalized : magnitude;
+            }
+        }
+    }
+    return magnitude;
+}
+
+void RuntimeRenderer::AddControllerMouseDelta(float& dx, float& dy) const
+{
+    if (controller_mappings_.empty() || open_gamepads_.empty())
+    {
+        return;
+    }
+
+    // Pixels of mouse motion per frame at full stick deflection.
+    constexpr float kMouseLookSpeed = 18.0f;
+    // Radial deadzone to stop a resting stick from drifting the cursor.
+    constexpr float kDeadzone = 0.15f;
+
+    const auto direction_amount = [this](int code) -> float
+    {
+        const auto it = controller_mappings_.find(code);
+        if (it == controller_mappings_.end())
+        {
+            return 0.0f;
+        }
+        float amount = 0.0f;
+        for (const input::ControllerBinding& binding : it->second)
+        {
+            const float m = ControllerBindingMagnitude(binding);
+            amount = (m > amount) ? m : amount;
+        }
+        if (amount < kDeadzone)
+        {
+            return 0.0f;
+        }
+        return (amount - kDeadzone) / (1.0f - kDeadzone);
+    };
+
+    const float right = direction_amount(input::kMouseMoveRight);
+    const float left  = direction_amount(input::kMouseMoveLeft);
+    const float up    = direction_amount(input::kMouseMoveUp);
+    const float down  = direction_amount(input::kMouseMoveDown);
+
+    dx += (right - left) * kMouseLookSpeed;
+    dy += (down - up) * kMouseLookSpeed;
+}
+
 int RuntimeRenderer::LuaInputMouseDelta(lua_State* lua_state)
 {
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+
     float dx = 0.0f;
     float dy = 0.0f;
     SDL_GetRelativeMouseState(&dx, &dy);
+    if (renderer != nullptr)
+    {
+        renderer->AddControllerMouseDelta(dx, dy);
+    }
     lua_pushnumber(lua_state, static_cast<lua_Number>(dx));
     lua_pushnumber(lua_state, static_cast<lua_Number>(dy));
     return 2;

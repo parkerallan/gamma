@@ -1,55 +1,27 @@
 #include "panels/MappingPanel.h"
 
 #include "imgui.h"
+#include "input/ControllerMapping.h"
 #include "ui/Codicons.h"
 
 #include <SDL3/SDL.h>
 
 #include <array>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// Static keyboard key list
-// ---------------------------------------------------------------------------
-static constexpr std::array<std::string_view, 100> kKeyboardKeys = {
-    // Letters
-    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
-    "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T",
-    "U", "V", "W", "X", "Y", "Z",
-    // Digits
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    // Function keys
-    "F1", "F2", "F3", "F4", "F5", "F6",
-    "F7", "F8", "F9", "F10", "F11", "F12",
-    // Navigation / editing
-    "Escape", "Tab", "Caps Lock",
-    "Left Shift", "Right Shift",
-    "Left Ctrl",  "Right Ctrl",
-    "Left Alt",   "Right Alt",
-    "Space", "Enter", "Backspace",
-    "Delete", "Insert", "Home", "End",
-    "Page Up", "Page Down",
-    "Print Screen", "Scroll Lock", "Pause",
-    // Arrow keys
-    "Up", "Down", "Left", "Right",
-    // Numpad
-    "Numpad 0", "Numpad 1", "Numpad 2", "Numpad 3", "Numpad 4",
-    "Numpad 5", "Numpad 6", "Numpad 7", "Numpad 8", "Numpad 9",
-    "Numpad +", "Numpad -", "Numpad *", "Numpad /",
-    "Numpad .", "Numpad Enter",
-    // Punctuation / symbols
-    "Tilde (`)", "Minus (-)", "Equals (=)",
-    "Left Bracket ([)", "Right Bracket (])", "Backslash (\\)",
-    "Semicolon (;)", "Apostrophe (')",
-    "Comma (,)", "Period (.)", "Slash (/)",
-};
+// The mappable keyboard keys live in input::StandardKeys() so the editor and
+// the runtime agree on the exact key list and their SDL scancodes.
+static const std::vector<input::KeyDef>& kKeyboardKeys = input::StandardKeys();
 
 int MappingPanel::KeyCount()
 {
-    return static_cast<int>(kKeyboardKeys.size());
+    return static_cast<int>(input::StandardKeys().size());
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +74,14 @@ void MappingPanel::Render(EngineState& state)
     const int key_count = static_cast<int>(kKeyboardKeys.size());
     if (static_cast<int>(state.key_controller_mappings.size()) < key_count)
         state.key_controller_mappings.resize(key_count);
+
+    // Reload mappings from disk when the open project changes.
+    if (state.project_root != loaded_project_root_)
+    {
+        loaded_project_root_ = state.project_root;
+        LoadMappings(state);
+        mappings_dirty_ = false;
+    }
 
     if (!ImGui::Begin("Mapping", &state.show_mapping_panel))
     {
@@ -191,6 +171,7 @@ void MappingPanel::Render(EngineState& state)
                     m.clear();
                 for (auto& row : custom_rows_)
                     row.second.clear();
+                mappings_dirty_ = true;
             }
             ImGui::PopStyleColor(3);
         }
@@ -207,7 +188,8 @@ void MappingPanel::Render(EngineState& state)
             ImGui::SetCursorPosX(cur_x + avail - save_w);
         if (ImGui::Button(ICON_CI_SAVE))
         {
-            // TODO: persist mappings to disk
+            SaveMappings(state);
+            mappings_dirty_ = false;
         }
     }
 
@@ -289,6 +271,7 @@ void MappingPanel::Render(EngineState& state)
                         Append(custom_rows_[ci].second, captured_name);
                 }
 
+                mappings_dirty_ = true;
                 ++mapping_row_;
                 if (mapping_row_ >= total_rows || mapping_single_row_)
                     StopMapping();
@@ -331,7 +314,7 @@ void MappingPanel::Render(EngineState& state)
     if (ImGui::BeginTable("##mapping_table", 2, table_flags))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Keyboard",   ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Keyboard / Mouse", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
 
@@ -365,7 +348,7 @@ void MappingPanel::Render(EngineState& state)
                 ImGui::SetCursorScreenPos(cell_min); // draw text on top
                 ImGui::AlignTextToFramePadding();
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
-                ImGui::TextUnformatted(kKeyboardKeys[i].data());
+                ImGui::TextUnformatted(kKeyboardKeys[i].label.data());
                 ImGui::PopStyleColor();
             }
 
@@ -378,7 +361,10 @@ void MappingPanel::Render(EngineState& state)
             char input_id[32];
             std::snprintf(input_id, sizeof(input_id), "##ctrl_%d", i);
             if (ImGui::InputText(input_id, buf, sizeof(buf)))
+            {
                 state.key_controller_mappings[i] = buf;
+                mappings_dirty_ = true;
+            }
             if (binding.empty())
             {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -414,7 +400,10 @@ void MappingPanel::Render(EngineState& state)
             {
                 ImGui::SameLine();
                 if (ImGui::Button(ICON_CI_ADD "##add"))
+                {
                     custom_rows_.push_back({"", ""});
+                    mappings_dirty_ = true;
+                }
                 ImGui::SameLine();
             }
             else
@@ -428,7 +417,10 @@ void MappingPanel::Render(EngineState& state)
             char kid[32];
             std::snprintf(kid, sizeof(kid), "##ckey_%d", i);
             if (ImGui::InputText(kid, kbuf, sizeof(kbuf)))
+            {
                 custom_rows_[i].first = kbuf;
+                mappings_dirty_ = true;
+            }
 
             // Controller binding column
             ImGui::TableSetColumnIndex(1);
@@ -438,7 +430,10 @@ void MappingPanel::Render(EngineState& state)
             char cid[32];
             std::snprintf(cid, sizeof(cid), "##cctrl_%d", i);
             if (ImGui::InputText(cid, cbuf, sizeof(cbuf)))
+            {
                 custom_rows_[i].second = cbuf;
+                mappings_dirty_ = true;
+            }
             if (custom_rows_[i].second.empty())
             {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -451,7 +446,10 @@ void MappingPanel::Render(EngineState& state)
         }
 
         if (row_to_remove >= 0)
+        {
             custom_rows_.erase(custom_rows_.begin() + row_to_remove);
+            mappings_dirty_ = true;
+        }
 
         // No custom rows yet: show a row with just the + button in the keyboard column
         if (custom_rows_.empty())
@@ -459,12 +457,71 @@ void MappingPanel::Render(EngineState& state)
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             if (ImGui::Button(ICON_CI_ADD "##add_first"))
+            {
                 custom_rows_.push_back({"", ""});
+                mappings_dirty_ = true;
+            }
         }
 
         ImGui::EndTable();
     }
 
     ImGui::EndChild();
+
+    // Auto-persist edits so play-in-editor and standalone builds pick them up
+    // without requiring an explicit Save.
+    if (mappings_dirty_ && !state.project_root.empty())
+    {
+        SaveMappings(state);
+        mappings_dirty_ = false;
+    }
+
     ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+void MappingPanel::SaveMappings(EngineState& state) const
+{
+    if (state.project_root.empty())
+        return;
+
+    const std::filesystem::path config_dir = state.project_root / "Config";
+    std::error_code ec;
+    std::filesystem::create_directories(config_dir, ec);
+    if (ec)
+    {
+        state.AddLog("Failed to create Config directory for input mappings");
+        return;
+    }
+
+    const std::string contents = input::SerializeMappings(state.key_controller_mappings, custom_rows_);
+
+    const std::filesystem::path file = config_dir / "input_mappings.ini";
+    std::ofstream output(file, std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        state.AddLog("Failed to write input mappings file");
+        return;
+    }
+    output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+}
+
+void MappingPanel::LoadMappings(EngineState& state)
+{
+    const int key_count = static_cast<int>(input::StandardKeys().size());
+    state.key_controller_mappings.assign(key_count, std::string());
+    custom_rows_.clear();
+
+    if (state.project_root.empty())
+        return;
+
+    const std::filesystem::path file = state.project_root / "Config" / "input_mappings.ini";
+    std::ifstream input(file, std::ios::binary);
+    if (!input)
+        return;
+
+    const std::string contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    input::DeserializeMappings(contents, state.key_controller_mappings, custom_rows_);
 }

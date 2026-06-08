@@ -5,6 +5,7 @@
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "audio/AudioEngine.h"
+#include "input/ControllerMapping.h"
 #include "render/Lighting.h"
 #include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
@@ -442,6 +443,19 @@ private:
     static int LuaInputWasKeyPressed(lua_State* lua_state);
     static int LuaInputMousePosition(lua_State* lua_state);
     static int LuaInputMouseDelta(lua_State* lua_state);
+    // Controller mapping: load the project's key->controller bindings, manage
+    // open gamepads, and fold controller state into keyboard-key queries so
+    // existing Input.IsKeyDown/WasKeyPressed calls respond to the controller.
+    void LoadControllerMappings();
+    void RefreshGamepads();
+    void CloseGamepads();
+    bool IsControllerBindingActive(const input::ControllerBinding& binding) const;
+    bool EffectiveKeyDown(SDL_Scancode scancode) const;
+    // Analog deflection [0,1] of a binding across open gamepads (buttons read as
+    // 0/1); used to drive mouse-look from a controller stick.
+    float ControllerBindingMagnitude(const input::ControllerBinding& binding) const;
+    // Adds the controller's mouse-move contribution to a mouse delta.
+    void AddControllerMouseDelta(float& dx, float& dy) const;
     static int LuaWorldSubscribe(lua_State* lua_state);
     static int LuaWorldEmit(lua_State* lua_state);
     static int LuaWorldSpawn(lua_State* lua_state);
@@ -564,6 +578,10 @@ private:
     std::string script_active_instance_key_;
     std::string script_active_object_name_;
     std::vector<bool> script_prev_keys_down_;
+    // Controller bindings loaded from the project (scancode -> inputs) and the
+    // gamepads currently opened for the play session.
+    input::BindingMap controller_mappings_;
+    std::vector<SDL_Gamepad*> open_gamepads_;
     std::vector<PhysicsCollisionEvent> script_frame_collision_events_;
     std::uint64_t animation_last_tick_ms_ = 0;
     std::uint64_t animation_last_perf_ticks_ = 0;

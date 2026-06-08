@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <array>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,6 +19,13 @@ public:
 
 private:
     void StopMapping();
+    void SaveMappings(EngineState& state) const;
+    void LoadMappings(EngineState& state);
+
+    // Tracks which project's mappings are currently loaded so we reload when the
+    // open project changes.
+    std::filesystem::path loaded_project_root_;
+    bool mappings_dirty_ = false;
 
     int selected_device_index_ = -1;
     std::vector<std::string>    device_names_;

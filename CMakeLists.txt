@@ -534,6 +534,7 @@ add_executable(engine
     src/assets/PrefabAsset.cpp
     src/assets/SceneMetadata.cpp
     src/audio/AudioEngine.cpp
+    src/input/ControllerMapping.cpp
     src/vfs/AssetVFS.cpp
     src/components/CreationMenu.cpp
     src/components/EditorComponent.cpp

@@ -2280,6 +2280,8 @@ void RuntimeRenderer::Shutdown()
     script_active_instance_key_.clear();
     script_active_object_name_.clear();
     script_prev_keys_down_.clear();
+    CloseGamepads();
+    controller_mappings_.clear();
     script_frame_collision_events_.clear();
     animation_last_tick_ms_ = 0;
     // Intentionally NOT clearing model_asset_cache_ here: parsed CPU-side
@@ -2368,7 +2370,74 @@ bool RuntimeRenderer::StartSession(
     physics_world_built_ = false;
     performance_stats_ = RuntimePerformanceStats{};
     first_frame_logged_ = false;
+
+    // Load the project's controller mappings and open any connected gamepads so
+    // scripts/nodes that poll keyboard keys also respond to the controller.
+    LoadControllerMappings();
+    RefreshGamepads();
+
     return true;
+}
+
+void RuntimeRenderer::LoadControllerMappings()
+{
+    controller_mappings_.clear();
+
+    // A packaged build leaves project_root_ empty and streams assets from the
+    // pak; play-in-editor reads directly from the project's Config folder.
+    const bool use_pak_streaming = project_root_.empty() && g_asset_reader != nullptr;
+
+    std::string contents;
+    if (use_pak_streaming)
+    {
+        const std::vector<std::uint8_t> bytes = g_asset_reader->ReadFile(std::string("Config/input_mappings.ini"));
+        contents.assign(bytes.begin(), bytes.end());
+    }
+    else
+    {
+        std::vector<std::uint8_t> bytes;
+        if (ReadFileBytes(project_root_ / "Config" / "input_mappings.ini", bytes))
+        {
+            contents.assign(bytes.begin(), bytes.end());
+        }
+    }
+
+    if (!contents.empty())
+    {
+        controller_mappings_ = input::ParseMappings(contents);
+    }
+}
+
+void RuntimeRenderer::RefreshGamepads()
+{
+    CloseGamepads();
+
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    if (ids == nullptr)
+    {
+        return;
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        if (SDL_Gamepad* pad = SDL_OpenGamepad(ids[i]))
+        {
+            open_gamepads_.push_back(pad);
+        }
+    }
+    SDL_free(ids);
+}
+
+void RuntimeRenderer::CloseGamepads()
+{
+    for (SDL_Gamepad* pad : open_gamepads_)
+    {
+        if (pad != nullptr)
+        {
+            SDL_CloseGamepad(pad);
+        }
+    }
+    open_gamepads_.clear();
 }
 
 void RuntimeRenderer::SeedSceneMetadata(const std::filesystem::path& scene_path, SceneMetadata metadata)
@@ -4227,10 +4296,47 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
     lua_setfield(script_lua_state_, -2, "TotalTime");
     lua_pop(script_lua_state_, 1);
 
-    // Snapshot current keyboard state for WasKeyPressed
+    // Refresh controller state for this frame and re-open gamepads if the set
+    // of connected devices changed (hotplug during play).
+    SDL_UpdateGamepads();
+    if (!controller_mappings_.empty())
+    {
+        int connected_count = 0;
+        if (SDL_JoystickID* connected_ids = SDL_GetGamepads(&connected_count))
+        {
+            SDL_free(connected_ids);
+        }
+        if (static_cast<std::size_t>(connected_count) != open_gamepads_.size())
+        {
+            RefreshGamepads();
+        }
+    }
+
+    // Snapshot the per-key "effective" state (keyboard OR any mapped controller
+    // input) so WasKeyPressed edge-detection works uniformly for both.
     int num_keys = 0;
     const bool* keys = SDL_GetKeyboardState(&num_keys);
-    const std::vector<bool> current_keys(keys, keys + num_keys);
+    std::vector<bool> current_keys(static_cast<std::size_t>(num_keys), false);
+    for (int sc = 0; sc < num_keys; ++sc)
+    {
+        bool down = keys[sc];
+        if (!down)
+        {
+            const auto it = controller_mappings_.find(sc);
+            if (it != controller_mappings_.end())
+            {
+                for (const input::ControllerBinding& binding : it->second)
+                {
+                    if (IsControllerBindingActive(binding))
+                    {
+                        down = true;
+                        break;
+                    }
+                }
+            }
+        }
+        current_keys[sc] = down;
+    }
 
     // Snapshot collisions once so every script sees the same frame data.
     if (physics_world_.IsInitialized())

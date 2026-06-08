@@ -236,7 +236,7 @@ bool GameApplication::Init(int argc, char* argv[])
 
     const std::filesystem::path exe_dir = ResolveExeDirectory(argc > 0 ? argv[0] : nullptr);
 
-    if (!SDL_Init(SDL_INIT_VIDEO))
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
     {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return false;
