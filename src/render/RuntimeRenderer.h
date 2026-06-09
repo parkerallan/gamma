@@ -78,8 +78,34 @@ public:
     void SeedAudioClipBytes(const std::string& clip_path, std::vector<std::uint8_t> bytes);
     AudioEngine& GetAudioEngine() { return audio_engine_; }
 
+    // --- Sequencer (timeline scripts/graphs) -----------------------------
+    // Registers a timeline clip's script (.lua) or graph (.graph). On the next
+    // RenderFrame it is loaded as a runtime script instance so its normal
+    // lifecycle runs unchanged (OnCreate/OnStart at load, OnUpdate every frame).
+    // instance_id makes the instance unique per clip. Idempotent. The instance
+    // is exempt from per-frame scene-object pruning until StartSession() or
+    // ClearSequencerInstances(). This does NOT call OnCue.
+    void RegisterSequencerClip(const std::string& instance_id, const std::filesystem::path& asset_path);
+    // Queues a one-shot OnCue() call on the clip's instance — the timeline cue,
+    // fired when the playhead crosses the clip. Runs on the next RenderFrame
+    // (after any pending registration load), so a just-added clip still cues.
+    void FireSequencerCue(const std::string& instance_id);
+    // Destroys all sequencer-spawned instances (runs their OnDestroy) and drops
+    // any pending loads/cues. Used when the timeline is rewound.
+    void ClearSequencerInstances();
+    // When true (the editor Sequencer panel's preview), the runtime does NOT
+    // drive the timeline itself — the panel advances the clock and feeds cues
+    // via FireSequencerCue. When false (the Play window and the built game),
+    // StartSession loads the scene's "<scene>.seq" and auto-plays it: the
+    // runtime advances its own clock and fires OnCue as it crosses each clip.
+    void SetSequencerExternallyDriven(bool driven);
+
     VkImage GetOutputImage() const { return ray_tracing_.GetOutputImage(); }
     VkImageLayout GetOutputLayout() const { return ray_tracing_.GetOutputLayout(); }
+    // ImGui-sampleable descriptor over the output image (valid after the first
+    // RenderFrame leaves it in SHADER_READ_ONLY_OPTIMAL). Used to embed the
+    // runtime view inside an editor panel via ImGui::Image / AddImage.
+    VkDescriptorSet GetOutputDescriptorSet() const { return ray_tracing_.GetOutputDescriptorSet(); }
     std::uint32_t GetOutputWidth() const { return ray_tracing_.GetOutputWidth(); }
     std::uint32_t GetOutputHeight() const { return ray_tracing_.GetOutputHeight(); }
     const RuntimePerformanceStats& GetPerformanceStats() const { return performance_stats_; }
@@ -296,6 +322,15 @@ private:
     // instance-key suffix so multiple graphs can coexist on one object.
     bool LoadGraphInstance(const std::string& object_name, const std::filesystem::path& graph_path, std::string* error_message);
     bool SyncScriptInstances(std::string* error_message);
+    // Drains pending sequencer loads (into live instances) then pending cues
+    // (OnCue calls). Called at the top of UpdateScriptsForFrame so a newly
+    // loaded clip and its cue resolve before the same frame's OnUpdate pass.
+    bool ProcessSequencerQueue(std::string* error_message);
+    // Runtime-owned timeline (used when not externally driven). LoadAutoSequence
+    // reads the scene's .seq and registers its clips; AdvanceAutoSequence ticks
+    // the clock each frame and fires OnCue as it crosses each clip's start.
+    void LoadAutoSequence();
+    void AdvanceAutoSequence();
     bool CallScriptMethod(RuntimeScriptInstance& instance, const char* method_name, float delta_time, bool include_delta_time, std::string* error_message);
     bool CallScriptTriggerMethod(RuntimeScriptInstance& instance, const char* method_name, const std::string& other_object_name, const std::string& phase, std::string* error_message);
     bool UpdateScriptsForFrame(std::string* error_message);
@@ -560,6 +595,34 @@ private:
     std::unordered_set<std::uint64_t> script_timer_pending_clear_;
     std::unordered_map<std::string, RuntimeSpawnedObject> runtime_spawned_objects_;
     std::unordered_set<std::string> runtime_destroyed_objects_;
+    // Sequencer timeline clips. Registered clips are loaded into live script
+    // instances (pending_sequencer_loads_), then keep their keys in
+    // sequencer_instance_keys_ so SyncScriptInstances doesn't prune them.
+    // sequencer_clip_keys_ maps a clip's instance_id to its instance key so a
+    // cue can find the instance to call OnCue on.
+    struct PendingSequencerLoad
+    {
+        std::string instance_id;
+        std::filesystem::path asset_path;
+    };
+    std::vector<PendingSequencerLoad> pending_sequencer_loads_;
+    std::vector<std::string> pending_sequencer_cues_;
+    std::unordered_map<std::string, std::string> sequencer_clip_keys_;
+    std::unordered_set<std::string> sequencer_instance_keys_;
+    // Runtime-owned timeline. Populated from the scene's .seq by
+    // LoadAutoSequence when sequencer_externally_driven_ is false.
+    struct AutoSequenceClip
+    {
+        std::string id;
+        std::filesystem::path asset_path;
+        float start_time = 0.0f;
+        bool fired = false;
+    };
+    bool sequencer_externally_driven_ = false;
+    std::vector<AutoSequenceClip> auto_sequence_clips_;
+    float auto_sequence_time_ = 0.0f;
+    bool auto_sequence_active_ = false;
+    std::uint64_t auto_sequence_last_tick_ms_ = 0;
     std::unordered_map<std::string, PhysicsBodyTransform> physics_object_transforms_;
     // Previous and current physics simulation snapshots used to render at a
     // smooth (interpolated) pose even when the variable per-frame dt would

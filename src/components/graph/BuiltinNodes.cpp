@@ -142,6 +142,25 @@ void RegisterEventNodes(NodeSpecRegistry& reg)
         };
         reg.Register(std::move(s));
     }
+    // OnCue -------------------------------------------------------------
+    // Sequencer cue: fires once when the timeline playhead crosses the clip
+    // this script/graph is placed on. Unrelated to OnStart (which still runs
+    // when the instance loads). Not called for object-attached scripts.
+    {
+        NodeSpec s;
+        s.type_key = "event.OnCue";
+        s.display_name = "On Cue";
+        s.category = "Events";
+        s.is_event_entry = true;
+        s.is_exec_node = true;
+        s.header_color = 0xff2f7a2fu;
+        s.outputs = { ExecOut("Then") };
+        s.emit = [](TranspileContext& ctx, const GraphNode& node) -> std::string
+        {
+            return EmitEventFunctionSimple(ctx, node, "OnCue", {});
+        };
+        reg.Register(std::move(s));
+    }
     // OnUpdate ----------------------------------------------------------
     {
         NodeSpec s;

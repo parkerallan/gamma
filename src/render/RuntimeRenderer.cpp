@@ -30,6 +30,7 @@ extern "C"
 #include <functional>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -2343,6 +2344,13 @@ bool RuntimeRenderer::StartSession(
     ClearScriptTimers();
     runtime_spawned_objects_.clear();
     runtime_destroyed_objects_.clear();
+    pending_sequencer_loads_.clear();
+    pending_sequencer_cues_.clear();
+    sequencer_clip_keys_.clear();
+    sequencer_instance_keys_.clear();
+    auto_sequence_clips_.clear();
+    auto_sequence_active_ = false;
+    auto_sequence_time_ = 0.0f;
     physics_object_transforms_.clear();
     physics_object_transforms_prev_.clear();
     physics_object_transforms_curr_.clear();
@@ -2375,6 +2383,10 @@ bool RuntimeRenderer::StartSession(
     // scripts/nodes that poll keyboard keys also respond to the controller.
     LoadControllerMappings();
     RefreshGamepads();
+
+    // Play window / built game: load and auto-play the scene's timeline. The
+    // editor Sequencer panel drives its own preview instead (externally driven).
+    LoadAutoSequence();
 
     return true;
 }
@@ -4013,6 +4025,12 @@ bool RuntimeRenderer::SyncScriptInstances(std::string* error_message)
     }
 
     std::unordered_set<std::string> desired_instance_keys;
+    // Sequencer-triggered instances aren't backed by a scene object; keep them
+    // alive across pruning until the timeline rewinds (ClearSequencerInstances).
+    for (const std::string& sequencer_key : sequencer_instance_keys_)
+    {
+        desired_instance_keys.insert(sequencer_key);
+    }
     for (const QueuedSceneObject& queued_object : queued_objects_)
     {
         for (const std::filesystem::path& script_path : queued_object.script_paths)
@@ -4059,6 +4077,268 @@ bool RuntimeRenderer::SyncScriptInstances(std::string* error_message)
         }
 
         it = script_instances_.erase(it);
+    }
+
+    return true;
+}
+
+void RuntimeRenderer::RegisterSequencerClip(const std::string& instance_id, const std::filesystem::path& asset_path)
+{
+    if (instance_id.empty() || asset_path.empty())
+    {
+        return;
+    }
+    // Idempotent: skip if already loaded or already queued for this frame.
+    if (sequencer_clip_keys_.find(instance_id) != sequencer_clip_keys_.end())
+    {
+        return;
+    }
+    for (const PendingSequencerLoad& pending : pending_sequencer_loads_)
+    {
+        if (pending.instance_id == instance_id)
+        {
+            return;
+        }
+    }
+    pending_sequencer_loads_.push_back(PendingSequencerLoad{instance_id, asset_path});
+}
+
+void RuntimeRenderer::FireSequencerCue(const std::string& instance_id)
+{
+    if (instance_id.empty())
+    {
+        return;
+    }
+    pending_sequencer_cues_.push_back(instance_id);
+}
+
+void RuntimeRenderer::ClearSequencerInstances()
+{
+    pending_sequencer_loads_.clear();
+    pending_sequencer_cues_.clear();
+
+    if (script_lua_state_ != nullptr)
+    {
+        for (const std::string& key : sequencer_instance_keys_)
+        {
+            auto it = script_instances_.find(key);
+            if (it == script_instances_.end())
+            {
+                continue;
+            }
+            std::string ignored_error;
+            CallScriptMethod(it->second, "OnDestroy", 0.0f, false, &ignored_error);
+            RemoveScriptEventSubscriptionsForInstance(it->second.instance_key);
+            RemoveScriptTimersForInstance(it->second.instance_key);
+            if (it->second.table_ref != LUA_NOREF && it->second.table_ref != LUA_REFNIL)
+            {
+                luaL_unref(script_lua_state_, LUA_REGISTRYINDEX, it->second.table_ref);
+            }
+            script_instances_.erase(it);
+        }
+    }
+    sequencer_instance_keys_.clear();
+    sequencer_clip_keys_.clear();
+}
+
+void RuntimeRenderer::SetSequencerExternallyDriven(bool driven)
+{
+    sequencer_externally_driven_ = driven;
+    if (driven)
+    {
+        auto_sequence_clips_.clear();
+        auto_sequence_active_ = false;
+        auto_sequence_time_ = 0.0f;
+    }
+}
+
+void RuntimeRenderer::LoadAutoSequence()
+{
+    auto_sequence_clips_.clear();
+    auto_sequence_active_ = false;
+    auto_sequence_time_ = 0.0f;
+
+    if (sequencer_externally_driven_ || scene_path_.empty())
+    {
+        return;
+    }
+    const std::string stem = scene_path_.stem().string();
+    if (stem.empty())
+    {
+        return;
+    }
+
+    // A packaged build streams the .seq from the pak; play-in-editor reads it
+    // from <project>/Sequences/<scene>.seq on disk.
+    const bool use_pak = project_root_.empty() && g_asset_reader != nullptr;
+    std::string contents;
+    if (use_pak)
+    {
+        const std::vector<std::uint8_t> bytes = g_asset_reader->ReadFile("Sequences/" + stem + ".seq");
+        contents.assign(bytes.begin(), bytes.end());
+    }
+    else if (!project_root_.empty())
+    {
+        const std::filesystem::path seq_path = project_root_ / "Sequences" / (stem + ".seq");
+        std::ifstream input(seq_path, std::ios::binary);
+        if (input)
+        {
+            contents.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        }
+    }
+    if (contents.empty())
+    {
+        return;
+    }
+
+    std::istringstream stream(contents);
+    std::string line;
+    int index = 0;
+    while (std::getline(stream, line))
+    {
+        std::istringstream line_stream(line);
+        std::string keyword;
+        line_stream >> keyword;
+        if (keyword != "clip")
+        {
+            continue;
+        }
+        int track = 0;
+        float start = 0.0f;
+        int is_graph = 0;
+        line_stream >> track >> start >> is_graph;
+        line_stream >> std::ws;
+        std::string rel_path;
+        std::getline(line_stream, rel_path);
+        // The .seq is authored on Windows (CRLF) but read here as raw bytes
+        // (binary file / pak), so strip any trailing carriage return / space.
+        while (!rel_path.empty() && (rel_path.back() == '\r' || rel_path.back() == '\n' ||
+                                     rel_path.back() == ' ' || rel_path.back() == '\t'))
+        {
+            rel_path.pop_back();
+        }
+        if (rel_path.empty())
+        {
+            continue;
+        }
+
+        AutoSequenceClip clip;
+        clip.id = "autoseq_" + std::to_string(index++);
+        // Packaged: the script/graph loader reads the relative pak key via the
+        // VFS. Editor: resolve to an absolute on-disk path.
+        clip.asset_path = use_pak ? std::filesystem::path(rel_path) : (project_root_ / rel_path);
+        clip.start_time = std::max(0.0f, start);
+        RegisterSequencerClip(clip.id, clip.asset_path);
+        auto_sequence_clips_.push_back(std::move(clip));
+    }
+
+    if (!auto_sequence_clips_.empty())
+    {
+        auto_sequence_active_ = true;
+        auto_sequence_time_ = 0.0f;
+        auto_sequence_last_tick_ms_ = static_cast<std::uint64_t>(SDL_GetTicks());
+    }
+}
+
+void RuntimeRenderer::AdvanceAutoSequence()
+{
+    if (sequencer_externally_driven_ || !auto_sequence_active_)
+    {
+        return;
+    }
+    const std::uint64_t now = static_cast<std::uint64_t>(SDL_GetTicks());
+    float dt = static_cast<float>(now - auto_sequence_last_tick_ms_) / 1000.0f;
+    auto_sequence_last_tick_ms_ = now;
+    if (dt < 0.0f) { dt = 0.0f; }
+    if (dt > 0.25f) { dt = 0.25f; } // clamp big stalls (alt-tab, breakpoints)
+    auto_sequence_time_ += dt;
+
+    for (AutoSequenceClip& clip : auto_sequence_clips_)
+    {
+        if (!clip.fired && clip.start_time <= auto_sequence_time_)
+        {
+            FireSequencerCue(clip.id);
+            clip.fired = true;
+        }
+    }
+}
+
+bool RuntimeRenderer::ProcessSequencerQueue(std::string* error_message)
+{
+    // 1) Load any newly registered clips so their normal lifecycle (OnCreate/
+    //    OnStart) runs and they begin ticking OnUpdate.
+    if (!pending_sequencer_loads_.empty())
+    {
+        std::vector<PendingSequencerLoad> loads;
+        loads.swap(pending_sequencer_loads_);
+        for (const PendingSequencerLoad& load : loads)
+        {
+            if (sequencer_clip_keys_.find(load.instance_id) != sequencer_clip_keys_.end())
+            {
+                continue;
+            }
+
+            std::string ext = load.asset_path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            const std::string instance_key = BuildScriptInstanceKey(load.instance_id, load.asset_path);
+            std::string load_error;
+            bool loaded = false;
+            if (ext == ".graph")
+            {
+                loaded = LoadGraphInstance(load.instance_id, load.asset_path, &load_error);
+            }
+            else if (ext == ".lua")
+            {
+                loaded = LoadScriptInstance(load.instance_id, load.asset_path, &load_error);
+            }
+            else
+            {
+                load_error = "Unsupported sequencer asset (expected .lua or .graph): " + load.asset_path.generic_string();
+            }
+
+            if (loaded)
+            {
+                sequencer_instance_keys_.insert(instance_key);
+                sequencer_clip_keys_.emplace(load.instance_id, instance_key);
+            }
+            else if (!load_error.empty())
+            {
+                // Non-fatal: one broken clip shouldn't tear down the cutscene.
+                SDL_Log("Sequencer clip load failed: %s", load_error.c_str());
+                if (error_message != nullptr && error_message->empty())
+                {
+                    *error_message = load_error;
+                }
+            }
+        }
+    }
+
+    // 2) Deliver pending cues (OnCue) to the matching instances.
+    if (!pending_sequencer_cues_.empty())
+    {
+        std::vector<std::string> cues;
+        cues.swap(pending_sequencer_cues_);
+        for (const std::string& instance_id : cues)
+        {
+            const auto key_it = sequencer_clip_keys_.find(instance_id);
+            if (key_it == sequencer_clip_keys_.end())
+            {
+                continue;
+            }
+            const auto inst_it = script_instances_.find(key_it->second);
+            if (inst_it == script_instances_.end())
+            {
+                continue;
+            }
+            std::string cue_error;
+            CallScriptMethod(inst_it->second, "OnCue", 0.0f, false, &cue_error);
+            if (!cue_error.empty())
+            {
+                SDL_Log("Sequencer OnCue failed: %s", cue_error.c_str());
+            }
+        }
     }
 
     return true;
@@ -4214,6 +4494,12 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
     {
         return true;
     }
+
+    // Advance the runtime-owned timeline (Play window / built game), queuing any
+    // crossed cues, then load any registered clips and deliver pending OnCue
+    // calls before this frame's OnUpdate pass.
+    AdvanceAutoSequence();
+    ProcessSequencerQueue(error_message);
 
     // Handle pending scene load requested by World.LoadScene
     if (!pending_scene_load_path_.empty())

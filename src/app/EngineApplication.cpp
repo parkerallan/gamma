@@ -774,6 +774,7 @@ void EngineApplication::Shutdown()
     StopRuntimeSession();
     workspace_panel_.Shutdown();
     info_panel_.Shutdown();
+    sequencer_panel_.Shutdown();
 
     vulkan_context_.WaitIdle();
 
