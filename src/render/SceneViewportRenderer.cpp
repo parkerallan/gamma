@@ -2554,6 +2554,8 @@ bool SceneViewportRenderer::EnsureMeshCacheEntry(const std::filesystem::path& mo
         cache_entry.materials[material_index].alpha_cutoff = material.alpha_cutoff;
         cache_entry.materials[material_index].alpha_mode = static_cast<std::uint32_t>(material.alpha_mode);
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
+        cache_entry.materials[material_index].supersample =
+            material.name.size() >= 4 && material.name.compare(0, 4, "Hair") == 0;
         stage_texture(material.base_color_texture, cache_entry.material_textures[material_index].base_color);
         stage_texture(material.metallic_roughness_texture, cache_entry.material_textures[material_index].metallic_roughness);
         stage_texture(material.normal_texture, cache_entry.material_textures[material_index].normal);

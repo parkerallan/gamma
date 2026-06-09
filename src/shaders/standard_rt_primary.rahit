@@ -115,6 +115,7 @@ struct MaterialRecord
     uint clearcoat_normal_texture_index;
     uint uses_alpha_transparency;
     uint alpha_mode; // 0=OPAQUE, 1=MASK, 2=BLEND
+    uint supersample;
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer MeshRecordBuffer

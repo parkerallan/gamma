@@ -20,6 +20,7 @@ struct PrimaryPayload
     vec3 pos_ws_curr;
     vec3 pos_ws_prev;
     vec3 shading_normal;
+    uint material_flags;
 };
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;

@@ -150,13 +150,13 @@ void SettingsPanel::Render(EngineState& state)
 
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextDisabled("Adaptive supersampling (undersampled-pixel fix)");
+        ImGui::TextDisabled("Selective supersampling (Hair materials)");
         settings_changed |= ImGui::Checkbox("Enable adaptive sampling", &state.taa_adaptive_enabled);
-        ImGui::TextDisabled("Probes 5-tap luma contrast of last frame; high-contrast pixels get extra rays.");
+        ImGui::TextDisabled("Pixels whose primary ray hits a material whose name starts with \"Hair\" fire extra sub-pixel rays.");
         settings_changed |= ImGui::SliderInt("Max samples per pixel", &state.taa_adaptive_max_samples, 1, 8);
-        ImGui::TextDisabled("Each extra sample is a full primary ray (shading + shadows). 2 is usually enough.");
+        ImGui::TextDisabled("Each extra sample is a full primary ray (shading + shadows). 4 is the default; cost only applies to tagged pixels.");
         settings_changed |= ImGui::SliderFloat("Contrast threshold", &state.taa_adaptive_threshold, 0.01f, 1.0f, "%.3f");
-        ImGui::TextDisabled("Higher => fewer pixels qualify (cheaper). 0.25 default. Drop to 0.15 if shimmer remains.");
+        ImGui::TextDisabled("Legacy luma-contrast probe is disabled; this slider is retained for project compatibility but does nothing.");
         settings_changed |= ImGui::SliderFloat("Feature preservation", &state.taa_adaptive_preservation, 0.0f, 1.0f, "%.3f");
         ImGui::TextDisabled("0 = pure average (clean, but subpixel strands look semi-transparent).\n1 = bias toward brightest sample where samples disagree (keeps hair opaque, may amplify HDR fireflies).");
 
@@ -176,8 +176,8 @@ void SettingsPanel::Render(EngineState& state)
             state.taa_anti_sparkle = 0.25f;
             state.taa_history_blend = 0.1f;
             state.taa_jitter_compensation = 0.0f;
-            state.taa_adaptive_enabled = false;
-            state.taa_adaptive_max_samples = 2;
+            state.taa_adaptive_enabled = true;
+            state.taa_adaptive_max_samples = 4;
             state.taa_adaptive_threshold = 0.25f;
             state.taa_adaptive_preservation = 0.7f;
             state.rt_dynamic_shadow_samples = 4;

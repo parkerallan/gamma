@@ -126,13 +126,14 @@ struct EngineState
     // 1 = subtract jitter_curr from uv_curr (pixel-center reprojection).
     // Slider lets the user blend between the two live to diagnose.
     float taa_jitter_compensation = 0.0f;
-    // Adaptive supersampling on undersampled pixels (hair, thin specular,
-    // alpha edges). Drives sample count from a 3x3 luma-contrast probe of
-    // last frame's 1-spp output: pixels above the threshold get up to
-    // taa_adaptive_max_samples primary rays this frame.
-    bool  taa_adaptive_enabled = false;
-    int   taa_adaptive_max_samples = 2;     // 1..8
-    float taa_adaptive_threshold = 0.25f;   // relative luma contrast, 0..1
+    // Selective supersampling: pixels whose primary ray hits a material
+    // flagged as "supersample" (currently any material whose name starts
+    // with "Hair") fire up to taa_adaptive_max_samples primary rays.
+    // taa_adaptive_threshold is retained for legacy serialization but
+    // no longer consulted by the rgen.
+    bool  taa_adaptive_enabled = true;
+    int   taa_adaptive_max_samples = 4;     // 1..8
+    float taa_adaptive_threshold = 0.25f;   // legacy; unused by the rgen
     // Per-pixel soft-shadow ray count when temporal accumulation is unavailable
     // (playmode / dynamic geometry). Lower = much cheaper, TAA smooths residual
     // noise. 1..16, default 4.

@@ -13,6 +13,7 @@ struct PrimaryPayload
     vec3 pos_ws_curr;
     vec3 pos_ws_prev;
     vec3 shading_normal;
+    uint material_flags;
 };
 
 layout(location = 0) rayPayloadInEXT PrimaryPayload primary_payload;
@@ -132,6 +133,7 @@ struct MaterialRecord
     uint clearcoat_normal_texture_index;
     uint uses_alpha_transparency;
     uint alpha_mode; // 0=OPAQUE, 1=MASK, 2=BLEND
+    uint supersample; // 1 = the rgen should fire extra sub-pixel rays on hits to this material
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer MeshRecordBuffer
@@ -1112,6 +1114,14 @@ void main()
     uint section_index = find_section_index(mesh, primitive_first_index);
     SectionRecord section = sections[section_index];
     MaterialRecord material = materials[section.material_index];
+
+    // Forward the material's "fire extra primary rays" tag to the rgen via
+    // the payload. Only meaningful on the primary (depth == 0) bounce; the
+    // rgen looks at material_flags only after sample 0 returns.
+    if (primary_payload.depth == 0u)
+    {
+        primary_payload.material_flags = material.supersample;
+    }
 
     uint index0 = mesh.index_buffer.indices[primitive_first_index + 0u];
     uint index1 = mesh.index_buffer.indices[primitive_first_index + 1u];

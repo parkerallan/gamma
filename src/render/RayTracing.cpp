@@ -1228,6 +1228,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             material_record.surface_data[3] = material.alpha_cutoff;
             material_record.uses_alpha_transparency = material.uses_alpha_transparency ? 1u : 0u;
             material_record.alpha_mode = material.alpha_mode;
+            material_record.supersample = material.supersample ? 1u : 0u;
 
             auto resolve_texture_index = [&](VkImageView image_view) -> std::uint32_t
             {

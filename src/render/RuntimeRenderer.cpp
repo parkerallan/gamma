@@ -3100,6 +3100,8 @@ bool RuntimeRenderer::EnsureMeshCacheEntry(const std::filesystem::path& model_pa
         cache_entry.materials[material_index].alpha_cutoff = material.alpha_cutoff;
         cache_entry.materials[material_index].alpha_mode = static_cast<std::uint32_t>(material.alpha_mode);
         cache_entry.materials[material_index].uses_alpha_transparency = material.uses_alpha_transparency;
+        cache_entry.materials[material_index].supersample =
+            material.name.size() >= 4 && material.name.compare(0, 4, "Hair") == 0;
 
         const ModelTextureAsset* texture_assets[16] = {
             &material.base_color_texture,

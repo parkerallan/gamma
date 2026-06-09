@@ -39,6 +39,10 @@ public:
         float alpha_cutoff = 0.5f;
         std::uint32_t alpha_mode = 0; // 0=OPAQUE, 1=MASK, 2=BLEND
         bool uses_alpha_transparency = false;
+        // Tag flagged by the host when the material's authored name starts
+        // with "Hair". Forwarded to the rgen via the primary payload and
+        // used to selectively fire extra sub-pixel rays on hair strands.
+        bool supersample = false;
         VkImageView base_color_view = VK_NULL_HANDLE;
         VkImageView metallic_roughness_view = VK_NULL_HANDLE;
         VkImageView normal_view = VK_NULL_HANDLE;
@@ -172,12 +176,13 @@ public:
         float anti_sparkle           = 0.25f; // firefly clamp
         float history_blend          = 0.1f;  // max current weight
         float jitter_compensation    = 0.0f;  // 0..1 strength of jitter_curr subtraction in motion vectors
-        // Adaptive supersampling on undersampled pixels (hair, thin specular,
-        // alpha-tested edges). Driven by 3x3 luma contrast probe of last
-        // frame's 1-spp output.
-        bool  adaptive_enabled       = false;
-        int   adaptive_max_samples   = 2;     // 1..8 primary rays for high-contrast pixels
-        float adaptive_threshold     = 0.25f; // relative luma contrast trigger
+        // Selective supersampling on hair materials (material name starts
+        // with "Hair"). The hit material's flag is forwarded to the rgen
+        // via the primary payload; threshold is retained for serialization
+        // compatibility only.
+        bool  adaptive_enabled       = true;
+        int   adaptive_max_samples   = 4;     // 1..8 primary rays for tagged pixels
+        float adaptive_threshold     = 0.25f; // legacy; unused
         // Per-pixel soft-shadow ray count when temporal accumulation is
         // unavailable (playmode / dynamic geometry). 1..16, default 4.
         int   dynamic_shadow_samples = 4;
@@ -313,6 +318,7 @@ private:
         std::uint32_t clearcoat_normal_texture_index = 0xFFFFFFFFu;
         std::uint32_t uses_alpha_transparency = 0;
         std::uint32_t alpha_mode = 0; // 0=OPAQUE, 1=MASK, 2=BLEND
+        std::uint32_t supersample = 0; // 1 = primary rgen should fire extra rays on hits to this material
     };
 
     struct UniformBlock

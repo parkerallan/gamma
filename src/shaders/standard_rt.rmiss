@@ -11,6 +11,8 @@ struct PrimaryPayload
     uint depth;
     vec3 pos_ws_curr;
     vec3 pos_ws_prev;
+    vec3 shading_normal;
+    uint material_flags;
 };
 
 layout(set = 0, binding = 2, std140) uniform SceneUniforms
