@@ -1,5 +1,7 @@
 ﻿#include "render/SceneViewportRenderer.h"
 
+#include "render/CameraController.h"
+
 #include <SDL3/SDL.h>
 
 #include <ImGuizmo.h>
@@ -4067,17 +4069,36 @@ void SceneViewportRenderer::RenderCameraPreview(
     resolved_lighting_ = ResolveSceneLighting(scene_metadata, BuildLightingPoseMap(resolved_object_poses), camera_object.name);
     grid_enabled_ = false;
 
-    const Vec3 camera_position = TransformPoint(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
-    Vec3 camera_forward = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, -1.0f});
-    Vec3 camera_up = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
-    if (Length(camera_forward) <= 0.0001f)
+    const auto target_world_matrix_lookup = [&resolved_object_poses](const std::string& target_name) -> const std::array<float, 16>*
     {
-        camera_forward = Vec3{0.0f, 0.0f, -1.0f};
-    }
-    if (Length(camera_up) <= 0.0001f || std::abs(Dot(camera_forward, camera_up)) >= 0.999f)
-    {
-        camera_up = Vec3{0.0f, 1.0f, 0.0f};
-    }
+        const auto target_it = resolved_object_poses.find(target_name);
+        if (target_it == resolved_object_poses.end())
+        {
+            return nullptr;
+        }
+        return &target_it->second.world_matrix;
+    };
+
+    const CameraView resolved_camera_view = ResolveCameraView(
+        camera_attributes,
+        camera_pose_it->second.world_matrix,
+        target_world_matrix_lookup);
+
+    const Vec3 camera_position{
+        resolved_camera_view.position[0],
+        resolved_camera_view.position[1],
+        resolved_camera_view.position[2],
+    };
+    const Vec3 camera_forward{
+        resolved_camera_view.forward[0],
+        resolved_camera_view.forward[1],
+        resolved_camera_view.forward[2],
+    };
+    const Vec3 camera_up{
+        resolved_camera_view.up[0],
+        resolved_camera_view.up[1],
+        resolved_camera_view.up[2],
+    };
 
     SyncRayTracingScene();
 

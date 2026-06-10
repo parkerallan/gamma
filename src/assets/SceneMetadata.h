@@ -50,6 +50,12 @@ enum class SceneObjectShaderType
     Cloud,
 };
 
+enum class SceneObjectCameraType
+{
+    Fixed,
+    Follow,
+};
+
 enum class SceneObjectAudioPlayMode
 {
     Off,
@@ -114,6 +120,26 @@ struct SceneObjectCameraAttributes
     float near_clip = 0.01f;
     float far_clip = 250.0f;
     bool active = false;
+    SceneObjectCameraType type = SceneObjectCameraType::Fixed;
+    std::string follow_target_object;
+    SceneVector3 follow_offset = {0.0f, 2.0f, 5.0f};
+    // Orbit around the follow target's position. (x = yaw degrees around
+    // world Y, y = pitch degrees around the orbited X axis, z = unused).
+    // Rotates the Follow Offset vector around the target before adding it,
+    // so the camera circles the target without changing Follow Offset's
+    // length. Has no effect when Lock Position is on.
+    SceneVector3 follow_orbit = {0.0f, 0.0f, 0.0f};
+    // Additional Euler rotation (XYZ, degrees) applied on top of the camera
+    // object's own rotation in Follow mode. Lets the user re-aim the camera
+    // without having to rotate the camera scene object itself.
+    SceneVector3 follow_rotation_offset = {0.0f, 0.0f, 0.0f};
+    // When true, the camera stays at its authored world position and only
+    // rotates to look at the follow target. Follow Offset is ignored.
+    bool follow_lock_position = false;
+    // Exponential smoothing time constant in seconds. 0 = no smoothing
+    // (camera snaps to target+offset every frame). Larger values = laggier
+    // chase camera.
+    float follow_smoothing = 0.0f;
 };
 
 struct SceneObjectRigidbodyAttributes
@@ -367,6 +393,13 @@ bool SetSceneObjectAttributeFieldOfView(const std::filesystem::path& scene_path,
 bool SetSceneObjectAttributeNearClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float near_clip);
 bool SetSceneObjectAttributeFarClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float far_clip);
 bool SetSceneObjectCameraActive(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool active);
+bool SetSceneObjectAttributeCameraType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectCameraType type);
+bool SetSceneObjectAttributeCameraFollowTarget(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& follow_target_object);
+bool SetSceneObjectAttributeCameraFollowOffset(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& follow_offset);
+bool SetSceneObjectAttributeCameraFollowOrbit(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& follow_orbit);
+bool SetSceneObjectAttributeCameraFollowRotationOffset(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& follow_rotation_offset);
+bool SetSceneObjectAttributeCameraFollowLockPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool follow_lock_position);
+bool SetSceneObjectAttributeCameraFollowSmoothing(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float follow_smoothing);
 bool SetSceneObjectAttributePhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectPhysicsShape shape);
 bool SetSceneObjectAttributePhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool is_dynamic);
 bool SetSceneObjectAttributePhysicsLockRotationX(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked);

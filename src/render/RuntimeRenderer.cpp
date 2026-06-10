@@ -1,5 +1,6 @@
 ﻿#include "render/RuntimeRenderer.h"
 #include "render/BoneModifiers.h"
+#include "render/CameraController.h"
 #include "render/RuntimeAnimationCache.h"
 #include "components/graph/GraphTranspiler.h"
 #include "vfs/AssetVFS.h"
@@ -5967,9 +5968,96 @@ bool RuntimeRenderer::BuildQueuedScene(
 
     lighting = ResolveSceneLighting(scene_metadata, BuildLightingPoseMap(resolved_object_poses), active_camera_object.name);
 
-    const Vec3 camera_position = TransformPoint(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, 0.0f});
-    Vec3 camera_forward = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 0.0f, -1.0f});
-    Vec3 camera_up = TransformDirectionByMatrix(camera_pose_it->second.world_matrix.data(), Vec3{0.0f, 1.0f, 0.0f});
+    auto target_world_matrix_lookup = [&](const std::string& object_name) -> const std::array<float, 16>*
+    {
+        const auto it = resolved_object_poses.find(object_name);
+        if (it == resolved_object_poses.end())
+        {
+            return nullptr;
+        }
+        return &it->second.world_matrix;
+    };
+
+    const CameraView resolved_view = ResolveCameraView(
+        active_camera,
+        camera_pose_it->second.world_matrix,
+        target_world_matrix_lookup);
+
+    Vec3 camera_position = {resolved_view.position[0], resolved_view.position[1], resolved_view.position[2]};
+    Vec3 camera_forward = {resolved_view.forward[0], resolved_view.forward[1], resolved_view.forward[2]};
+    Vec3 camera_up = {resolved_view.up[0], resolved_view.up[1], resolved_view.up[2]};
+
+    // Apply exponential follow-camera smoothing. Only active when this is a
+    // Follow camera with a resolvable target and a positive time constant.
+    // Reset whenever the camera object, target, or smoothing key changes so
+    // the camera doesn't lerp from a stale position after switching cameras.
+    {
+        const bool follow_smoothing_active =
+            active_camera.type == SceneObjectCameraType::Follow
+            && !active_camera.follow_target_object.empty()
+            && active_camera.follow_smoothing > 0.0f
+            && target_world_matrix_lookup(active_camera.follow_target_object) != nullptr;
+
+        const std::string smoothing_key = follow_smoothing_active
+            ? (active_camera_object.name + "->" + active_camera.follow_target_object)
+            : std::string();
+
+        const std::uint64_t now_perf_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+        const std::uint64_t perf_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+
+        if (!follow_smoothing_active || smoothing_key != follow_camera_smoothed_key_)
+        {
+            follow_camera_smoothed_position_ = {camera_position.x, camera_position.y, camera_position.z};
+            follow_camera_smoothed_forward_  = {camera_forward.x,  camera_forward.y,  camera_forward.z};
+            follow_camera_smoothed_up_       = {camera_up.x,       camera_up.y,       camera_up.z};
+            follow_camera_smoothed_position_valid_ = follow_smoothing_active;
+            follow_camera_smoothed_key_ = smoothing_key;
+            follow_camera_last_tick_counter_ = now_perf_ticks;
+        }
+        else
+        {
+            // Exponential ease: alpha = 1 - exp(-dt / tau).
+            const float dt = (perf_freq != 0 && now_perf_ticks > follow_camera_last_tick_counter_)
+                ? static_cast<float>(static_cast<double>(now_perf_ticks - follow_camera_last_tick_counter_)
+                                     / static_cast<double>(perf_freq))
+                : 0.0f;
+            // Cap dt so a single editor hitch doesn't teleport the camera.
+            const float dt_clamped = std::clamp(dt, 0.0f, 0.25f);
+            const float tau = (std::max)(0.0001f, active_camera.follow_smoothing);
+            const float alpha = 1.0f - std::exp(-dt_clamped / tau);
+
+            follow_camera_smoothed_position_[0] += (camera_position.x - follow_camera_smoothed_position_[0]) * alpha;
+            follow_camera_smoothed_position_[1] += (camera_position.y - follow_camera_smoothed_position_[1]) * alpha;
+            follow_camera_smoothed_position_[2] += (camera_position.z - follow_camera_smoothed_position_[2]) * alpha;
+
+            follow_camera_smoothed_forward_[0] += (camera_forward.x - follow_camera_smoothed_forward_[0]) * alpha;
+            follow_camera_smoothed_forward_[1] += (camera_forward.y - follow_camera_smoothed_forward_[1]) * alpha;
+            follow_camera_smoothed_forward_[2] += (camera_forward.z - follow_camera_smoothed_forward_[2]) * alpha;
+
+            follow_camera_smoothed_up_[0] += (camera_up.x - follow_camera_smoothed_up_[0]) * alpha;
+            follow_camera_smoothed_up_[1] += (camera_up.y - follow_camera_smoothed_up_[1]) * alpha;
+            follow_camera_smoothed_up_[2] += (camera_up.z - follow_camera_smoothed_up_[2]) * alpha;
+
+            follow_camera_last_tick_counter_ = now_perf_ticks;
+
+            camera_position = Vec3{
+                follow_camera_smoothed_position_[0],
+                follow_camera_smoothed_position_[1],
+                follow_camera_smoothed_position_[2],
+            };
+            camera_forward = Vec3{
+                follow_camera_smoothed_forward_[0],
+                follow_camera_smoothed_forward_[1],
+                follow_camera_smoothed_forward_[2],
+            };
+            camera_up = Vec3{
+                follow_camera_smoothed_up_[0],
+                follow_camera_smoothed_up_[1],
+                follow_camera_smoothed_up_[2],
+            };
+        }
+    }
+
     if (Length(camera_forward) <= 0.0001f)
     {
         camera_forward = Vec3{0.0f, 0.0f, -1.0f};

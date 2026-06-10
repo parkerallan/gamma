@@ -412,7 +412,8 @@ bool RenderAttributeSection(
             attribute.kind != SceneObjectAttributeKind::Video2D &&
             attribute.kind != SceneObjectAttributeKind::Skybox &&
             attribute.kind != SceneObjectAttributeKind::Effects &&
-            attribute.kind != SceneObjectAttributeKind::Shader)
+            attribute.kind != SceneObjectAttributeKind::Shader &&
+            attribute.kind != SceneObjectAttributeKind::Camera)
         {
             if (RenderAttributeKindSelector(state, object, attribute_index, attribute.kind))
             {
@@ -779,6 +780,169 @@ bool RenderAttributeSection(
         {
             ImGui::Spacing();
             ImGui::TextUnformatted("Settings");
+
+            struct CameraTypeOption
+            {
+                const char* label;
+                SceneObjectCameraType type;
+            };
+            constexpr CameraTypeOption kCameraTypeOptions[] = {
+                {"Fixed", SceneObjectCameraType::Fixed},
+                {"Follow", SceneObjectCameraType::Follow},
+            };
+
+            int selected_camera_type_index = 0;
+            for (int i = 0; i < static_cast<int>(std::size(kCameraTypeOptions)); ++i)
+            {
+                if (kCameraTypeOptions[i].type == attribute.camera.type)
+                {
+                    selected_camera_type_index = i;
+                    break;
+                }
+            }
+
+            if (ImGui::BeginCombo("Type", kCameraTypeOptions[selected_camera_type_index].label))
+            {
+                for (int i = 0; i < static_cast<int>(std::size(kCameraTypeOptions)); ++i)
+                {
+                    const bool selected = i == selected_camera_type_index;
+                    if (ImGui::Selectable(kCameraTypeOptions[i].label, selected))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "camera type", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraType(state.selected_item_path, object.name, attribute_index, kCameraTypeOptions[i].type);
+                        }) || changed;
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            if (attribute.camera.type == SceneObjectCameraType::Follow)
+            {
+                const std::string follow_target_label = attribute.camera.follow_target_object.empty()
+                    ? std::string("Drop Follow Target Object Here")
+                    : attribute.camera.follow_target_object;
+                ImGui::Button(follow_target_label.c_str(), ImVec2(-1.0f, 0.0f));
+                if (ImGui::BeginDragDropTarget())
+                {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SCENE_OBJECT_PATH"))
+                    {
+                        const char* payload_text = static_cast<const char*>(payload->Data);
+                        const std::size_t payload_size = payload->DataSize > 0
+                            ? static_cast<std::size_t>(payload->DataSize - 1)
+                            : 0;
+                        const std::string payload_string(payload_text, payload_size);
+                        const std::size_t separator_index = payload_string.find('\n');
+                        std::string dropped_object_name;
+                        std::filesystem::path dropped_scene_path;
+                        if (separator_index != std::string::npos)
+                        {
+                            dropped_scene_path = std::filesystem::path(payload_string.substr(0, separator_index));
+                            dropped_object_name = payload_string.substr(separator_index + 1);
+                        }
+
+                        const bool same_scene = !dropped_scene_path.empty() &&
+                            std::filesystem::weakly_canonical(dropped_scene_path) ==
+                            std::filesystem::weakly_canonical(state.selected_item_path);
+                        const bool different_object = dropped_object_name != object.name;
+                        if (same_scene && different_object && !dropped_object_name.empty())
+                        {
+                            changed = SaveSceneObjectAttributeEdit(state, object, "camera follow target", [&]()
+                            {
+                                return SetSceneObjectAttributeCameraFollowTarget(state.selected_item_path, object.name, attribute_index, dropped_object_name);
+                            }) || changed;
+                        }
+                        else if (!same_scene)
+                        {
+                            state.AddLog("Follow target must be from the same scene");
+                        }
+                        else if (!different_object)
+                        {
+                            state.AddLog("A camera cannot follow itself");
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+
+                if (!attribute.camera.follow_target_object.empty())
+                {
+                    if (ImGui::SmallButton("Clear Follow Target"))
+                    {
+                        changed = SaveSceneObjectAttributeEdit(state, object, "camera follow target", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraFollowTarget(state.selected_item_path, object.name, attribute_index, std::string());
+                        }) || changed;
+                    }
+                }
+
+                bool follow_lock_position = attribute.camera.follow_lock_position;
+                if (ImGui::Checkbox("Lock Position", &follow_lock_position))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "camera follow lock position", [&]()
+                    {
+                        return SetSceneObjectAttributeCameraFollowLockPosition(state.selected_item_path, object.name, attribute_index, follow_lock_position);
+                    }) || changed;
+                }
+
+                float follow_offset[3] = {
+                    attribute.camera.follow_offset[0],
+                    attribute.camera.follow_offset[1],
+                    attribute.camera.follow_offset[2],
+                };
+                if (ImGui::DragFloat3("Follow Offset", follow_offset, 0.05f))
+                {
+                    const SceneVector3 next_offset = {follow_offset[0], follow_offset[1], follow_offset[2]};
+                    changed = SaveSceneObjectAttributeEdit(state, object, "camera follow offset", [&]()
+                    {
+                        return SetSceneObjectAttributeCameraFollowOffset(state.selected_item_path, object.name, attribute_index, next_offset);
+                    }) || changed;
+                }
+
+                ImGui::BeginDisabled(follow_lock_position);
+                float follow_orbit[2] = {
+                    attribute.camera.follow_orbit[0],
+                    attribute.camera.follow_orbit[1],
+                };
+                if (ImGui::DragFloat2("Follow Orbit (Yaw,Pitch)", follow_orbit, 0.5f, -360.0f, 360.0f, "%.2f deg"))
+                {
+                    const SceneVector3 next_orbit = {follow_orbit[0], follow_orbit[1], 0.0f};
+                    changed = SaveSceneObjectAttributeEdit(state, object, "camera follow orbit", [&]()
+                    {
+                        return SetSceneObjectAttributeCameraFollowOrbit(state.selected_item_path, object.name, attribute_index, next_orbit);
+                    }) || changed;
+                }
+                ImGui::EndDisabled();
+
+                float follow_rotation_offset[3] = {
+                    attribute.camera.follow_rotation_offset[0],
+                    attribute.camera.follow_rotation_offset[1],
+                    attribute.camera.follow_rotation_offset[2],
+                };
+                if (ImGui::DragFloat3("Follow Rotation Offset", follow_rotation_offset, 0.5f, -360.0f, 360.0f, "%.2f deg"))
+                {
+                    const SceneVector3 next_rot = {follow_rotation_offset[0], follow_rotation_offset[1], follow_rotation_offset[2]};
+                    changed = SaveSceneObjectAttributeEdit(state, object, "camera follow rotation offset", [&]()
+                    {
+                        return SetSceneObjectAttributeCameraFollowRotationOffset(state.selected_item_path, object.name, attribute_index, next_rot);
+                    }) || changed;
+                }
+
+                float follow_smoothing = attribute.camera.follow_smoothing;
+                if (ImGui::DragFloat("Follow Smoothing", &follow_smoothing, 0.005f, 0.0f, 2.0f, "%.3f s"))
+                {
+                    const float clamped = (std::max)(0.0f, follow_smoothing);
+                    changed = SaveSceneObjectAttributeEdit(state, object, "camera follow smoothing", [&]()
+                    {
+                        return SetSceneObjectAttributeCameraFollowSmoothing(state.selected_item_path, object.name, attribute_index, clamped);
+                    }) || changed;
+                }
+
+                ImGui::TextDisabled("Camera world position = follow target world position + Follow Offset. Camera keeps its own rotation. Follow Smoothing is the lag time constant (0 = snap).");
+            }
 
             float field_of_view = attribute.camera.field_of_view_degrees;
             if (ImGui::DragFloat("Field Of View", &field_of_view, 0.25f, 1.0f, 179.0f, "%.3f deg"))

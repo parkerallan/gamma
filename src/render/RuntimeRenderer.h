@@ -635,7 +635,31 @@ private:
     float physics_accumulator_seconds_ = 0.0f;
     std::uint64_t physics_last_tick_counter_ = 0;
     bool physics_has_curr_snapshot_ = false;
-    std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
+    // Smoothed follow-camera world position. Tracked across frames so we can
+    // ease toward the raw (target + offset) position when follow_smoothing > 0.
+    // Reset whenever the active follow camera or its target changes.
+    std::array<float, 3> follow_camera_smoothed_position_ = {0.0f, 0.0f, 0.0f};
+    // Smoothed forward/up vectors. Used so Lock Position cameras (where the
+    // position is fixed and only the look-at rotation changes) still benefit
+    // from follow_smoothing.
+    std::array<float, 3> follow_camera_smoothed_forward_ = {0.0f, 0.0f, -1.0f};
+    std::array<float, 3> follow_camera_smoothed_up_ = {0.0f, 1.0f, 0.0f};
+    bool follow_camera_smoothed_position_valid_ = false;
+    std::string follow_camera_smoothed_key_;
+    std::uint64_t follow_camera_last_tick_counter_ = 0;
+    // Last frame's resolved world matrices for the active follow target.
+    // Used to build the camera's `prev_view_projection` from
+    // (target_prev_position + current offset), guaranteeing the followed
+    // object's motion vector is zero regardless of physics interpolation
+    // timing. Keyed by target object name; we only need the active target
+    // so we keep a single (key, matrix) pair rather than a full map.
+    std::string follow_camera_prev_target_key_;
+    std::array<float, 16> follow_camera_prev_target_world_matrix_ = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f};
+    bool follow_camera_prev_target_valid_ = false;    std::unordered_map<std::string, SceneVector3> script_object_position_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_rotation_overrides_;
     std::unordered_map<std::string, SceneVector3> script_object_scale_overrides_;
     std::string script_active_instance_key_;
