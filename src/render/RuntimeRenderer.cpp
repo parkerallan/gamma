@@ -4426,7 +4426,8 @@ bool RuntimeRenderer::CallScriptTriggerMethod(
     const char* method_name,
     const std::string& other_object_name,
     const std::string& phase,
-    std::string* error_message)
+    std::string* error_message,
+    const std::string& bone_name)
 {
     if (script_lua_state_ == nullptr || method_name == nullptr)
     {
@@ -4466,13 +4467,16 @@ bool RuntimeRenderer::CallScriptTriggerMethod(
     lua_pushstring(lua_state, instance.object_name.c_str());
     lua_pushstring(lua_state, other_object_name.c_str());
     lua_pushstring(lua_state, phase.c_str());
+    // 5th argument: the bone name for bone-collider triggers, empty string
+    // for ordinary volume triggers. Existing 4-arg scripts ignore it.
+    lua_pushstring(lua_state, bone_name.c_str());
 
     const std::string previous_instance_key = script_active_instance_key_;
     const std::string previous_object_name = script_active_object_name_;
     script_active_instance_key_ = instance.instance_key;
     script_active_object_name_ = instance.object_name;
 
-    const int call_result = lua_pcall(lua_state, 4, 0, 0);
+    const int call_result = lua_pcall(lua_state, 5, 0, 0);
     script_active_instance_key_ = previous_instance_key;
     script_active_object_name_ = previous_object_name;
     if (call_result != LUA_OK)
@@ -4680,8 +4684,15 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
             continue;
         }
 
-        const bool a_is_trigger = trigger_objects.find(collision.object_a) != trigger_objects.end();
-        const bool b_is_trigger = trigger_objects.find(collision.object_b) != trigger_objects.end();
+        // A side fires script callbacks if it is a scene Trigger Volume OR a
+        // bone-collision Trigger (which carries a non-empty bone name). Bone
+        // Rigidbody colliders never set a bone name, so they stay silent.
+        const bool a_is_bone_trigger = !collision.a_bone.empty();
+        const bool b_is_bone_trigger = !collision.b_bone.empty();
+        const bool a_is_trigger = a_is_bone_trigger
+            || trigger_objects.find(collision.object_a) != trigger_objects.end();
+        const bool b_is_trigger = b_is_bone_trigger
+            || trigger_objects.find(collision.object_b) != trigger_objects.end();
         if (!a_is_trigger && !b_is_trigger)
         {
             continue;
@@ -4691,7 +4702,7 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
         {
             if (a_is_trigger && instance.object_name == collision.object_a)
             {
-                if (!CallScriptTriggerMethod(instance, method_name, collision.object_b, collision.phase, error_message))
+                if (!CallScriptTriggerMethod(instance, method_name, collision.object_b, collision.phase, error_message, collision.a_bone))
                 {
                     return false;
                 }
@@ -4699,7 +4710,7 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
 
             if (b_is_trigger && instance.object_name == collision.object_b)
             {
-                if (!CallScriptTriggerMethod(instance, method_name, collision.object_a, collision.phase, error_message))
+                if (!CallScriptTriggerMethod(instance, method_name, collision.object_a, collision.phase, error_message, collision.b_bone))
                 {
                     return false;
                 }
@@ -6125,6 +6136,12 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         ray_tracing_.SetClouds(clouds);
     }
 
+    // Rebuild the animated bone-collider set from this frame's poses. Each
+    // UpdateAnimatedMeshForObject appends the object's Collision-modifier
+    // colliders; the physics block (next frame) consumes these.
+    bone_collider_defs_.clear();
+    bone_collider_targets_.clear();
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
         const std::uint64_t skinning_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
@@ -6351,6 +6368,9 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         physics_object_transforms_ = physics_object_transforms_curr_;
         physics_has_curr_snapshot_ = true;
         physics_accumulator_seconds_ = 0.0f;
+        // Force bone colliders to (re)register once the animation pass has
+        // populated this session's collider set (BuildFromScene cleared them).
+        bone_collider_signature_.clear();
     }
 
     // Step physics on a fixed timestep with an accumulator and render with an
@@ -6389,10 +6409,37 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         constexpr float kFixedStepSeconds = 1.0f / 120.0f;
         constexpr int kMaxStepsPerFrame = 8;
 
+        // (Re)register bone-collider bodies when the set changed (added /
+        // removed / resized). The signature is cheap and only rebuilds Jolt
+        // bodies when needed; per-frame transforms are driven below.
+        {
+            std::string signature;
+            signature.reserve(bone_collider_defs_.size() * 48);
+            for (const PhysicsWorld::BoneColliderDef& def : bone_collider_defs_)
+            {
+                signature += def.key;
+                signature += def.is_trigger ? "|t|" : "|r|";
+                signature += std::to_string(def.half_extents[0]);
+                signature += ',';
+                signature += std::to_string(def.half_extents[1]);
+                signature += ',';
+                signature += std::to_string(def.half_extents[2]);
+                signature += ';';
+            }
+            if (signature != bone_collider_signature_)
+            {
+                physics_world_.SetBoneColliders(bone_collider_defs_);
+                bone_collider_signature_ = std::move(signature);
+            }
+        }
+
         physics_accumulator_seconds_ += frame_dt;
         int steps_taken = 0;
         while (physics_accumulator_seconds_ >= kFixedStepSeconds && steps_taken < kMaxStepsPerFrame)
         {
+            // Drive bone colliders to this frame's animated pose before each
+            // substep so rigidbody colliders impart a velocity-based push.
+            physics_world_.UpdateBoneColliderTransforms(bone_collider_targets_, kFixedStepSeconds);
             physics_object_transforms_prev_ = physics_object_transforms_curr_;
             physics_world_.Step(kFixedStepSeconds);
             physics_object_transforms_curr_ = physics_world_.GetSimulatedTransforms();
@@ -6623,6 +6670,70 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
     return true;
 }
 
+namespace
+{
+// Column-major 4x4 multiply (translation in elements 12-14), matching the
+// QueuedSceneObject::model_matrix and bone-world export conventions.
+std::array<float, 16> MulColMajor(const std::array<float, 16>& a, const std::array<float, 16>& b)
+{
+    std::array<float, 16> r{};
+    for (int col = 0; col < 4; ++col)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            r[col * 4 + row] = sum;
+        }
+    }
+    return r;
+}
+
+// Quaternion (x,y,z,w) from a column-major matrix's rotation basis, with the
+// basis columns normalized to strip scale.
+std::array<float, 4> QuatFromColMajor(const std::array<float, 16>& m)
+{
+    auto col_len = [&](int c) {
+        return std::sqrt(m[c * 4] * m[c * 4] + m[c * 4 + 1] * m[c * 4 + 1] + m[c * 4 + 2] * m[c * 4 + 2]);
+    };
+    const float lx = col_len(0) > 1e-8f ? col_len(0) : 1.0f;
+    const float ly = col_len(1) > 1e-8f ? col_len(1) : 1.0f;
+    const float lz = col_len(2) > 1e-8f ? col_len(2) : 1.0f;
+    const float m00 = m[0] / lx, m10 = m[1] / lx, m20 = m[2] / lx;
+    const float m01 = m[4] / ly, m11 = m[5] / ly, m21 = m[6] / ly;
+    const float m02 = m[8] / lz, m12 = m[9] / lz, m22 = m[10] / lz;
+
+    float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+    const float trace = m00 + m11 + m22;
+    if (trace > 0.0f)
+    {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        qw = 0.25f * s; qx = (m21 - m12) / s; qy = (m02 - m20) / s; qz = (m10 - m01) / s;
+    }
+    else if (m00 > m11 && m00 > m22)
+    {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        qw = (m21 - m12) / s; qx = 0.25f * s; qy = (m01 + m10) / s; qz = (m02 + m20) / s;
+    }
+    else if (m11 > m22)
+    {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        qw = (m02 - m20) / s; qx = (m01 + m10) / s; qy = 0.25f * s; qz = (m12 + m21) / s;
+    }
+    else
+    {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        qw = (m10 - m01) / s; qx = (m02 + m20) / s; qy = (m12 + m21) / s; qz = 0.25f * s;
+    }
+    const float n = std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+    if (n > 1e-8f) { qx /= n; qy /= n; qz /= n; qw /= n; }
+    return {qx, qy, qz, qw};
+}
+} // namespace
+
 bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& object)
 {
     RuntimeAnimatorState* const runtime_state = FindRuntimeAnimatorState(object.name);
@@ -6637,6 +6748,9 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
     // motion. Without modifiers we keep the old fast-out when there's no
     // active clip.
     const std::vector<AnimatorBoneModifier>* bone_modifiers = nullptr;
+    const AnimatorControllerAsset* controller_asset = nullptr;
+    bool has_collision_modifier = false;
+    bool has_rigidbody_collision = false;
     {
         const std::filesystem::path controller_path = std::filesystem::path(runtime_state->controller_path).is_absolute()
             ? std::filesystem::path(runtime_state->controller_path)
@@ -6644,12 +6758,26 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
         const auto controller_it = animator_controller_cache_.find(controller_path);
         if (controller_it != animator_controller_cache_.end() && controller_it->second.loaded)
         {
+            controller_asset = &controller_it->second.asset;
             for (const AnimatorBoneModifier& m : controller_it->second.asset.bone_modifiers)
             {
-                if (!m.bone_name.empty())
+                if (m.bone_name.empty())
+                {
+                    continue;
+                }
+                // Run the modifier-aware sampling path for physics jiggle
+                // and/or to export collision-bone world transforms.
+                if (m.type == AnimatorBoneModifierType::Physics || m.type == AnimatorBoneModifierType::Collision)
                 {
                     bone_modifiers = &controller_it->second.asset.bone_modifiers;
-                    break;
+                }
+                if (m.type == AnimatorBoneModifierType::Collision)
+                {
+                    has_collision_modifier = true;
+                    if (m.collision_mode == AnimatorBoneCollisionMode::Rigidbody)
+                    {
+                        has_rigidbody_collision = true;
+                    }
                 }
             }
         }
@@ -6689,6 +6817,48 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
     }
 
     std::vector<aiMatrix4x4> bone_matrices;
+    std::unordered_map<std::string, std::array<float, 16>> bone_world_by_name;
+
+    // The rendered mesh applies model_visual_offset on top of model_matrix
+    // (see ApplyLocalModelOffset at the RT instance build). Bone-collider
+    // math must use the SAME effective transform or every bone box ends up
+    // displaced from the visible mesh by exactly that offset.
+    std::array<float, 16> effective_model_matrix = object.model_matrix;
+    effective_model_matrix[12] += object.model_visual_offset[0];
+    effective_model_matrix[13] += object.model_visual_offset[1];
+    effective_model_matrix[14] += object.model_visual_offset[2];
+
+    // Rigidbody collision bones sweep against static geometry: the box is
+    // cast from its previous resolved position to the animated target and
+    // clamped at the first surface hit, so it cannot tunnel through hollow
+    // mesh colliders. Bound to this object so it skips its own bodies.
+    BoneCollisionResolveQuery collision_resolve_query;
+    if (has_rigidbody_collision && physics_world_.IsInitialized())
+    {
+        const std::string owner = object.name;
+        collision_resolve_query = [this, owner](
+            const std::array<float, 16>& world_box,
+            const std::array<float, 3>& center_local,
+            const std::array<float, 3>& half_extents_world,
+            const std::array<float, 3>& prev_center,
+            bool has_prev) -> std::array<float, 3>
+        {
+            const SceneVector3 target{
+                world_box[0] * center_local[0] + world_box[4] * center_local[1] + world_box[8] * center_local[2] + world_box[12],
+                world_box[1] * center_local[0] + world_box[5] * center_local[1] + world_box[9] * center_local[2] + world_box[13],
+                world_box[2] * center_local[0] + world_box[6] * center_local[1] + world_box[10] * center_local[2] + world_box[14],
+            };
+            const std::array<float, 4> rotation = QuatFromColMajor(world_box);
+            const SceneVector3 from = has_prev
+                ? SceneVector3{prev_center[0], prev_center[1], prev_center[2]}
+                : target;
+            const SceneVector3 resolved = physics_world_.ResolveBoxSweep(
+                from, target, rotation,
+                SceneVector3{half_extents_world[0], half_extents_world[1], half_extents_world[2]},
+                owner);
+            return {resolved[0], resolved[1], resolved[2]};
+        };
+    }
 
     const bool sampled = (bone_modifiers != nullptr)
         ? SampleClipBoneMatricesWithPhysics(
@@ -6697,13 +6867,70 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
               runtime_state->state_time_seconds,
               animation_last_delta_time_seconds_,
               *bone_modifiers,
-              object.model_matrix,
+              effective_model_matrix,
               *runtime_state,
-              bone_matrices)
+              bone_matrices,
+              has_collision_modifier ? &bone_world_by_name : nullptr,
+              collision_resolve_query)
         : SampleClipBoneMatrices(*anim_cache_entry, runtime_state->active_clip_name, runtime_state->state_time_seconds, bone_matrices);
     if (!sampled)
     {
         return true;
+    }
+
+    // Append this object's bone colliders for the physics block to drive.
+    if (has_collision_modifier && controller_asset != nullptr && !bone_world_by_name.empty())
+    {
+        auto col_len = [&](int c) {
+            const std::array<float, 16>& m = effective_model_matrix;
+            return std::sqrt(m[c * 4] * m[c * 4] + m[c * 4 + 1] * m[c * 4 + 1] + m[c * 4 + 2] * m[c * 4 + 2]);
+        };
+        const float object_scale_x = col_len(0);
+        const float object_scale_y = col_len(1);
+        const float object_scale_z = col_len(2);
+
+        for (const AnimatorBoneModifier& m : controller_asset->bone_modifiers)
+        {
+            if (m.type != AnimatorBoneModifierType::Collision || m.bone_name.empty())
+            {
+                continue;
+            }
+            const auto wit = bone_world_by_name.find(m.bone_name);
+            if (wit == bone_world_by_name.end())
+            {
+                continue;
+            }
+
+            // World transform of the bone (object world * bone model-world),
+            // using the same visual-offset-applied matrix as the renderer.
+            const std::array<float, 16> bone_world = MulColMajor(effective_model_matrix, wit->second);
+            // Box origin = bone transform applied to the local center offset.
+            const std::array<float, 3>& c = m.box_center;
+            PhysicsBodyTransform transform;
+            transform.position = {
+                bone_world[0] * c[0] + bone_world[4] * c[1] + bone_world[8] * c[2] + bone_world[12],
+                bone_world[1] * c[0] + bone_world[5] * c[1] + bone_world[9] * c[2] + bone_world[13],
+                bone_world[2] * c[0] + bone_world[6] * c[1] + bone_world[10] * c[2] + bone_world[14],
+            };
+            transform.rotation = QuatFromColMajor(bone_world);
+
+            PhysicsWorld::BoneColliderDef def;
+            def.key = object.name + "#bone#" + m.bone_name;
+            def.owner_object = object.name;
+            def.bone_name = m.bone_name;
+            def.is_trigger = (m.collision_mode == AnimatorBoneCollisionMode::Trigger);
+            // Bone-local half extents scaled into world units by the object's
+            // world scale so a scaled character keeps a fitting collider.
+            def.half_extents = {
+                m.box_half_extents[0] * object_scale_x,
+                m.box_half_extents[1] * object_scale_y,
+                m.box_half_extents[2] * object_scale_z,
+            };
+            def.transform = transform;
+
+            bone_collider_defs_.push_back(def);
+            bone_collider_targets_[def.key] = transform;
+        }
     }
 
     bool has_blend = false;

@@ -92,6 +92,7 @@ json BuildTransitionJson(const AnimatorTransitionDefinition& transition)
 json BuildBoneModifierJson(const AnimatorBoneModifier& modifier)
 {
     json data;
+    data["type"] = AnimatorBoneModifierTypeToString(modifier.type);
     data["bone_name"] = modifier.bone_name;
     data["strength"] = modifier.strength;
     data["damping"] = modifier.damping;
@@ -103,9 +104,56 @@ json BuildBoneModifierJson(const AnimatorBoneModifier& modifier)
     data["angle_limit_deg"] = modifier.angle_limit_deg;
     data["radius"] = modifier.radius;
     data["affects_children"] = modifier.affects_children;
+    data["box_half_extents"] = json::array({modifier.box_half_extents[0], modifier.box_half_extents[1], modifier.box_half_extents[2]});
+    data["box_center"] = json::array({modifier.box_center[0], modifier.box_center[1], modifier.box_center[2]});
+    data["collision_mode"] = AnimatorBoneCollisionModeToString(modifier.collision_mode);
     return data;
 }
 } // namespace
+
+const char* AnimatorBoneModifierTypeToString(AnimatorBoneModifierType type)
+{
+    switch (type)
+    {
+    case AnimatorBoneModifierType::Physics:
+        return "physics";
+    case AnimatorBoneModifierType::Collision:
+        return "collision";
+    }
+    return "physics";
+}
+
+AnimatorBoneModifierType AnimatorBoneModifierTypeFromString(const std::string& text)
+{
+    // Unknown or missing types fall back to Physics so controllers saved
+    // before the type field existed keep working.
+    if (text == "collision")
+    {
+        return AnimatorBoneModifierType::Collision;
+    }
+    return AnimatorBoneModifierType::Physics;
+}
+
+const char* AnimatorBoneCollisionModeToString(AnimatorBoneCollisionMode mode)
+{
+    switch (mode)
+    {
+    case AnimatorBoneCollisionMode::Trigger:
+        return "trigger";
+    case AnimatorBoneCollisionMode::Rigidbody:
+        return "rigidbody";
+    }
+    return "trigger";
+}
+
+AnimatorBoneCollisionMode AnimatorBoneCollisionModeFromString(const std::string& text)
+{
+    if (text == "rigidbody")
+    {
+        return AnimatorBoneCollisionMode::Rigidbody;
+    }
+    return AnimatorBoneCollisionMode::Trigger;
+}
 
 AnimatorControllerAsset CreateDefaultAnimatorControllerAsset(const std::string& controller_name)
 {
@@ -214,6 +262,7 @@ bool LoadAnimatorControllerAsset(const std::filesystem::path& path, AnimatorCont
             }
 
             AnimatorBoneModifier modifier;
+            modifier.type = AnimatorBoneModifierTypeFromString(ReadString(modifier_json, "type"));
             modifier.bone_name = ReadString(modifier_json, "bone_name");
             modifier.strength = ReadFloat(modifier_json, "strength", 0.5f);
             modifier.damping = ReadFloat(modifier_json, "damping", 0.5f);
@@ -231,6 +280,21 @@ bool LoadAnimatorControllerAsset(const std::filesystem::path& path, AnimatorCont
             modifier.angle_limit_deg = ReadFloat(modifier_json, "angle_limit_deg", 60.0f);
             modifier.radius = ReadFloat(modifier_json, "radius", 0.05f);
             modifier.affects_children = ReadBool(modifier_json, "affects_children", true);
+            if (const auto he_it = modifier_json.find("box_half_extents");
+                he_it != modifier_json.end() && he_it->is_array() && he_it->size() == 3)
+            {
+                modifier.box_half_extents[0] = (*he_it)[0].get<float>();
+                modifier.box_half_extents[1] = (*he_it)[1].get<float>();
+                modifier.box_half_extents[2] = (*he_it)[2].get<float>();
+            }
+            if (const auto bc_it = modifier_json.find("box_center");
+                bc_it != modifier_json.end() && bc_it->is_array() && bc_it->size() == 3)
+            {
+                modifier.box_center[0] = (*bc_it)[0].get<float>();
+                modifier.box_center[1] = (*bc_it)[1].get<float>();
+                modifier.box_center[2] = (*bc_it)[2].get<float>();
+            }
+            modifier.collision_mode = AnimatorBoneCollisionModeFromString(ReadString(modifier_json, "collision_mode"));
             out_asset.bone_modifiers.push_back(std::move(modifier));
         }
     }

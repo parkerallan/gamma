@@ -30,8 +30,35 @@ struct AnimatorTransitionDefinition
     float exit_time = 1.0f;
 };
 
+// What kind of behavior a bone modifier applies. New kinds (IK, look-at,
+// constraints, ...) can slot in without reshaping the asset. The integer
+// values are persisted indirectly via *TypeToString/*FromString, so keep
+// the string mapping stable rather than relying on the numeric order.
+enum class AnimatorBoneModifierType
+{
+    Physics = 0,
+    Collision = 1,
+};
+
+const char* AnimatorBoneModifierTypeToString(AnimatorBoneModifierType type);
+AnimatorBoneModifierType AnimatorBoneModifierTypeFromString(const std::string& text);
+
+// Subtype of a Collision modifier. Trigger = a kinematic sensor that fires
+// the owning object's OnTrigger* script callbacks (scriptable hitbox).
+// Rigidbody = a kinematic solid that physically pushes dynamic bodies but
+// fires no callbacks. Persisted via the string helpers below.
+enum class AnimatorBoneCollisionMode
+{
+    Trigger = 0,
+    Rigidbody = 1,
+};
+
+const char* AnimatorBoneCollisionModeToString(AnimatorBoneCollisionMode mode);
+AnimatorBoneCollisionMode AnimatorBoneCollisionModeFromString(const std::string& text);
+
 struct AnimatorBoneModifier
 {
+    AnimatorBoneModifierType type = AnimatorBoneModifierType::Physics;
     std::string bone_name;
     // Core spring-damper parameters. Stiffness/damping are normalized
     // [0,1]-ish and converted to internal spring constants at simulate time.
@@ -45,6 +72,15 @@ struct AnimatorBoneModifier
     float angle_limit_deg = 60.0f; // max deflection from animated direction
     float radius = 0.05f;    // for collider pushout (Phase E); harmless otherwise
     bool affects_children = true; // recompute descendant transforms after sim
+
+    // ---- Collision-type parameters -------------------------------------
+    // An oriented box attached to the bone's local space. The box follows
+    // the bone's animated transform; half_extents/center are in bone-local
+    // units. Only meaningful when type == Collision; "Fit to Bone" in the
+    // editor seeds these to enclose the bone's segment to its children.
+    std::array<float, 3> box_half_extents = {0.05f, 0.05f, 0.05f};
+    std::array<float, 3> box_center = {0.0f, 0.0f, 0.0f};
+    AnimatorBoneCollisionMode collision_mode = AnimatorBoneCollisionMode::Trigger;
 };
 
 struct AnimatorControllerAsset

@@ -116,6 +116,28 @@ public:
     // every parameter tweak.
     void SetBonePhysics(const std::vector<BonePhysicsParams>& params);
 
+    // Plain-data view of a Collision-type modifier: an oriented box in the
+    // bone's local space. Refreshed every frame by the panel; drawn as a
+    // wireframe overlay that follows the bone's animated transform.
+    struct BoneCollisionParams
+    {
+        std::string bone_name;
+        std::array<float, 3> half_extents = {0.05f, 0.05f, 0.05f};
+        std::array<float, 3> center = {0.0f, 0.0f, 0.0f};
+        int mode = 0; // 0 = trigger, 1 = rigidbody (matches AnimatorBoneCollisionMode)
+    };
+
+    void SetBoneCollisions(const std::vector<BoneCollisionParams>& params);
+
+    // Estimates a box (in the bone's local space) that encloses the segment
+    // from the named bone to its child joints, padded so thin bones still get
+    // some girth. Returns false when the bone isn't in the loaded model, in
+    // which case the outputs are left untouched. Used by the editor's
+    // "Fit to Bone" button.
+    bool ComputeBoneFitBox(const std::string& bone_name,
+                           std::array<float, 3>& out_half_extents,
+                           std::array<float, 3>& out_center) const;
+
     // Advance playback by delta_seconds (real wall time) honoring playback
     // speed and the active clip's loop status (currently always loops).
     void Tick(float delta_seconds);
@@ -250,6 +272,10 @@ private:
 
     // Active jiggle-bone parameter set (refreshed every frame by the panel).
     std::vector<BonePhysicsParams> bone_physics_;
+
+    // Active collision-box set (refreshed every frame by the panel). Drawn as
+    // wireframe overlays; carries no simulation state.
+    std::vector<BoneCollisionParams> bone_collisions_;
 
     // Per-modifier persistent simulation state. Indexed in lock-step with
     // bone_physics_; entries carry over across frames as long as bone_name

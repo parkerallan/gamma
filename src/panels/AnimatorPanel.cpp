@@ -55,6 +55,255 @@ bool InputTextString(const char* label, std::string& value, ImGuiInputTextFlags 
     return true;
 }
 
+// Editor controls for a Physics-type bone modifier (spring-damper jiggle).
+// Returns true when any parameter changed so the caller can mark the
+// controller dirty. Other modifier types added to AnimatorBoneModifierType
+// get their own Draw*ModifierUI sibling.
+bool DrawPhysicsModifierUI(AnimatorBoneModifier& modifier)
+{
+    bool changed = false;
+
+    // Presets: pick a sensible defaults bundle so users don't
+    // have to dial in seven sliders to get a reasonable feel.
+    // "Custom" is a no-op so the user can keep their hand-tuned
+    // values when reopening the controller. Damping uses the
+    // critical-damping fraction interpretation (1 = no bounce).
+    struct PresetDef
+    {
+        const char* name;
+        float strength;
+        float stiffness;
+        float damping;
+        float mass;
+        float drag;
+        float gravity_scale;
+        std::array<float, 3> gravity_dir;
+        float angle_limit_deg;
+        bool affects_children;
+    };
+    static constexpr std::array<PresetDef, 7> presets{{
+        {"Custom",      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0,-1,0},  0.0f, false},
+        // Snappy short bob — quick return, slight overshoot.
+        {"Hair (short)",     1.0f, 0.85f, 0.45f, 0.4f, 0.04f, 0.0f, {0,-1,0}, 50.0f, true},
+        // Longer hair, slower oscillation, modest gravity so the
+        // strand sags slightly when the character isn't moving.
+        {"Hair (long)",      1.0f, 0.55f, 0.55f, 0.9f, 0.05f, 0.05f, {0,-1,0}, 60.0f, true},
+        // Realistic breast jiggle: snappy stiffness so the bone
+        // springs back to the rest (animated) position quickly,
+        // moderate damping for a brief bounce. NO gravity — the
+        // rest pose is already the correct hanging position;
+        // adding gravity would just sag it below rest forever.
+        {"Breast",           1.0f, 0.95f, 0.45f, 1.0f, 0.04f, 0.0f, {0,-1,0}, 30.0f, true},
+        // Light cloth flapping. Gravity here is meaningful since
+        // cloth's animated rest is rarely fully draped.
+        {"Cloth (light)",    1.0f, 0.35f, 0.85f, 0.4f, 0.10f, 0.15f, {0,-1,0}, 90.0f, true},
+        // Heavy fabric — slower, more damped.
+        {"Cloth (heavy)",    1.0f, 0.25f, 1.10f, 1.6f, 0.15f, 0.25f, {0,-1,0}, 100.0f, true},
+        // Floppy appendage: tail / antenna / ear.
+        {"Tail / Antenna",   1.0f, 0.70f, 0.50f, 0.7f, 0.05f, 0.0f, {0,-1,0}, 70.0f, true},
+    }};
+    static const char* preset_names[presets.size()] = {
+        presets[0].name, presets[1].name, presets[2].name, presets[3].name,
+        presets[4].name, presets[5].name, presets[6].name,
+    };
+    // Small helper: append a "(?)" hint after the previous
+    // widget. Hover to see a plain-English description.
+    auto tooltip = [](const char* text)
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted(text);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    };
+
+    int preset_index = 0;
+    if (ImGui::Combo("Preset", &preset_index, preset_names, static_cast<int>(presets.size())))
+    {
+        if (preset_index > 0)
+        {
+            const PresetDef& p = presets[static_cast<std::size_t>(preset_index)];
+            modifier.strength = p.strength;
+            modifier.stiffness = p.stiffness;
+            modifier.damping = p.damping;
+            modifier.mass = p.mass;
+            modifier.drag = p.drag;
+            modifier.gravity_scale = p.gravity_scale;
+            modifier.gravity_dir = p.gravity_dir;
+            modifier.angle_limit_deg = p.angle_limit_deg;
+            modifier.affects_children = p.affects_children;
+            changed = true;
+        }
+    }
+
+    if (ImGui::DragFloat("Strength", &modifier.strength, 0.01f, 0.0f, 2.0f, "%.2f"))
+    {
+        modifier.strength = std::clamp(modifier.strength, 0.0f, 2.0f);
+        changed = true;
+    }
+    tooltip("How much of the simulated bone offset is applied to the final pose.\n"
+            "0 = no effect (bone stays glued to the animation).\n"
+            "1 = full physics influence.\n"
+            "Use values above 1 only to exaggerate motion.");
+
+    if (ImGui::DragFloat("Stiffness", &modifier.stiffness, 0.01f, 0.0f, 1.0f, "%.2f"))
+    {
+        modifier.stiffness = std::clamp(modifier.stiffness, 0.0f, 1.0f);
+        changed = true;
+    }
+    tooltip("How strongly the bone is pulled back to its rest (animated) position.\n"
+            "Low = floppy, slow oscillation (long hair, cloth).\n"
+            "High = snappy, quick return (short hair, breast jiggle).");
+
+    if (ImGui::DragFloat("Damping", &modifier.damping, 0.01f, 0.0f, 3.0f, "%.2f"))
+    {
+        modifier.damping = std::clamp(modifier.damping, 0.0f, 3.0f);
+        changed = true;
+    }
+    tooltip("How quickly oscillation dies out (critical-damping fraction).\n"
+            "0 = bouncy / wobbly forever.\n"
+            "1 = no bounce, settles in one swing.\n"
+            ">1 = overdamped, sluggish return.");
+
+    if (ImGui::DragFloat("Mass", &modifier.mass, 0.01f, 0.001f, 100.0f, "%.3f"))
+    {
+        modifier.mass = std::max(0.001f, modifier.mass);
+        changed = true;
+    }
+    tooltip("Inertia of the simulated bone.\n"
+            "Low = light, reacts instantly (whiskers, ribbons).\n"
+            "High = heavy, slow to start and stop (ponytails, thick cloth).");
+
+    if (ImGui::DragFloat("Drag", &modifier.drag, 0.005f, 0.0f, 1.0f, "%.3f"))
+    {
+        modifier.drag = std::clamp(modifier.drag, 0.0f, 1.0f);
+        changed = true;
+    }
+    tooltip("Air resistance applied to bone velocity each frame.\n"
+            "Bleeds off motion smoothly without affecting stiffness/damping tuning.\n"
+            "Useful to kill jitter without making the bone feel mushy.");
+
+    if (ImGui::DragFloat("Gravity Scale", &modifier.gravity_scale, 0.01f, 0.0f, 5.0f, "%.2f"))
+    {
+        modifier.gravity_scale = std::clamp(modifier.gravity_scale, 0.0f, 5.0f);
+        changed = true;
+    }
+    tooltip("Multiplier applied to the Gravity Dir vector (in Advanced).\n"
+            "0 = no gravity; rest pose is the resting position.\n"
+            "Set above 0 only when the animated bone is NOT already where gravity would settle it (e.g. flag cloth at rest pose horizontal).\n"
+            "For body parts (hair/breast/etc) leave at 0 — non-zero will sag the bone below its rest position.");
+
+    if (ImGui::TreeNode("Advanced"))
+    {
+        if (ImGui::DragFloat3("Gravity Dir", modifier.gravity_dir.data(), 0.01f, -1.0f, 1.0f, "%.2f"))
+        {
+            changed = true;
+        }
+        tooltip("World-space direction of gravity for this bone (X, Y, Z).\n"
+                "Default (0, -1, 0) is straight down. Only has an effect when Gravity Scale > 0.");
+
+        if (ImGui::DragFloat("Angle Limit", &modifier.angle_limit_deg, 0.5f, 0.0f, 180.0f, "%.1f deg"))
+        {
+            modifier.angle_limit_deg = std::clamp(modifier.angle_limit_deg, 0.0f, 180.0f);
+            changed = true;
+        }
+        tooltip("Maximum angle (degrees) the bone can deflect from its rest direction before being clamped.\n"
+                "Lower = stiffer cone (small wobble).\n"
+                "Higher = more freedom of movement.");
+
+        if (ImGui::DragFloat("Radius", &modifier.radius, 0.001f, 0.0f, 1.0f, "%.3f"))
+        {
+            modifier.radius = std::max(0.0f, modifier.radius);
+            changed = true;
+        }
+        tooltip("Collision radius around the bone in meters.\n"
+                "Reserved for future collider support; currently informational.");
+
+        if (ImGui::Checkbox("Affects Children", &modifier.affects_children))
+        {
+            changed = true;
+        }
+        tooltip("When enabled, rotating this bone also carries its descendant bones along.\n"
+                "Required for chains (hair strands, tails) so children don't tear away from the parent.");
+        ImGui::TreePop();
+    }
+
+    return changed;
+}
+
+// Editor controls for a Collision-type bone modifier: an oriented box, in
+// bone-local space, that tracks the bone. Returns true when any value
+// changed. The preview renderer supplies the "Fit to Bone" auto-sizing.
+bool DrawCollisionModifierUI(AnimatorBoneModifier& modifier, AnimatorPreviewRenderer& preview_renderer)
+{
+    bool changed = false;
+
+    auto tooltip = [](const char* text)
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted(text);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    };
+
+    ImGui::TextDisabled("Box collider (bone-local space)");
+
+    // Subtype: Trigger fires the owning object's OnTrigger* callbacks
+    // (scriptable hitbox); Rigidbody is a kinematic solid that pushes
+    // dynamic bodies but is not scriptable.
+    static const char* mode_names[] = {"Trigger", "Rigidbody"};
+    int mode_index = static_cast<int>(modifier.collision_mode);
+    if (ImGui::Combo("Mode", &mode_index, mode_names, IM_ARRAYSIZE(mode_names)))
+    {
+        modifier.collision_mode = static_cast<AnimatorBoneCollisionMode>(mode_index);
+        changed = true;
+    }
+    tooltip("Trigger: a sensor hitbox that fires this object's OnTriggerEnter/Stay/Exit\n"
+            "script callbacks (the bone name is passed as the last argument). No physical push.\n\n"
+            "Rigidbody: a kinematic solid that physically shoves dynamic rigidbodies the bone\n"
+            "sweeps through. Purely physical — it fires no script callbacks.");
+
+    if (ImGui::Button(ICON_CI_ARROW_BOTH " Fit to Bone"))
+    {
+        // Re-derive the box from the bone's current pose. No-op (leaves the
+        // values as-is) when the bone isn't present in the preview model.
+        if (preview_renderer.ComputeBoneFitBox(
+                modifier.bone_name, modifier.box_half_extents, modifier.box_center))
+        {
+            changed = true;
+        }
+    }
+    tooltip("Resize and recenter the box to enclose this bone's segment to its child joints.\n"
+            "Uses the bone's pose as currently shown in the preview.");
+
+    if (ImGui::DragFloat3("Half Extents", modifier.box_half_extents.data(), 0.005f, 0.0f, 100.0f, "%.3f"))
+    {
+        for (float& v : modifier.box_half_extents) { v = std::max(0.0f, v); }
+        changed = true;
+    }
+    tooltip("Half the box size along each bone-local axis (X, Y, Z), in model units.\n"
+            "The full box spans twice these values.");
+
+    if (ImGui::DragFloat3("Center Offset", modifier.box_center.data(), 0.005f, -100.0f, 100.0f, "%.3f"))
+    {
+        changed = true;
+    }
+    tooltip("Offset of the box center from the bone origin, in bone-local space (X, Y, Z).");
+
+    return changed;
+}
+
 std::string BuildDefaultClipId(std::size_t index)
 {
     return "Clip_" + std::to_string(index + 1);
@@ -628,12 +877,11 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
     ImGui::BeginChild("BottomTablePanel", ImVec2(half_width, library_height), true);
     if (controller_loaded_)
     {
-        ImGui::TextUnformatted("Bone Physics");
+        ImGui::TextUnformatted("Bone Modifiers");
         ImGui::Separator();
 
         // "Add Selected Bone" picks up the joint currently highlighted in the
-        // preview viewport. Falls back to "Add Modifier" (blank slot) when no
-        // bone is selected so the user can still hand-type a name.
+        // preview viewport.
         const std::string selected_bone = preview_renderer_.SelectedBoneName();
         bool already_listed = false;
         for (const AnimatorBoneModifier& existing : controller_.bone_modifiers)
@@ -666,13 +914,6 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
             ImGui::TextDisabled("(click a bone in the preview)");
         }
 
-        ImGui::SameLine();
-        if (ImGui::SmallButton(ICON_CI_ADD " Blank"))
-        {
-            controller_.bone_modifiers.push_back(AnimatorBoneModifier{});
-            controller_dirty_ = true;
-        }
-
         for (std::size_t index = 0; index < controller_.bone_modifiers.size(); ++index)
         {
             AnimatorBoneModifier& modifier = controller_.bone_modifiers[index];
@@ -684,174 +925,39 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
                     controller_dirty_ = true;
                 }
 
-                // Presets: pick a sensible defaults bundle so users don't
-                // have to dial in seven sliders to get a reasonable feel.
-                // "Custom" is a no-op so the user can keep their hand-tuned
-                // values when reopening the controller. Damping uses the
-                // critical-damping fraction interpretation (1 = no bounce).
-                struct PresetDef
+                // Modifier type. Entries must line up with the
+                // AnimatorBoneModifierType enum order. Future kinds (IK,
+                // look-at, ...) extend this list and branch below.
+                static const char* type_names[] = {"Physics", "Collision"};
+                int type_index = static_cast<int>(modifier.type);
+                if (ImGui::Combo("Type", &type_index, type_names, IM_ARRAYSIZE(type_names)))
                 {
-                    const char* name;
-                    float strength;
-                    float stiffness;
-                    float damping;
-                    float mass;
-                    float drag;
-                    float gravity_scale;
-                    std::array<float, 3> gravity_dir;
-                    float angle_limit_deg;
-                    bool affects_children;
-                };
-                static constexpr std::array<PresetDef, 7> presets{{
-                    {"Custom",      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0,-1,0},  0.0f, false},
-                    // Snappy short bob — quick return, slight overshoot.
-                    {"Hair (short)",     1.0f, 0.85f, 0.45f, 0.4f, 0.04f, 0.0f, {0,-1,0}, 50.0f, true},
-                    // Longer hair, slower oscillation, modest gravity so the
-                    // strand sags slightly when the character isn't moving.
-                    {"Hair (long)",      1.0f, 0.55f, 0.55f, 0.9f, 0.05f, 0.05f, {0,-1,0}, 60.0f, true},
-                    // Realistic breast jiggle: snappy stiffness so the bone
-                    // springs back to the rest (animated) position quickly,
-                    // moderate damping for a brief bounce. NO gravity — the
-                    // rest pose is already the correct hanging position;
-                    // adding gravity would just sag it below rest forever.
-                    {"Breast",           1.0f, 0.95f, 0.45f, 1.0f, 0.04f, 0.0f, {0,-1,0}, 30.0f, true},
-                    // Light cloth flapping. Gravity here is meaningful since
-                    // cloth's animated rest is rarely fully draped.
-                    {"Cloth (light)",    1.0f, 0.35f, 0.85f, 0.4f, 0.10f, 0.15f, {0,-1,0}, 90.0f, true},
-                    // Heavy fabric — slower, more damped.
-                    {"Cloth (heavy)",    1.0f, 0.25f, 1.10f, 1.6f, 0.15f, 0.25f, {0,-1,0}, 100.0f, true},
-                    // Floppy appendage: tail / antenna / ear.
-                    {"Tail / Antenna",   1.0f, 0.70f, 0.50f, 0.7f, 0.05f, 0.0f, {0,-1,0}, 70.0f, true},
-                }};
-                static const char* preset_names[presets.size()] = {
-                    presets[0].name, presets[1].name, presets[2].name, presets[3].name,
-                    presets[4].name, presets[5].name, presets[6].name,
-                };
-                // Small helper: append a "(?)" hint after the previous
-                // widget. Hover to see a plain-English description.
-                auto tooltip = [](const char* text)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(?)");
-                    if (ImGui::IsItemHovered())
+                    const auto new_type = static_cast<AnimatorBoneModifierType>(type_index);
+                    // When switching to Collision, seed the box to enclose the
+                    // bone so the user starts from a sensible fitted volume.
+                    if (new_type == AnimatorBoneModifierType::Collision
+                        && modifier.type != AnimatorBoneModifierType::Collision)
                     {
-                        ImGui::BeginTooltip();
-                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
-                        ImGui::TextUnformatted(text);
-                        ImGui::PopTextWrapPos();
-                        ImGui::EndTooltip();
+                        preview_renderer_.ComputeBoneFitBox(
+                            modifier.bone_name, modifier.box_half_extents, modifier.box_center);
                     }
-                };
-
-                int preset_index = 0;
-                if (ImGui::Combo("Preset", &preset_index, preset_names, static_cast<int>(presets.size())))
-                {
-                    if (preset_index > 0)
-                    {
-                        const PresetDef& p = presets[static_cast<std::size_t>(preset_index)];
-                        modifier.strength = p.strength;
-                        modifier.stiffness = p.stiffness;
-                        modifier.damping = p.damping;
-                        modifier.mass = p.mass;
-                        modifier.drag = p.drag;
-                        modifier.gravity_scale = p.gravity_scale;
-                        modifier.gravity_dir = p.gravity_dir;
-                        modifier.angle_limit_deg = p.angle_limit_deg;
-                        modifier.affects_children = p.affects_children;
-                        controller_dirty_ = true;
-                    }
-                }
-
-                if (ImGui::DragFloat("Strength", &modifier.strength, 0.01f, 0.0f, 2.0f, "%.2f"))
-                {
-                    modifier.strength = std::clamp(modifier.strength, 0.0f, 2.0f);
+                    modifier.type = new_type;
                     controller_dirty_ = true;
                 }
-                tooltip("How much of the simulated bone offset is applied to the final pose.\n"
-                        "0 = no effect (bone stays glued to the animation).\n"
-                        "1 = full physics influence.\n"
-                        "Use values above 1 only to exaggerate motion.");
 
-                if (ImGui::DragFloat("Stiffness", &modifier.stiffness, 0.01f, 0.0f, 1.0f, "%.2f"))
+                if (modifier.type == AnimatorBoneModifierType::Physics)
                 {
-                    modifier.stiffness = std::clamp(modifier.stiffness, 0.0f, 1.0f);
-                    controller_dirty_ = true;
-                }
-                tooltip("How strongly the bone is pulled back to its rest (animated) position.\n"
-                        "Low = floppy, slow oscillation (long hair, cloth).\n"
-                        "High = snappy, quick return (short hair, breast jiggle).");
-
-                if (ImGui::DragFloat("Damping", &modifier.damping, 0.01f, 0.0f, 3.0f, "%.2f"))
-                {
-                    modifier.damping = std::clamp(modifier.damping, 0.0f, 3.0f);
-                    controller_dirty_ = true;
-                }
-                tooltip("How quickly oscillation dies out (critical-damping fraction).\n"
-                        "0 = bouncy / wobbly forever.\n"
-                        "1 = no bounce, settles in one swing.\n"
-                        ">1 = overdamped, sluggish return.");
-
-                if (ImGui::DragFloat("Mass", &modifier.mass, 0.01f, 0.001f, 100.0f, "%.3f"))
-                {
-                    modifier.mass = std::max(0.001f, modifier.mass);
-                    controller_dirty_ = true;
-                }
-                tooltip("Inertia of the simulated bone.\n"
-                        "Low = light, reacts instantly (whiskers, ribbons).\n"
-                        "High = heavy, slow to start and stop (ponytails, thick cloth).");
-
-                if (ImGui::DragFloat("Drag", &modifier.drag, 0.005f, 0.0f, 1.0f, "%.3f"))
-                {
-                    modifier.drag = std::clamp(modifier.drag, 0.0f, 1.0f);
-                    controller_dirty_ = true;
-                }
-                tooltip("Air resistance applied to bone velocity each frame.\n"
-                        "Bleeds off motion smoothly without affecting stiffness/damping tuning.\n"
-                        "Useful to kill jitter without making the bone feel mushy.");
-
-                if (ImGui::DragFloat("Gravity Scale", &modifier.gravity_scale, 0.01f, 0.0f, 5.0f, "%.2f"))
-                {
-                    modifier.gravity_scale = std::clamp(modifier.gravity_scale, 0.0f, 5.0f);
-                    controller_dirty_ = true;
-                }
-                tooltip("Multiplier applied to the Gravity Dir vector (in Advanced).\n"
-                        "0 = no gravity; rest pose is the resting position.\n"
-                        "Set above 0 only when the animated bone is NOT already where gravity would settle it (e.g. flag cloth at rest pose horizontal).\n"
-                        "For body parts (hair/breast/etc) leave at 0 — non-zero will sag the bone below its rest position.");
-
-                if (ImGui::TreeNode("Advanced"))
-                {
-                    if (ImGui::DragFloat3("Gravity Dir", modifier.gravity_dir.data(), 0.01f, -1.0f, 1.0f, "%.2f"))
+                    if (DrawPhysicsModifierUI(modifier))
                     {
                         controller_dirty_ = true;
                     }
-                    tooltip("World-space direction of gravity for this bone (X, Y, Z).\n"
-                            "Default (0, -1, 0) is straight down. Only has an effect when Gravity Scale > 0.");
-
-                    if (ImGui::DragFloat("Angle Limit", &modifier.angle_limit_deg, 0.5f, 0.0f, 180.0f, "%.1f deg"))
-                    {
-                        modifier.angle_limit_deg = std::clamp(modifier.angle_limit_deg, 0.0f, 180.0f);
-                        controller_dirty_ = true;
-                    }
-                    tooltip("Maximum angle (degrees) the bone can deflect from its rest direction before being clamped.\n"
-                            "Lower = stiffer cone (small wobble).\n"
-                            "Higher = more freedom of movement.");
-
-                    if (ImGui::DragFloat("Radius", &modifier.radius, 0.001f, 0.0f, 1.0f, "%.3f"))
-                    {
-                        modifier.radius = std::max(0.0f, modifier.radius);
-                        controller_dirty_ = true;
-                    }
-                    tooltip("Collision radius around the bone in meters.\n"
-                            "Reserved for future collider support; currently informational.");
-
-                    if (ImGui::Checkbox("Affects Children", &modifier.affects_children))
+                }
+                else if (modifier.type == AnimatorBoneModifierType::Collision)
+                {
+                    if (DrawCollisionModifierUI(modifier, preview_renderer_))
                     {
                         controller_dirty_ = true;
                     }
-                    tooltip("When enabled, rotating this bone also carries its descendant bones along.\n"
-                            "Required for chains (hair strands, tails) so children don't tear away from the parent.");
-                    ImGui::TreePop();
                 }
 
                 if (ImGui::Button(ICON_CI_TRASH " Remove Modifier"))
@@ -1165,6 +1271,10 @@ void AnimatorPanel::RenderPreviewViewport(EngineState& state)
         physics_list.reserve(controller_.bone_modifiers.size());
         for (const AnimatorBoneModifier& mod : controller_.bone_modifiers)
         {
+            if (mod.type != AnimatorBoneModifierType::Physics)
+            {
+                continue;
+            }
             AnimatorPreviewRenderer::BonePhysicsParams p;
             p.bone_name = mod.bone_name;
             p.strength = mod.strength;
@@ -1179,6 +1289,27 @@ void AnimatorPanel::RenderPreviewViewport(EngineState& state)
             physics_list.push_back(std::move(p));
         }
         preview_renderer_.SetBonePhysics(physics_list);
+    }
+
+    // Hand the collision boxes to the renderer so it can draw the wireframe
+    // overlays that track each bone's animated pose.
+    {
+        std::vector<AnimatorPreviewRenderer::BoneCollisionParams> collision_list;
+        collision_list.reserve(controller_.bone_modifiers.size());
+        for (const AnimatorBoneModifier& mod : controller_.bone_modifiers)
+        {
+            if (mod.type != AnimatorBoneModifierType::Collision)
+            {
+                continue;
+            }
+            AnimatorPreviewRenderer::BoneCollisionParams c;
+            c.bone_name = mod.bone_name;
+            c.half_extents = mod.box_half_extents;
+            c.center = mod.box_center;
+            c.mode = static_cast<int>(mod.collision_mode);
+            collision_list.push_back(std::move(c));
+        }
+        preview_renderer_.SetBoneCollisions(collision_list);
     }
 
     preview_renderer_.Render(vulkan_context_, canvas_min, canvas_max);

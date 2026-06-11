@@ -274,6 +274,22 @@ public:
         bool initialized = false;
     };
 
+    // Per-bone persistent state for Rigidbody bone colliders: the resolved
+    // (non-penetrating) world-space box center from the previous frame. The
+    // sweep from prev -> animated target is what stops the bone at walls; a
+    // single-frame depenetration cannot, because mesh colliders are hollow
+    // and a box fully inside the wall volume overlaps no triangles.
+    // applied_offset is the smoothed world-space correction currently baked
+    // into the skeleton (IK target = animated pose + offset); smoothing it
+    // removes pops when contact starts and ends.
+    struct BoneSweepEntry
+    {
+        std::string bone_name;
+        std::array<float, 3> prev_center{};
+        std::array<float, 3> applied_offset{};
+        bool initialized = false;
+    };
+
     struct RuntimeAnimatorState
     {
         std::string runtime_key;
@@ -298,6 +314,8 @@ public:
         // so springs don't reset when the user nudges parameters.
         std::vector<JiggleSimEntry> jiggle_states;
         float physics_accumulator_seconds = 0.0f;
+        // Rigidbody bone-collider sweep state (prev resolved box centers).
+        std::vector<BoneSweepEntry> bone_sweep_states;
     };
 
 private:
@@ -332,7 +350,7 @@ private:
     void LoadAutoSequence();
     void AdvanceAutoSequence();
     bool CallScriptMethod(RuntimeScriptInstance& instance, const char* method_name, float delta_time, bool include_delta_time, std::string* error_message);
-    bool CallScriptTriggerMethod(RuntimeScriptInstance& instance, const char* method_name, const std::string& other_object_name, const std::string& phase, std::string* error_message);
+    bool CallScriptTriggerMethod(RuntimeScriptInstance& instance, const char* method_name, const std::string& other_object_name, const std::string& phase, std::string* error_message, const std::string& bone_name = {});
     bool UpdateScriptsForFrame(std::string* error_message);
     bool UpdateScriptTimers(float delta_time, std::string* error_message);
     void UpdateAnimatorControllersForFrame(const SceneMetadata& scene_metadata);
@@ -574,6 +592,16 @@ private:
     std::unordered_map<std::filesystem::path, CachedScriptSourceEntry> script_cache_;
     PhysicsWorld physics_world_{};
     bool physics_world_built_ = false;
+
+    // ---- Animated bone colliders ----------------------------------------
+    // Rebuilt each frame from the animation pass (UpdateAnimatedMeshForObject)
+    // and consumed by the physics block the following frame: defs feed
+    // SetBoneColliders when the set changes; targets drive their kinematic
+    // transforms before each Step. The signature detects set changes so we
+    // only recreate bodies when colliders are added/removed/resized.
+    std::vector<PhysicsWorld::BoneColliderDef> bone_collider_defs_;
+    std::unordered_map<std::string, PhysicsBodyTransform> bone_collider_targets_;
+    std::string bone_collider_signature_;
     AudioEngine audio_engine_{};
     bool audio_engine_ready_ = false;
 

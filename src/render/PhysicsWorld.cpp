@@ -19,9 +19,14 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Collision/ObjectLayer.h>
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 JPH_SUPPRESS_WARNINGS
 
@@ -296,6 +301,8 @@ void PhysicsWorld::Shutdown()
         return;
     }
 
+    bone_collider_records_.clear();
+    bone_body_id_to_key_.clear();
     body_records_.clear();
     body_id_to_name_.clear();
 
@@ -351,6 +358,9 @@ void PhysicsWorld::BuildFromScene(
     }
     body_records_.clear();
     body_id_to_name_.clear();
+    // Drop any bone colliders from a previous play session before rebuilding;
+    // RuntimeRenderer re-registers them via SetBoneColliders afterward.
+    ClearBoneColliders();
 
     {
         std::lock_guard<std::mutex> lock(collision_events_mutex_);
@@ -576,6 +586,345 @@ void PhysicsWorld::BuildFromScene(
     physics_system_->OptimizeBroadPhase();
 }
 
+void PhysicsWorld::ClearBoneColliders()
+{
+    if (!initialized_ || bone_collider_records_.empty())
+    {
+        bone_collider_records_.clear();
+        bone_body_id_to_key_.clear();
+        return;
+    }
+
+    JPH::BodyInterface& body_interface = physics_system_->GetBodyInterface();
+    for (const auto& [key, record] : bone_collider_records_)
+    {
+        const JPH::BodyID id(record.body_id_value);
+        if (!id.IsInvalid())
+        {
+            body_interface.RemoveBody(id);
+            body_interface.DestroyBody(id);
+        }
+        body_id_to_name_.erase(record.body_id_value);
+    }
+    bone_collider_records_.clear();
+    bone_body_id_to_key_.clear();
+}
+
+void PhysicsWorld::SetBoneColliders(const std::vector<BoneColliderDef>& colliders)
+{
+    if (!initialized_)
+    {
+        return;
+    }
+
+    ClearBoneColliders();
+
+    JPH::BodyInterface& body_interface = physics_system_->GetBodyInterface();
+    for (const BoneColliderDef& def : colliders)
+    {
+        if (def.key.empty())
+        {
+            continue;
+        }
+
+        const float hx = std::max(0.01f, def.half_extents[0]);
+        const float hy = std::max(0.01f, def.half_extents[1]);
+        const float hz = std::max(0.01f, def.half_extents[2]);
+        const JPH::Vec3 half_extent(hx, hy, hz);
+        // The convex radius must not exceed the smallest half extent, or the
+        // box's inner hull is degenerate and collision queries read garbage
+        // (Jolt asserts are compiled out in this build, so it crashes instead
+        // of tripping the assert). Bone boxes are routinely thinner than the
+        // default 0.05 radius on at least one axis.
+        const float convex_radius = std::min(0.05f, std::min(hx, std::min(hy, hz)) * 0.5f);
+        JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(half_extent, convex_radius);
+
+        const JPH::Quat rotation(
+            def.transform.rotation[0], def.transform.rotation[1],
+            def.transform.rotation[2], def.transform.rotation[3]);
+        JPH::BodyCreationSettings settings(
+            shape,
+            JPH::RVec3(def.transform.position[0], def.transform.position[1], def.transform.position[2]),
+            rotation.LengthSq() > 1e-6f ? rotation.Normalized() : JPH::Quat::sIdentity(),
+            JPH::EMotionType::Kinematic,
+            Layers::MOVING);
+        settings.mIsSensor = def.is_trigger;
+        // Let triggers detect static/kinematic bodies too (e.g. other
+        // characters' bone colliders, static trigger volumes), not just
+        // dynamic ones.
+        if (def.is_trigger)
+        {
+            settings.mCollideKinematicVsNonDynamic = true;
+        }
+
+        const JPH::BodyID id = body_interface.CreateAndAddBody(settings, JPH::EActivation::Activate);
+        if (id.IsInvalid())
+        {
+            continue;
+        }
+
+        BoneColliderRecord record;
+        record.body_id_value = id.GetIndexAndSequenceNumber();
+        record.owner_object = def.owner_object;
+        record.bone_name = def.bone_name;
+        record.is_trigger = def.is_trigger;
+
+        bone_collider_records_[def.key] = record;
+        bone_body_id_to_key_[record.body_id_value] = def.key;
+        // Raycasts against a bone collider report the owning object.
+        body_id_to_name_[record.body_id_value] = def.owner_object;
+    }
+}
+
+void PhysicsWorld::UpdateBoneColliderTransforms(
+    const std::unordered_map<std::string, PhysicsBodyTransform>& transforms,
+    float delta_time)
+{
+    if (!initialized_ || bone_collider_records_.empty())
+    {
+        return;
+    }
+
+    JPH::BodyInterface& body_interface = physics_system_->GetBodyInterface();
+    for (const auto& [key, record] : bone_collider_records_)
+    {
+        const auto it = transforms.find(key);
+        if (it == transforms.end())
+        {
+            continue;
+        }
+
+        const JPH::BodyID id(record.body_id_value);
+        if (id.IsInvalid())
+        {
+            continue;
+        }
+
+        const PhysicsBodyTransform& t = it->second;
+        const JPH::RVec3 pos(t.position[0], t.position[1], t.position[2]);
+        const JPH::Quat raw_rot(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]);
+        const JPH::Quat rot = raw_rot.LengthSq() > 1e-6f ? raw_rot.Normalized() : JPH::Quat::sIdentity();
+
+        if (delta_time > 0.0f)
+        {
+            // Velocity-based kinematic move so rigidbody colliders impart a
+            // push on dynamic bodies they sweep through.
+            body_interface.MoveKinematic(id, pos, rot, delta_time);
+        }
+        else
+        {
+            body_interface.SetPositionAndRotation(id, pos, rot, JPH::EActivation::Activate);
+        }
+    }
+}
+
+SceneVector3 PhysicsWorld::ComputeBoxDepenetration(
+    const SceneVector3& center,
+    const std::array<float, 4>& rotation,
+    const SceneVector3& half_extents,
+    const std::string& ignore_owner,
+    bool* out_any_hit,
+    float* out_nearest_depth) const
+{
+    SceneVector3 result{0.0f, 0.0f, 0.0f};
+    if (out_any_hit != nullptr) { *out_any_hit = false; }
+    if (out_nearest_depth != nullptr) { *out_nearest_depth = 0.0f; }
+    if (!initialized_)
+    {
+        return result;
+    }
+
+    // Bodies to exclude: the owner's main body and all of its bone colliders.
+    std::unordered_set<std::uint32_t> ignore_ids;
+    if (!ignore_owner.empty())
+    {
+        const auto body_it = body_records_.find(ignore_owner);
+        if (body_it != body_records_.end())
+        {
+            ignore_ids.insert(body_it->second.body_id_value);
+        }
+        for (const auto& [key, rec] : bone_collider_records_)
+        {
+            if (rec.owner_object == ignore_owner)
+            {
+                ignore_ids.insert(rec.body_id_value);
+            }
+        }
+    }
+
+    struct OwnerBodyFilter final : public JPH::BodyFilter
+    {
+        const std::unordered_set<std::uint32_t>* ignore = nullptr;
+        bool ShouldCollide(const JPH::BodyID& id) const override
+        {
+            return ignore->find(id.GetIndexAndSequenceNumber()) == ignore->end();
+        }
+    };
+    OwnerBodyFilter body_filter;
+    body_filter.ignore = &ignore_ids;
+
+    const float hx = std::max(0.01f, half_extents[0]);
+    const float hy = std::max(0.01f, half_extents[1]);
+    const float hz = std::max(0.01f, half_extents[2]);
+    const float convex_radius = std::min(0.05f, std::min(hx, std::min(hy, hz)) * 0.5f);
+    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(JPH::Vec3(hx, hy, hz), convex_radius);
+
+    JPH::Quat rot(rotation[0], rotation[1], rotation[2], rotation[3]);
+    rot = rot.LengthSq() > 1e-6f ? rot.Normalized() : JPH::Quat::sIdentity();
+    const JPH::RMat44 com = JPH::RMat44::sRotationTranslation(
+        rot, JPH::RVec3(center[0], center[1], center[2]));
+
+    JPH::CollideShapeSettings settings;
+    // The box typically sits fully inside the wall mesh, so we must collide
+    // with back faces to detect the overlap at all. Collide with all edges so
+    // a box resting flat against a wall still reports its face contact.
+    settings.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+    settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideWithAll;
+    settings.mMaxSeparationDistance = 0.0f;
+
+    JPH::ClosestHitCollisionCollector<JPH::CollideShapeCollector> collector;
+    const JPH::SpecifiedObjectLayerFilter object_filter(Layers::NON_MOVING);
+
+    physics_system_->GetNarrowPhaseQuery().CollideShape(
+        shape,
+        JPH::Vec3::sReplicate(1.0f),
+        com,
+        settings,
+        JPH::RVec3::sZero(),
+        collector,
+        {},
+        object_filter,
+        body_filter,
+        {});
+
+    if (collector.HadHit())
+    {
+        const JPH::CollideShapeResult& hit = collector.mHit;
+        if (out_any_hit != nullptr) { *out_any_hit = true; }
+        if (out_nearest_depth != nullptr) { *out_nearest_depth = hit.mPenetrationDepth; }
+        const float axis_len = hit.mPenetrationAxis.Length();
+        if (axis_len > 1e-6f && hit.mPenetrationDepth > 0.0f)
+        {
+            // mPenetrationAxis moves shape 2 (the wall) out; to push our box
+            // (shape 1) out we go the opposite way.
+            const JPH::Vec3 push = (hit.mPenetrationAxis / axis_len) * (-hit.mPenetrationDepth);
+            result = {push.GetX(), push.GetY(), push.GetZ()};
+        }
+    }
+
+    return result;
+}
+
+SceneVector3 PhysicsWorld::ResolveBoxSweep(
+    const SceneVector3& from,
+    const SceneVector3& to,
+    const std::array<float, 4>& rotation,
+    const SceneVector3& half_extents,
+    const std::string& ignore_owner) const
+{
+    if (!initialized_)
+    {
+        return to;
+    }
+
+    // Bodies to exclude: the owner's main body and all of its bone colliders.
+    std::unordered_set<std::uint32_t> ignore_ids;
+    if (!ignore_owner.empty())
+    {
+        const auto body_it = body_records_.find(ignore_owner);
+        if (body_it != body_records_.end())
+        {
+            ignore_ids.insert(body_it->second.body_id_value);
+        }
+        for (const auto& [key, rec] : bone_collider_records_)
+        {
+            if (rec.owner_object == ignore_owner)
+            {
+                ignore_ids.insert(rec.body_id_value);
+            }
+        }
+    }
+    struct OwnerBodyFilter final : public JPH::BodyFilter
+    {
+        const std::unordered_set<std::uint32_t>* ignore = nullptr;
+        bool ShouldCollide(const JPH::BodyID& id) const override
+        {
+            return ignore->find(id.GetIndexAndSequenceNumber()) == ignore->end();
+        }
+    };
+    OwnerBodyFilter body_filter;
+    body_filter.ignore = &ignore_ids;
+
+    const float hx = std::max(0.01f, half_extents[0]);
+    const float hy = std::max(0.01f, half_extents[1]);
+    const float hz = std::max(0.01f, half_extents[2]);
+    const float convex_radius = std::min(0.05f, std::min(hx, std::min(hy, hz)) * 0.5f);
+    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(JPH::Vec3(hx, hy, hz), convex_radius);
+
+    JPH::Quat rot(rotation[0], rotation[1], rotation[2], rotation[3]);
+    rot = rot.LengthSq() > 1e-6f ? rot.Normalized() : JPH::Quat::sIdentity();
+
+    const JPH::SpecifiedObjectLayerFilter object_filter(Layers::NON_MOVING);
+
+    JPH::ShapeCastSettings cast_settings;
+    cast_settings.mReturnDeepestPoint = false;
+
+    JPH::RVec3 pos(from[0], from[1], from[2]);
+    JPH::Vec3 delta(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+
+    // Up to two cast iterations: clamp at the first surface hit, then slide
+    // the remaining motion along that surface and clamp once more. The 1 mm
+    // skin keeps the next frame's cast starting just clear of the surface.
+    constexpr float kSkin = 0.001f;
+    for (int iteration = 0; iteration < 2; ++iteration)
+    {
+        const float len = delta.Length();
+        if (len < 1e-6f)
+        {
+            break;
+        }
+
+        const JPH::RMat44 com = JPH::RMat44::sRotationTranslation(rot, pos);
+        const JPH::RShapeCast cast(shape, JPH::Vec3::sReplicate(1.0f), com, delta);
+        JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+        physics_system_->GetNarrowPhaseQuery().CastShape(
+            cast, cast_settings, JPH::RVec3::sZero(), collector, {}, object_filter, body_filter, {});
+
+        if (!collector.HadHit())
+        {
+            pos += delta;
+            break;
+        }
+
+        const JPH::ShapeCastResult& hit = collector.mHit;
+        const float stop_fraction = std::max(0.0f, hit.mFraction - kSkin / len);
+        pos += delta * stop_fraction;
+
+        const float axis_len = hit.mPenetrationAxis.Length();
+        if (axis_len < 1e-6f)
+        {
+            break;
+        }
+        // Contact normal facing the moving box; slide the blocked remainder
+        // of the motion along the surface plane.
+        const JPH::Vec3 normal = -hit.mPenetrationAxis / axis_len;
+        const JPH::Vec3 remaining = delta * (1.0f - hit.mFraction);
+        delta = remaining - normal * remaining.Dot(normal);
+    }
+
+    SceneVector3 resolved{
+        static_cast<float>(pos.GetX()),
+        static_cast<float>(pos.GetY()),
+        static_cast<float>(pos.GetZ())};
+
+    // Clean up residual penetration (start-inside cases, moving into corners).
+    const SceneVector3 push = ComputeBoxDepenetration(resolved, rotation, half_extents, ignore_owner);
+    resolved[0] += push[0];
+    resolved[1] += push[1];
+    resolved[2] += push[2];
+    return resolved;
+}
+
 void PhysicsWorld::Step(float delta_time)
 {
     if (!initialized_ || delta_time <= 0.0f)
@@ -797,9 +1146,33 @@ std::vector<PhysicsCollisionEvent> PhysicsWorld::ConsumeCollisionEvents()
 
 void PhysicsWorld::QueueCollisionEvent(std::uint32_t body_a, std::uint32_t body_b, const char* phase)
 {
+    // Resolve each body to an object name + (optional) bone name. Bone
+    // colliders resolve to their owning object so existing routing works,
+    // and additionally carry the bone name.
+    auto resolve = [this](std::uint32_t body_id, std::string& out_name, std::string& out_bone) -> bool
+    {
+        const auto bone_it = bone_body_id_to_key_.find(body_id);
+        if (bone_it != bone_body_id_to_key_.end())
+        {
+            const auto rec_it = bone_collider_records_.find(bone_it->second);
+            if (rec_it != bone_collider_records_.end())
+            {
+                out_name = rec_it->second.owner_object;
+                // Only trigger colliders surface a bone name (and thus script
+                // callbacks). Rigidbody colliders are purely physical.
+                out_bone = rec_it->second.is_trigger ? rec_it->second.bone_name : std::string();
+                return true;
+            }
+        }
+        out_bone.clear();
+        return TryGetObjectNameByBodyId(body_id, out_name);
+    };
+
     std::string name_a;
     std::string name_b;
-    if (!TryGetObjectNameByBodyId(body_a, name_a) || !TryGetObjectNameByBodyId(body_b, name_b))
+    std::string bone_a;
+    std::string bone_b;
+    if (!resolve(body_a, name_a, bone_a) || !resolve(body_b, name_b, bone_b))
     {
         return;
     }
@@ -808,6 +1181,8 @@ void PhysicsWorld::QueueCollisionEvent(std::uint32_t body_a, std::uint32_t body_
     event.object_a = name_a;
     event.object_b = name_b;
     event.phase = phase != nullptr ? phase : "stay";
+    event.a_bone = bone_a;
+    event.b_bone = bone_b;
 
     std::lock_guard<std::mutex> lock(collision_events_mutex_);
     collision_events_.push_back(std::move(event));

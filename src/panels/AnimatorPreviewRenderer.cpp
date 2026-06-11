@@ -94,6 +94,38 @@ Vec3 Normalize(const Vec3& v)
     return Vec3{v[0] / len, v[1] / len, v[2] / len};
 }
 
+// Inverse of an affine (rotation/scale + translation) row-major matrix.
+// Handles non-uniform scale via a full 3x3 cofactor inverse. The bottom row
+// is assumed to be (0,0,0,1), which holds for all node world transforms here.
+Mat4 InvertAffine(const Mat4& m)
+{
+    const float a = m[0], b = m[1], c = m[2];
+    const float d = m[4], e = m[5], f = m[6];
+    const float g = m[8], h = m[9], i = m[10];
+
+    float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (std::abs(det) < 1e-12f) { det = (det < 0.0f ? -1e-12f : 1e-12f); }
+    const float inv_det = 1.0f / det;
+
+    Mat4 r = Identity();
+    r[0] = (e * i - f * h) * inv_det;
+    r[1] = -(b * i - c * h) * inv_det;
+    r[2] = (b * f - c * e) * inv_det;
+    r[4] = -(d * i - f * g) * inv_det;
+    r[5] = (a * i - c * g) * inv_det;
+    r[6] = -(a * f - c * d) * inv_det;
+    r[8] = (d * h - e * g) * inv_det;
+    r[9] = -(a * h - b * g) * inv_det;
+    r[10] = (a * e - b * d) * inv_det;
+
+    // Inverse translation: -R^-1 * t.
+    const float tx = m[3], ty = m[7], tz = m[11];
+    r[3] = -(r[0] * tx + r[1] * ty + r[2] * tz);
+    r[7] = -(r[4] * tx + r[5] * ty + r[6] * tz);
+    r[11] = -(r[8] * tx + r[9] * ty + r[10] * tz);
+    return r;
+}
+
 Mat4 FromTRS(const aiVector3D& t, const aiQuaternion& r, const aiVector3D& s)
 {
     // aiQuaternion -> 3x3
@@ -1295,6 +1327,81 @@ void AnimatorPreviewRenderer::SetBonePhysics(const std::vector<BonePhysicsParams
     }
     bone_physics_ = params;
     jiggle_states_ = std::move(next_states);
+}
+
+void AnimatorPreviewRenderer::SetBoneCollisions(const std::vector<BoneCollisionParams>& params)
+{
+    bone_collisions_ = params;
+}
+
+bool AnimatorPreviewRenderer::ComputeBoneFitBox(
+    const std::string& bone_name,
+    std::array<float, 3>& out_half_extents,
+    std::array<float, 3>& out_center) const
+{
+    if (scene_ == nullptr || bone_name.empty()) { return false; }
+
+    const aiNode* node = scene_->mRootNode->FindNode(bone_name.c_str());
+    if (node == nullptr) { return false; }
+
+    const auto node_it = node_index_.find(node);
+    if (node_it == node_index_.end() || node_it->second >= node_world_transforms_.size())
+    {
+        return false;
+    }
+
+    // Express the bone origin and every child joint origin in the bone's own
+    // local space, then take the AABB of those points. The bone origin is the
+    // local-space origin by construction.
+    const Mat4 world_to_local = InvertAffine(node_world_transforms_[node_it->second]);
+
+    Vec3 box_min{0.0f, 0.0f, 0.0f};
+    Vec3 box_max{0.0f, 0.0f, 0.0f};
+    bool has_child = false;
+
+    for (unsigned int c = 0; c < node->mNumChildren; ++c)
+    {
+        const aiNode* child = node->mChildren[c];
+        const auto child_it = node_index_.find(child);
+        if (child_it == node_index_.end() || child_it->second >= node_world_transforms_.size())
+        {
+            continue;
+        }
+        const Vec3 child_world = TransformPoint(node_world_transforms_[child_it->second], Vec3{0, 0, 0});
+        const Vec3 child_local = TransformPoint(world_to_local, child_world);
+        for (int a = 0; a < 3; ++a)
+        {
+            box_min[a] = std::min(box_min[a], child_local[a]);
+            box_max[a] = std::max(box_max[a], child_local[a]);
+        }
+        has_child = true;
+    }
+
+    Vec3 half{
+        (box_max[0] - box_min[0]) * 0.5f,
+        (box_max[1] - box_min[1]) * 0.5f,
+        (box_max[2] - box_min[2]) * 0.5f,
+    };
+    Vec3 center{
+        (box_max[0] + box_min[0]) * 0.5f,
+        (box_max[1] + box_min[1]) * 0.5f,
+        (box_max[2] + box_min[2]) * 0.5f,
+    };
+
+    // Pad the thin axes so a near-straight bone still gets a usable volume,
+    // and give leaf bones (no children) a small default cube.
+    const float longest = std::max(half[0], std::max(half[1], half[2]));
+    const float min_half = has_child
+        ? std::max(longest * 0.25f, model_radius_ * 0.01f)
+        : std::max(model_radius_ * 0.04f, 1e-3f);
+    for (int a = 0; a < 3; ++a)
+    {
+        half[a] = std::max(half[a], min_half);
+    }
+
+    out_half_extents = {half[0], half[1], half[2]};
+    out_center = {center[0], center[1], center[2]};
+    return true;
 }
 
 void AnimatorPreviewRenderer::StepBonePhysics(float frame_seconds)
@@ -2635,6 +2742,71 @@ bool AnimatorPreviewRenderer::Render(VulkanContext* vulkan_context, const ImVec2
             else
             {
                 draw_list->AddCircleFilled(screen_positions[i], 3.0f, IM_COL32(255, 255, 255, 230), 8);
+            }
+        }
+    }
+
+    // ---- Collision-box overlays. -----------------------------------------
+    // Drawn independently of the skeleton toggle so collisions stay visible
+    // while editing them. Each box is defined in its bone's local space and
+    // follows the bone's animated world transform (including jiggle).
+    if (!bone_collisions_.empty() && scene_ != nullptr)
+    {
+        // Same un-flipped overlay projection the skeleton uses.
+        Mat4 proj_overlay{};
+        BuildPerspective(0.85f, aspect, 0.01f, std::max(10.0f, model_radius_ * 100.0f), proj_overlay);
+        const Mat4 view_proj_overlay = Multiply(proj_overlay, view);
+
+        // Corners indexed by bit 0=X, 1=Y, 2=Z; the 12 edges connect corners
+        // that differ in exactly one axis.
+        static const int kEdges[12][2] = {
+            {0, 1}, {0, 2}, {0, 4}, {1, 3}, {1, 5}, {2, 3},
+            {2, 6}, {3, 7}, {4, 5}, {4, 6}, {5, 7}, {6, 7},
+        };
+
+        for (const BoneCollisionParams& box : bone_collisions_)
+        {
+            const aiNode* node = scene_->mRootNode->FindNode(box.bone_name.c_str());
+            if (node == nullptr) { continue; }
+            const auto it = node_index_.find(node);
+            if (it == node_index_.end() || it->second >= node_world_transforms_.size()) { continue; }
+            const Mat4& world_matrix = node_world_transforms_[it->second];
+
+            ImVec2 corners[8];
+            bool corner_visible[8] = {};
+            for (int ci = 0; ci < 8; ++ci)
+            {
+                const float sx = (ci & 1) ? 1.0f : -1.0f;
+                const float sy = (ci & 2) ? 1.0f : -1.0f;
+                const float sz = (ci & 4) ? 1.0f : -1.0f;
+                const Vec3 local{
+                    box.center[0] + sx * box.half_extents[0],
+                    box.center[1] + sy * box.half_extents[1],
+                    box.center[2] + sz * box.half_extents[2],
+                };
+                const Vec3 world = TransformPoint(world_matrix, local);
+                float w, d;
+                corner_visible[ci] = ProjectPoint(world, view_proj_overlay, region_min, region_max, corners[ci], w, d);
+            }
+
+            const bool selected = !selected_bone_name_.empty() && selected_bone_name_ == box.bone_name;
+            // Trigger boxes draw teal, rigidbody boxes orange, so the subtype
+            // is readable at a glance. Selection brightens either.
+            const bool is_rigidbody = box.mode == 1;
+            ImU32 color;
+            if (is_rigidbody)
+            {
+                color = selected ? IM_COL32(255, 190, 90, 255) : IM_COL32(225, 150, 60, 210);
+            }
+            else
+            {
+                color = selected ? IM_COL32(120, 255, 220, 255) : IM_COL32(70, 200, 175, 210);
+            }
+            const float thickness = selected ? 2.5f : 1.5f;
+            for (const auto& edge : kEdges)
+            {
+                if (!corner_visible[edge[0]] || !corner_visible[edge[1]]) { continue; }
+                draw_list->AddLine(corners[edge[0]], corners[edge[1]], color, thickness);
             }
         }
     }

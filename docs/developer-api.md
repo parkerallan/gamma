@@ -706,35 +706,35 @@ end
 
 ### Trigger Callbacks
 
-Objects with a `Trigger Volume` attribute can implement the following callbacks:
+Objects with a `Trigger Volume` attribute — or an animator with a **Collision** bone modifier set to **Trigger** mode — can implement the following callbacks:
 
-#### `OnTriggerEnter(self, objectName, otherName, phase)`
-Quick summary: Called when another object first overlaps this trigger volume.
+#### `OnTriggerEnter(self, objectName, otherName, phase, boneName)`
+Quick summary: Called when another object first overlaps this trigger volume or bone trigger.
 
 ```lua
-function Script:OnTriggerEnter(objectName, otherName, phase)
+function Script:OnTriggerEnter(objectName, otherName, phase, boneName)
     if otherName == "Player" then
         Engine.Log(objectName .. " entered by " .. otherName .. " (" .. phase .. ")")
     end
 end
 ```
 
-#### `OnTriggerStay(self, objectName, otherName, phase)`
-Quick summary: Called each frame while another object remains inside this trigger volume.
+#### `OnTriggerStay(self, objectName, otherName, phase, boneName)`
+Quick summary: Called each frame while another object remains inside this trigger volume or bone trigger.
 
 ```lua
-function Script:OnTriggerStay(objectName, otherName, phase)
+function Script:OnTriggerStay(objectName, otherName, phase, boneName)
     if otherName == "Player" then
         -- Keep this lightweight; it runs every frame during overlap.
     end
 end
 ```
 
-#### `OnTriggerExit(self, objectName, otherName, phase)`
-Quick summary: Called when another object stops overlapping this trigger volume.
+#### `OnTriggerExit(self, objectName, otherName, phase, boneName)`
+Quick summary: Called when another object stops overlapping this trigger volume or bone trigger.
 
 ```lua
-function Script:OnTriggerExit(objectName, otherName, phase)
+function Script:OnTriggerExit(objectName, otherName, phase, boneName)
     if otherName == "Player" then
         Engine.Log(objectName .. " exited by " .. otherName .. " (" .. phase .. ")")
     end
@@ -742,6 +742,10 @@ end
 ```
 
 `otherName` is the other object in the overlap pair, and `phase` is one of `enter`, `stay`, `exit`.
+
+`boneName` is set when the overlap was triggered by an animated **bone collider** in Trigger mode — it names the bone whose hitbox fired, so one object can host many distinct hitboxes (e.g. `"hand.R"`, `"foot.L"`). For ordinary `Trigger Volume` attributes it is an empty string. The callbacks are invoked on the script attached to the **object that owns the animator**.
+
+Bone Collision modifiers in **Rigidbody** mode are purely physical: they are kinematic colliders that push dynamic rigidbodies the bone sweeps through, and they do **not** fire any script callbacks.
 
 ### Callback Restrictions
 
