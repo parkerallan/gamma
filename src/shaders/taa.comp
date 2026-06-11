@@ -29,14 +29,20 @@ layout(set = 0, binding = 1, rg16f)   uniform readonly  image2D   motion_image; 
 layout(set = 0, binding = 2)          uniform           sampler2D prev_taa_image;      // TEX_ASVGF_TAA_B
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D   curr_taa_image;      // IMG_ASVGF_TAA_A
 layout(set = 0, binding = 4, rgba8)   uniform writeonly image2D   display_image;       // IMG_TAA_OUTPUT
-// depth disocclusion inputs. Both are linear "distance from
-// camera" written by the rgen shader. binding 6 holds this frame's depth
-// (parity-aligned with the curr_taa_image write target). binding 7 holds
-// last frame's depth at each pixel. We use these for a 4-tap bilateral
-// validation of the reprojected previous-frame sample location. Read as storage images to avoid
-// adding a per-frame layout transition on the depth resources.
-layout(set = 0, binding = 6, r32f)    uniform readonly  image2D   curr_depth_image;
-layout(set = 0, binding = 7, r32f)    uniform readonly  image2D   prev_depth_image;
+// depth disocclusion inputs, written by the rgen shader. binding 6 holds
+// this frame's data (parity-aligned with the curr_taa_image write target):
+//   .x = hit distance from the CURRENT camera (becomes next frame's
+//        "previous depth" via the ping-pong),
+//   .y = EXPECTED previous-frame depth: distance from the PREVIOUS camera
+//        to the hit point's previous-frame world position.
+// binding 7 holds last frame's .x at each pixel. The disocclusion test
+// compares curr.y against prev.x so both sides are distances from the SAME
+// (previous) camera — comparing raw .x across frames false-fires on every
+// static surface while the camera translates (follow camera). Read as
+// storage images to avoid adding a per-frame layout transition on the
+// depth resources.
+layout(set = 0, binding = 6, rg32f)   uniform readonly  image2D   curr_depth_image;
+layout(set = 0, binding = 7, rg32f)   uniform readonly  image2D   prev_depth_image;
 
 layout(set = 0, binding = 5, std140) uniform TaaUniforms
 {
@@ -52,7 +58,9 @@ layout(set = 0, binding = 5, std140) uniform TaaUniforms
     vec4  params;
     // .x = viz_mode (0 = normal, 1 = motion vec, 2 = pixel weight,
     //                3 = jitter, 4 = current only, 5 = history only)
-    // .yzw = reserved
+    // .y = flt_taa_variance_moving (NCC clamp width on moving pixels)
+    // .z = history_blend_max on moving pixels (see pixel_weight below)
+    // .w = reserved
     vec4  debug;
 } taa;
 
@@ -146,14 +154,28 @@ vec4 sample_texture_catmull_rom(sampler2D tex, vec2 uv)
     vec4 sum = vec4(0);
     vec2 sampleLoc[3], sampleWeight[3];
     BicubicCatmullRom(uv, vec2(textureSize(tex, 0)), sampleLoc, sampleWeight);
+    vec4 tap_min = vec4(1e30);
+    vec4 tap_max = vec4(-1e30);
     for(int i = 0; i < 3; i++) {
         for(int j = 0; j < 3; j++) {
             vec2 uv2 = vec2(sampleLoc[j].x, sampleLoc[i].y);
             vec4 c = textureLod(tex, uv2, 0);
             sum += c * vec4(sampleWeight[j].x * sampleWeight[i].y);
+            tap_min = min(tap_min, c);
+            tap_max = max(tap_max, c);
         }
     }
-    return sum;
+    // Anti-ringing: Catmull-Rom has negative lobes, so at high-contrast
+    // features (hair cards, specular sparkle, noisy 1-spp detail) the
+    // filtered value can overshoot the range of its own taps by up to
+    // ~12% of the local contrast. The overshoot is phase-locked to
+    // fract(uv): under the smooth constant-velocity sub-pixel motion of a
+    // physics-driven follow camera the fractional phase advances coherently
+    // every frame, and the overshoot pattern crawls across the image as a
+    // directional shimmering flow. Clamping to the tap range removes the
+    // overshoot exactly; values that interpolate within their neighborhood
+    // (including every integer-aligned static fetch) are untouched.
+    return clamp(sum, tap_min, tap_max);
 }
 
 // Preload the color data into shared memory, convert to PQ space
@@ -290,6 +312,10 @@ void main()
     const float flt_taa_history_blend        = max(taa.params.w, 0.0);
     const int   flt_taa_viz_mode             = int(taa.debug.x + 0.5);
     const float flt_taa_variance_moving      = taa.debug.y;
+    // Max current-frame weight on moving pixels. Falls back to the static
+    // value when the host sends 0 so old uniform data degrades gracefully.
+    const float flt_taa_history_blend_moving =
+        taa.debug.z > 0.0 ? taa.debug.z : flt_taa_history_blend;
 
     if(flt_taa != 0.0)
     {
@@ -318,21 +344,34 @@ void main()
         mom1 /= float(num_pix);
         mom2 /= float(num_pix);
 
-        // Find the longest motion vector in a 3x3 window
-        vec2 motion;
+        // Motion dilation: take the motion of the FRONT-MOST surface in the
+        // 3x3 window (closest-depth dilation, the modern standard), not the
+        // longest vector. Q2RTX's longest-motion rule assumes the mover is
+        // the foreground; under a follow camera that inverts — the
+        // background sweeps with large motion behind a screen-stationary
+        // player, and longest-motion dragged the background's motion onto
+        // the player's silhouette pixels, fetching their history from the
+        // background's trajectory (outline shimmer whenever 3D geometry was
+        // behind the player; clean against the zero-motion sky). The
+        // front-most surface is what a silhouette pixel predominantly
+        // shows, and in the classic dilation case (mover in front of a
+        // static background) the closest tap IS the mover, so the original
+        // anti-ghosting purpose is preserved. Sky taps carry depth 1e30 and
+        // lose to any real surface; if the whole window is sky, the center
+        // tap's (zero) motion is kept.
+        vec2 motion = get_shared_motion(int_render_pos, group_base_lores);
         {
-            float len = -1;
+            float closest_depth = 1e30;
             const int r = 1;
+            const ivec2 extent_max = ivec2(taa_output_width - 1, taa_output_height - 1);
             for(int yy = -r; yy <= r; yy++) {
                 for(int xx = -r; xx <= r; xx++) {
                     ivec2 p = int_render_pos + ivec2(xx, yy);
-                    vec2 m = get_shared_motion(p, group_base_lores);
-                    float l = dot(m, m);
-                    if(l > len) {
-                        len = l;
-                        motion = m;
+                    float d = imageLoad(curr_depth_image, clamp(p, ivec2(0), extent_max)).x;
+                    if(d < closest_depth) {
+                        closest_depth = d;
+                        motion = get_shared_motion(p, group_base_lores);
                     }
-
                 }
             }
         }
@@ -405,6 +444,21 @@ void main()
             // neighborhood on both frames, so the test only fires for
             // genuine reveals where the foreground actually moves off
             // and a different surface is exposed.
+            //
+            // The current-frame side reads .y — the rgen-computed EXPECTED
+            // previous depth of this frame's surface (distance from the
+            // PREVIOUS camera to the surface's previous-frame world
+            // position) — not .x (distance from the current camera).
+            // Comparing .x against the stored previous depth measures
+            // distances from two different camera origins, which differ by
+            // ~|camera displacement| per frame on every static surface; a
+            // follow camera tracking the player kept that difference above
+            // the 10% threshold on nearby ground/walls and false-fired the
+            // test along the direction of travel (visible as a directional
+            // shimmering flow of un-accumulated 1-spp noise). With the
+            // expected-prev depth both sides share the previous camera
+            // origin, so camera motion alone can never fire the test while
+            // a genuine reveal (different surface exposed) still does.
             float depth_curr = 1e30;
             float depth_prev = 1e30;
             {
@@ -415,7 +469,7 @@ void main()
                     {
                         ivec2 pc = clamp(int_render_pos + ivec2(xx, yy), ivec2(0), extent_minus_one);
                         ivec2 pp = clamp(prev_sample_px + ivec2(xx, yy), ivec2(0), extent_minus_one);
-                        float dc = imageLoad(curr_depth_image, pc).x;
+                        float dc = imageLoad(curr_depth_image, pc).y;
                         float dp = imageLoad(prev_depth_image, pp).x;
                         if (dc < SKY_DEPTH_THRESHOLD) depth_curr = min(depth_curr, dc);
                         if (dp < SKY_DEPTH_THRESHOLD) depth_prev = min(depth_prev, dp);
@@ -498,9 +552,25 @@ void main()
                         color_prev = clamp(color_prev, mi, ma);
                     }
 
-                    // Mix the new color with the clamped previous color
+                    // Mix the new color with the clamped previous color.
+                    //
+                    // The max blend weight ramps from the static value to
+                    // the (higher) moving value with per-pixel motion. The
+                    // Q2RTX-style flat cap (0.1 regardless of motion) gives
+                    // the history a ~10-frame memory; with raw stochastic RT
+                    // input (no denoiser before this pass) the residual
+                    // noise stored in that history is advected along the
+                    // motion field every frame, and coherently *moving*
+                    // noise reads as a directional shimmering flow even
+                    // though the same residual is invisible when static.
+                    // Shortening the memory to ~2-3 frames on movers keeps
+                    // the noise screen-anchored (it cannot build into a
+                    // transported pattern), while static pixels — motion
+                    // below ~1 px — keep the full-length accumulation and
+                    // are bit-identical to the previous behaviour.
                     float sample_weight = get_sample_weight(nearest_render_pos - int_render_pos, taa_output_width * inv_width);
-                    float pixel_weight = max(motion_weight, sample_weight) * flt_taa_history_blend;
+                    float blend_max = mix(flt_taa_history_blend, flt_taa_history_blend_moving, motion_weight);
+                    float pixel_weight = max(motion_weight, sample_weight) * blend_max;
                     viz_motion_w = motion_weight;
                     viz_sample_w = sample_weight;
                     // On disocclusion, also boost the current-frame

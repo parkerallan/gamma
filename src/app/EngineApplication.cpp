@@ -917,12 +917,20 @@ bool EngineApplication::StartRuntimeSession()
 
     ApplyWindowIcon(runtime_window_, state_.workspace_root);
 
-    // The runtime window must use a non-blocking present mode (MAILBOX) so
-    // that two FIFO swapchains (editor + runtime) on one queue do not stutter
-    // by serializing on each window's vblank. The standalone game has only
-    // one swapchain and is smooth on FIFO; this gives play-mode comparable
-    // pacing.
-    if (!vulkan_context_.CreateWindowContext(runtime_window_, runtime_window_context_, /*prefer_low_latency=*/true))
+    // Present-mode trade-off for the play window:
+    //  - FIFO (vsync, default): displayed frames == rendered frames. Required
+    //    for temporally stable output — at uncapped framerates MAILBOX shows
+    //    an irregular subsample of the rendered sequence and IMMEDIATE shows
+    //    torn strips of several frames; under camera motion both read as a
+    //    directional shimmering flow of pixels that no renderer-side setting
+    //    can remove. Matches the standalone game, which runs FIFO.
+    //  - MAILBOX/IMMEDIATE (play_window_vsync=false): uncapped framerate;
+    //    historically chosen so two FIFO swapchains (editor + runtime) on one
+    //    queue do not stutter by serializing on each window's vblank.
+    if (!vulkan_context_.CreateWindowContext(
+            runtime_window_,
+            runtime_window_context_,
+            /*prefer_low_latency=*/!state_.play_window_vsync))
     {
         SDL_DestroyWindow(runtime_window_);
         runtime_window_ = nullptr;
@@ -1053,6 +1061,7 @@ void EngineApplication::RenderRuntimeWindow()
         taa_dbg.variance_scale_moving= state_.taa_variance_scale_moving;
         taa_dbg.anti_sparkle         = state_.taa_anti_sparkle;
         taa_dbg.history_blend        = state_.taa_history_blend;
+        taa_dbg.history_blend_moving = state_.taa_history_blend_moving;
         taa_dbg.jitter_compensation  = state_.taa_jitter_compensation;
         taa_dbg.adaptive_enabled     = state_.taa_adaptive_enabled;
         taa_dbg.adaptive_max_samples = state_.taa_adaptive_max_samples;

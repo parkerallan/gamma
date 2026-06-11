@@ -1,9 +1,11 @@
 #version 450
-// Converts the ray-tracer's R32_SFLOAT linear hit-distance image into
-// hardware NDC depth [0,1] so that Effekseer effects are properly occluded
-// by scene geometry.  The image is bound as a storage image (VK_IMAGE_USAGE_STORAGE_BIT)
-// because the ray-tracer does not create it with SAMPLED usage.
-layout(set = 0, binding = 0, r32f) readonly uniform image2D scene_linear_depth;
+// Converts the ray-tracer's R32G32_SFLOAT linear hit-distance image (.r =
+// current-frame hit distance; .g is TAA-only expected-previous-depth data,
+// unused here) into hardware NDC depth [0,1] so that Effekseer effects are
+// properly occluded by scene geometry.  The image is bound as a storage
+// image (VK_IMAGE_USAGE_STORAGE_BIT) because the ray-tracer does not create
+// it with SAMPLED usage.
+layout(set = 0, binding = 0, rg32f) readonly uniform image2D scene_linear_depth;
 
 layout(push_constant) uniform PushConstants
 {

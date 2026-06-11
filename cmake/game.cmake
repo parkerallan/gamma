@@ -135,6 +135,7 @@ add_executable(game
     src/render/Scene2DRenderer.cpp
     src/render/SkyboxRenderer.cpp
     src/render/RuntimeRenderer.cpp
+    src/render/CameraController.cpp
     src/render/RuntimeEffectsRenderer.cpp
     src/render/RuntimeScriptAPI.cpp
     src/render/BoneModifiers.cpp

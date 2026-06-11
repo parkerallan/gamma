@@ -51,6 +51,12 @@ if(NOT GLSLC_EXECUTABLE)
 endif()
 
 include(FetchContent)
+# Once a dependency has been populated, never contact its remote again on
+# reconfigure. Without this, FetchContent runs a `git fetch` per dependency
+# on every configure (mandatory for branch GIT_TAGs, and still a network
+# round-trip otherwise), so game builds fail offline or on flaky
+# connections even with all sources already on disk.
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 # SDL3: shared for the engine app, static for the standalone game so that
 # no SDL3.dll needs to be distributed with the game.
@@ -110,8 +116,12 @@ endif()
 FetchContent_Declare(
     imguicolortextedit
     GIT_REPOSITORY https://github.com/BalazsJako/ImGuiColorTextEdit.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    # Pinned to the tip of master (repo is inactive). A branch name here
+    # forces a `git fetch` on every configure, which fails the whole build
+    # when offline / on a flaky connection even though the sources are
+    # already populated.
+    GIT_TAG ca2f9f1462e3b60e56351bc466acda448c5ea50d
+    GIT_SHALLOW FALSE
 )
 FetchContent_GetProperties(imguicolortextedit)
 if(NOT imguicolortextedit_POPULATED)
@@ -168,8 +178,10 @@ FetchContent_MakeAvailable(assimp)
 FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    # Pinned commit for the same reason as imguicolortextedit above: branch
+    # names re-fetch on every configure and break offline builds.
+    GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4
+    GIT_SHALLOW FALSE
 )
 FetchContent_GetProperties(stb)
 if(NOT stb_POPULATED)

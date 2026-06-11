@@ -17,13 +17,20 @@ layout(set = 0, binding = 1, rgba8) uniform image2D output_image;
 layout(set = 0, binding = 7, rgba16f) uniform image2D history_image;
 layout(set = 0, binding = 9, rg16f) uniform image2D motion_image;
 // Linear-depth G-buffer for this frame. The TAA pass reads this (curr) and
-// the previous frame's slot to do per-tap bilateral disocclusion
-// (asvgf_temporal.comp:222). Distance-from-camera is used as the depth
-// scalar — it's continuous across the camera dolly (so static surfaces
-// don't false-reject) and discriminates surfaces in front of / behind one
-// another in world space (which is exactly the helmet-vs-fox disocclusion
-// case we're trying to gate).
-layout(set = 0, binding = 11, r32f) uniform image2D depth_image;
+// the previous frame's slot to do per-tap bilateral disocclusion.
+//   .x = this frame's primary-hit distance from the CURRENT camera. Becomes
+//        next frame's "previous depth" via the ping-pong.
+//   .y = EXPECTED previous-frame depth: distance from the PREVIOUS camera
+//        position to the hit point's previous-frame world position
+//        (pos_ws_prev). This is what last frame's rgen would have written at
+//        the reprojected pixel if the same surface was visible there, so the
+//        TAA disocclusion test can compare it against the stored previous
+//        depth like-for-like. Comparing .x of two frames directly is NOT
+//        valid under camera translation (a follow camera changes the
+//        distance to every static surface each frame, which false-fired the
+//        disocclusion test and injected raw 1-spp noise as a directional
+//        shimmer while the player moved).
+layout(set = 0, binding = 11, rg32f) uniform image2D depth_image;
 
 layout(set = 0, binding = 2, std140) uniform SceneUniforms
 {
@@ -55,6 +62,7 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     mat4 underwater_world_to_local;
     uvec4 cloud_count;       // .x = number of active clouds
     vec4 cloud_params[8];    // xyz=center, w=radius per cloud
+    vec4 prev_camera_position; // .xyz = previous frame's camera world position (TAA depth disocclusion)
 } scene_uniforms;
 
 layout(location = 0) rayPayloadEXT PrimaryPayload primary_payload;
@@ -403,9 +411,25 @@ void main()
     // helmet-pixel that was occluded by the fox last frame reject the
     // fox-colored history and converge to the helmet color in a single
     // frame rather than dragging the fox tint along for a dozen frames.
+    //
+    // .y carries the EXPECTED previous-frame depth of this hit: the distance
+    // from last frame's camera position to the hit point's previous-frame
+    // world position. The TAA pass compares this against the previous
+    // frame's stored .x at the reprojected pixel, so both sides of the test
+    // are distances from the SAME (previous) camera. For static geometry
+    // under a translating camera the two agree exactly, and the per-object
+    // pos_ws_prev makes them agree for rigid/skinned movers too; only a
+    // genuine reveal (a different surface exposed this frame) produces a
+    // large mismatch.
     {
-        float linear_depth = (primary_payload.hit_distance < 1e29) ? primary_payload.hit_distance : 1e30;
-        imageStore(depth_image, ipos, vec4(linear_depth, 0.0, 0.0, 0.0));
+        float linear_depth = 1e30;
+        float expected_prev_depth = 1e30;
+        if (primary_payload.hit_distance < 1e29)
+        {
+            linear_depth = primary_payload.hit_distance;
+            expected_prev_depth = distance(primary_payload.pos_ws_prev, scene_uniforms.prev_camera_position.xyz);
+        }
+        imageStore(depth_image, ipos, vec4(linear_depth, expected_prev_depth, 0.0, 0.0));
     }
 
     // ---- Extra samples (supersampling): rotated-grid pattern within pixel.

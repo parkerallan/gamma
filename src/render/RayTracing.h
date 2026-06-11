@@ -174,7 +174,11 @@ public:
         float variance_scale         = 1.25f; // 3x3 NCC clamp width on static pixels
         float variance_scale_moving  = 0.75f; // 3x3 NCC clamp width on moving pixels (lerped by motion_weight). Tighter than static to kill disocclusion ghost trails (e.g. a foreground mover passing in front of a static surface).
         float anti_sparkle           = 0.25f; // firefly clamp
-        float history_blend          = 0.1f;  // max current weight
+        float history_blend          = 0.1f;  // max current weight on static pixels (~10-frame memory)
+        // Max current weight on moving pixels (lerped by motion_weight).
+        // Default equals the static value (no behavioral change); raising it
+        // shortens the history memory on movers, trading shimmer for noise.
+        float history_blend_moving   = 0.1f;
         float jitter_compensation    = 0.0f;  // 0..1 strength of jitter_curr subtraction in motion vectors
         // Selective supersampling on hair materials (material name starts
         // with "Hair"). The hit material's flag is forwarded to the rgen
@@ -234,9 +238,10 @@ public:
     std::uint32_t GetOutputHeight() const { return output_height_; }
     VkImageLayout GetOutputLayout() const { return output_layout_; }
     void SetOutputLayout(VkImageLayout layout) { output_layout_ = layout; }
-    // Current-frame linear depth image (R32_SFLOAT, VK_IMAGE_LAYOUT_GENERAL
-    // after the ray-tracing pass). Written by the rgen shader as the primary-
-    // ray world-space hit distance; sky/miss pixels contain 1e30.
+    // Current-frame linear depth image (R32G32_SFLOAT, VK_IMAGE_LAYOUT_GENERAL
+    // after the ray-tracing pass). Written by the rgen shader: .r = primary-
+    // ray world-space hit distance, .g = expected previous-frame depth used
+    // only by the TAA disocclusion test; sky/miss pixels contain 1e30.
     VkImage GetCurrentDepthImage() const { return depth_images_[taa_parity_]; }
     VkImageView GetCurrentDepthView() const { return depth_views_[taa_parity_]; }
     VkAccelerationStructureKHR GetTopLevelAccelerationStructure() const { return top_level_as_.handle; }
@@ -379,6 +384,12 @@ private:
         // cloud_count.x = number of active clouds (0 = disabled).
         std::array<std::uint32_t, 4> cloud_count = {0, 0, 0, 0};
         std::array<float, 32> cloud_params = {};  // 8 * vec4
+        // Previous frame's camera world position (.xyz; .w unused). The rgen
+        // uses it to write the expected previous-frame depth consumed by the
+        // TAA depth-disocclusion test. Appended at the end of the block so
+        // shaders that declare only a prefix of SceneUniforms stay
+        // layout-compatible.
+        std::array<float, 4> prev_camera_position = {0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     // CPU-side parameters fed into the TAA compute UBO each frame.
@@ -454,6 +465,12 @@ private:
     // instances use their current transform as their first prev (so the
     // first frame collapses motion to camera-only reprojection).
     std::unordered_map<std::string, std::array<float, 16>> prev_instance_transforms_;
+    // Transforms staged by the most recent UpdateScene (what the next
+    // rendered frame will use). Promoted into prev_instance_transforms_
+    // only when a frame is actually submitted, so "prev" always means
+    // "last RENDERED frame" even when RenderFrame skips on a busy fence
+    // (UpdateScene runs every app frame; renders may not).
+    std::unordered_map<std::string, std::array<float, 16>> latest_instance_transforms_;
     bool has_water_surface_ = false;
     float water_surface_base_height_ = 0.0f;
     std::array<float, 16> water_surface_world_to_local_ = {1.0f, 0.0f, 0.0f, 0.0f,
@@ -544,12 +561,15 @@ private:
     VkDeviceMemory motion_memory_ = VK_NULL_HANDLE;
     VkImageView motion_view_ = VK_NULL_HANDLE;
     VkImageLayout motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-    // Linear-depth G-buffer ping-pong (R32_SFLOAT). Each frame the rgen
-    // writes the primary-ray hit distance into `depth_images_[depth_slot_]`
-    // and the TAA compute pass reads the *other* slot as previous-frame
-    // depth for the 4-tap bilateral disocclusion test
-    // (`asvgf_temporal.comp:222`). On a miss the rgen writes 1e30 so sky->sky
-    // reprojections accept and sky->object reprojections reject.
+    // Linear-depth G-buffer ping-pong (R32G32_SFLOAT). Each frame the rgen
+    // writes into `depth_images_[taa_parity_]`: .r = primary-ray hit
+    // distance from the current camera, .g = expected previous-frame depth
+    // (distance from the previous camera to the hit's previous-frame world
+    // position). The TAA compute pass compares this frame's .g against the
+    // *other* slot's .r (the actual previous-frame depth) for the bilateral
+    // disocclusion test — both sides measured from the same camera origin,
+    // so camera translation alone cannot fire it. On a miss the rgen writes
+    // 1e30 so sky->sky reprojections accept and sky->object reject.
     VkImage depth_images_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDeviceMemory depth_memories_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkImageView depth_views_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -579,4 +599,8 @@ private:
                                                    0.0f, 0.0f, 0.0f, 1.0f};
     std::array<float, 2> taa_prev_jitter_px_ = {0.0f, 0.0f};
     std::uint32_t taa_jitter_index_ = 0;
+    // Camera world position of the last rendered frame; cached alongside
+    // prev_view_projection_ and fed to the rgen as
+    // SceneUniforms.prev_camera_position.
+    std::array<float, 4> prev_camera_position_ = {0.0f, 0.0f, 0.0f, 0.0f};
 };

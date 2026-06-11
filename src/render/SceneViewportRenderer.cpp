@@ -2795,6 +2795,7 @@ void SceneViewportRenderer::RenderUi(
     taa_dbg.variance_scale_moving = state.taa_variance_scale_moving;
     taa_dbg.anti_sparkle = state.taa_anti_sparkle;
     taa_dbg.history_blend = state.taa_history_blend;
+    taa_dbg.history_blend_moving = state.taa_history_blend_moving;
     taa_dbg.jitter_compensation = state.taa_jitter_compensation;
     taa_dbg.adaptive_enabled = state.taa_adaptive_enabled;
     taa_dbg.adaptive_max_samples = state.taa_adaptive_max_samples;

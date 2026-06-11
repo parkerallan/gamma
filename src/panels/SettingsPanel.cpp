@@ -143,7 +143,10 @@ void SettingsPanel::Render(EngineState& state)
         ImGui::TextDisabled("Per-pixel firefly clamp (flt_taa_anti_sparkle).");
 
         settings_changed |= ImGui::SliderFloat("History blend (max)", &state.taa_history_blend, 0.0f, 1.0f, "%.3f");
-        ImGui::TextDisabled("Max weight of current frame into history (default 0.10 = 10%% current).");
+        ImGui::TextDisabled("Max weight of current frame into history on static pixels (default 0.10 = ~10-frame memory).");
+
+        settings_changed |= ImGui::SliderFloat("History blend (moving)", &state.taa_history_blend_moving, 0.0f, 1.0f, "%.3f");
+        ImGui::TextDisabled("Max current weight on fast-moving pixels, lerped via motion weight (default 0.10 = same as static).\nRaise to shorten history memory on movers (less smear, more per-frame noise).");
 
         settings_changed |= ImGui::SliderFloat("Jitter compensation", &state.taa_jitter_compensation, 0.0f, 1.0f, "%.3f");
         ImGui::TextDisabled("0 = legacy motion vectors. 1 = subtract jitter_curr from current UV (live diagnose).");
@@ -167,6 +170,12 @@ void SettingsPanel::Render(EngineState& state)
         ImGui::TextDisabled("Shadow rays per pixel per soft light when temporal accumulation is unavailable.\nHigh values dominate GPU cost on busy scenes. TAA smooths residual noise.");
 
         ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Play window presentation");
+        settings_changed |= ImGui::Checkbox("VSync play window (FIFO)", &state.play_window_vsync);
+        ImGui::TextDisabled("ON: displayed frames = rendered frames (temporally stable; required for clean TAA in motion).\nOFF: uncapped MAILBOX/IMMEDIATE; displayed frames are an irregular subsample of the rendered\nsequence, which shimmers along the motion direction. Takes effect when Play starts.");
+
+        ImGui::Spacing();
         if (ImGui::SmallButton("Revert TAA defaults"))
         {
             state.taa_enabled = true;
@@ -175,6 +184,7 @@ void SettingsPanel::Render(EngineState& state)
             state.taa_variance_scale_moving = 0.75f;
             state.taa_anti_sparkle = 0.25f;
             state.taa_history_blend = 0.1f;
+            state.taa_history_blend_moving = 0.1f;
             state.taa_jitter_compensation = 0.0f;
             state.taa_adaptive_enabled = true;
             state.taa_adaptive_max_samples = 4;

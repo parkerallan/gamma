@@ -120,8 +120,14 @@ struct EngineState
     float taa_variance_scale_moving = 0.75f;
     // Anti-sparkle clamp strength
     float taa_anti_sparkle = 0.25f;
-    // Maximum per-frame blend weight of current sample into history.
+    // Maximum per-frame blend weight of current sample into history on
+    // STATIC pixels (~10-frame history memory).
     float taa_history_blend = 0.1f;
+    // Maximum blend weight on FAST-MOVING pixels, lerped against
+    // taa_history_blend by the per-pixel motion weight. Default equals the
+    // static value; raising it shortens history memory on movers (less
+    // smear, more per-frame noise).
+    float taa_history_blend_moving = 0.1f;
     // 0 = legacy motion vectors (no jitter compensation, may shimmer);
     // 1 = subtract jitter_curr from uv_curr (pixel-center reprojection).
     // Slider lets the user blend between the two live to diagnose.
@@ -138,6 +144,15 @@ struct EngineState
     // (playmode / dynamic geometry). Lower = much cheaper, TAA smooths residual
     // noise. 1..16, default 4.
     int   rt_dynamic_shadow_samples = 4;
+    // Present the play-mode runtime window with FIFO (vsync) instead of
+    // MAILBOX/IMMEDIATE. At uncapped framerates (200+ fps) a non-FIFO play
+    // window displays an irregular subsample of the rendered frames (or torn
+    // strips of several frames under IMMEDIATE); under camera motion this
+    // temporal aliasing reads as a directional shimmering flow of pixels
+    // that no TAA setting can influence because it happens at presentation.
+    // FIFO makes displayed frames == rendered frames. Applied when the play
+    // session starts.
+    bool  play_window_vsync = true;
     // 0 = pure average (clean, but subpixel strands look semi-transparent);
     // 1 = bias toward the brightest sample where samples disagree strongly,
     // restoring hair/highlight opacity while keeping smooth surfaces stable.
@@ -1059,10 +1074,12 @@ struct EngineState
             else if (key == "taaVarianceScaleMoving") taa_variance_scale_moving = parse_float(value, 0.75f);
             else if (key == "taaAntiSparkle") taa_anti_sparkle = parse_float(value, 0.25f);
             else if (key == "taaHistoryBlend") taa_history_blend = parse_float(value, 0.1f);
+            else if (key == "taaHistoryBlendMoving") taa_history_blend_moving = parse_float(value, 0.1f);
             else if (key == "taaJitterCompensation") taa_jitter_compensation = parse_float(value, 0.0f);
             else if (key == "taaAdaptiveEnabled") taa_adaptive_enabled = parse_bool(value);
             else if (key == "taaAdaptiveMaxSamples") taa_adaptive_max_samples = parse_int(value, 2);
             else if (key == "rtDynamicShadowSamples") rt_dynamic_shadow_samples = parse_int(value, 4);
+            else if (key == "playWindowVsync") play_window_vsync = parse_bool(value);
             else if (key == "taaAdaptiveThreshold") taa_adaptive_threshold = parse_float(value, 0.25f);
             else if (key == "taaAdaptivePreservation") taa_adaptive_preservation = parse_float(value, 0.7f);
         }
@@ -1127,10 +1144,12 @@ struct EngineState
         output << "taaVarianceScaleMoving=" << taa_variance_scale_moving << "\n";
         output << "taaAntiSparkle=" << taa_anti_sparkle << "\n";
         output << "taaHistoryBlend=" << taa_history_blend << "\n";
+        output << "taaHistoryBlendMoving=" << taa_history_blend_moving << "\n";
         output << "taaJitterCompensation=" << taa_jitter_compensation << "\n";
         output << "taaAdaptiveEnabled=" << write_bool(taa_adaptive_enabled) << "\n";
         output << "taaAdaptiveMaxSamples=" << taa_adaptive_max_samples << "\n";
         output << "rtDynamicShadowSamples=" << rt_dynamic_shadow_samples << "\n";
+        output << "playWindowVsync=" << write_bool(play_window_vsync) << "\n";
         output << "taaAdaptiveThreshold=" << taa_adaptive_threshold << "\n";
         output << "taaAdaptivePreservation=" << taa_adaptive_preservation << "\n";
 

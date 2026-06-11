@@ -568,6 +568,13 @@ void VulkanContext::SetupWindowData(SDL_Window* window, ImGui_ImplVulkanH_Window
         window_data.Surface,
         request_modes,
         request_modes_count);
+    SDL_Log(
+        "Vulkan window present mode: %s (prefer_low_latency=%d)",
+        window_data.PresentMode == VK_PRESENT_MODE_MAILBOX_KHR     ? "MAILBOX"
+        : window_data.PresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE"
+        : window_data.PresentMode == VK_PRESENT_MODE_FIFO_KHR      ? "FIFO"
+                                                                   : "OTHER",
+        prefer_low_latency ? 1 : 0);
     window_data.ClearValue.color.float32[0] = 0.08f;
     window_data.ClearValue.color.float32[1] = 0.09f;
     window_data.ClearValue.color.float32[2] = 0.11f;

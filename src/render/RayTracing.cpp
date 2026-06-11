@@ -1096,8 +1096,9 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
     }
     motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    // Linear-depth ping-pong (R32_SFLOAT). Created here because they share
-    // the viewport's resolution. Used by `taa.comp` for 
+    // Linear-depth ping-pong (R32G32_SFLOAT: .r = current hit distance,
+    // .g = expected previous-frame depth written by the rgen). Created here
+    // because they share the viewport's resolution. Used by `taa.comp` for
     // bilateral history validation (depth disocclusion).
     for (int slot = 0; slot < 2; ++slot)
     {
@@ -1107,7 +1108,7 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
                 allocator,
                 width,
                 height,
-                VK_FORMAT_R32_SFLOAT,
+                VK_FORMAT_R32G32_SFLOAT,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 depth_images_[slot],
@@ -1543,18 +1544,27 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
     pending_acceleration_instances_ = std::move(new_instances);
     instance_records_cpu_           = std::move(new_instance_records);
 
-    // Refresh the previous-transform cache so the *next* UpdateScene call sees
-    // this frame's transforms as "prev". Keys not present in the current set are
-    // dropped (instance no longer exists). This must happen after the records
-    // are built (which consumed the old cache values).
+    // Stage this update's transforms. They are promoted into
+    // prev_instance_transforms_ only when a frame is actually SUBMITTED
+    // (end of RenderFrame), not here: UpdateScene runs every app frame,
+    // but RenderFrame skips whenever the GPU is still busy with the
+    // previous frame (200+ fps app loop vs a slower GPU). If the prev
+    // cache rotated per app frame, a moving object's "previous transform"
+    // would span one app frame while the camera's prev_view_projection_
+    // (cached per RENDERED frame) spans several — the mismatch produces
+    // spurious motion vectors on moving objects (e.g. a follow-camera
+    // player that is screen-stationary but reported as moving), and TAA
+    // fetches their history from the wrong place every frame, which reads
+    // as a directional shimmer on the mover. Promoting on submit keeps
+    // "prev" meaning "last rendered frame" for both camera and objects.
     {
-        std::unordered_map<std::string, std::array<float, 16>> next_prev;
-        next_prev.reserve(instance_curr_for_cache.size());
+        std::unordered_map<std::string, std::array<float, 16>> next_latest;
+        next_latest.reserve(instance_curr_for_cache.size());
         for (const auto& kv : instance_curr_for_cache)
         {
-            next_prev.emplace(kv.first, kv.second);
+            next_latest.emplace(kv.first, kv.second);
         }
-        prev_instance_transforms_ = std::move(next_prev);
+        latest_instance_transforms_ = std::move(next_latest);
     }
 
     if (topology_changed)
@@ -1743,6 +1753,7 @@ void RayTracing::DestroySceneResources()
     instance_record_buffer_capacity_ = 0;
     instance_records_cpu_.clear();
     prev_instance_transforms_.clear();
+    latest_instance_transforms_.clear();
     DestroyGpuBuffer(vulkan_context_, tlas_scratch_buffer_);
     DestroyGpuBuffer(vulkan_context_, uniform_buffer_);
     DestroyGpuBuffer(vulkan_context_, mesh_record_buffer_);
@@ -3023,6 +3034,63 @@ bool RayTracing::RenderFrame(
         // avoids the per-frame vkQueueWaitIdle that previously stalled on the
         // prior frame's ray-tracing dispatch — the dominant source of
         // animated-mesh stutter.
+        // Drop superseded skinning dispatches before recording. One dispatch
+        // per animated mesh is enqueued every APP frame, but they only
+        // execute on RENDERED frames — when RenderFrame skips on a busy
+        // fence, several dispatches for the same mesh accumulate. Replaying
+        // all of them would rotate the prev-position buffer to an
+        // intermediate app-frame pose (each dispatch copies the vertex
+        // buffer into prev_positions before skinning), breaking the
+        // "prev == last rendered pose" invariant the TAA motion vectors
+        // need. Keeping only the newest dispatch per output buffer copies
+        // the last RENDERED pose into prev and writes the current pose —
+        // exactly right — and is also cheaper. (The per-mesh palette buffer
+        // is rewritten every app frame, so stale queued dispatches would
+        // have read the newest palette anyway.)
+        if (pending_skinning_dispatches_.size() > 1)
+        {
+            std::unordered_map<VkBuffer, std::size_t> newest_for_buffer;
+            for (std::size_t i = 0; i < pending_skinning_dispatches_.size(); ++i)
+            {
+                newest_for_buffer[pending_skinning_dispatches_[i].output_vertex_buffer] = i;
+            }
+            if (newest_for_buffer.size() != pending_skinning_dispatches_.size())
+            {
+                std::vector<PendingSkinningDispatch> deduped;
+                deduped.reserve(newest_for_buffer.size());
+                for (std::size_t i = 0; i < pending_skinning_dispatches_.size(); ++i)
+                {
+                    if (newest_for_buffer[pending_skinning_dispatches_[i].output_vertex_buffer] == i)
+                    {
+                        deduped.push_back(pending_skinning_dispatches_[i]);
+                    }
+                }
+                pending_skinning_dispatches_ = std::move(deduped);
+            }
+        }
+        // Same for BLAS refits: duplicates for one mesh all read the same
+        // (final) vertex buffer state, so only the newest is needed.
+        if (pending_blas_refits_.size() > 1)
+        {
+            std::unordered_map<std::string, std::size_t> newest_for_mesh;
+            for (std::size_t i = 0; i < pending_blas_refits_.size(); ++i)
+            {
+                newest_for_mesh[pending_blas_refits_[i].mesh_key] = i;
+            }
+            if (newest_for_mesh.size() != pending_blas_refits_.size())
+            {
+                std::vector<PendingBlasRefit> deduped;
+                deduped.reserve(newest_for_mesh.size());
+                for (std::size_t i = 0; i < pending_blas_refits_.size(); ++i)
+                {
+                    if (newest_for_mesh[pending_blas_refits_[i].mesh_key] == i)
+                    {
+                        deduped.push_back(pending_blas_refits_[i]);
+                    }
+                }
+                pending_blas_refits_ = std::move(deduped);
+            }
+        }
         if (!pending_skinning_dispatches_.empty() || !pending_blas_refits_.empty())
         {
             // Capture all per-refit data into stable storage so the lambda can
@@ -3503,6 +3571,7 @@ bool RayTracing::RenderFrame(
 
     // --- TAA per-frame state ---
     uniforms.prev_view_projection = prev_view_projection_;
+    uniforms.prev_camera_position = prev_camera_position_;
     // motion vector convention requires the *current* view*projection
     // to project pos_ws_curr to screen space (alongside prev_view_projection
     // for pos_ws_prev). The CPU-side view/projection are stored as their
@@ -3587,6 +3656,7 @@ bool RayTracing::RenderFrame(
     accumulation_reference.taa_params = {};
     accumulation_reference.jitter_offset = {};
     accumulation_reference.adaptive_params = {};
+    accumulation_reference.prev_camera_position = {};
     const bool accumulation_reset =
         accumulation_reset_requested_ ||
         dynamic_geometry_present_ ||
@@ -3719,7 +3789,7 @@ bool RayTracing::RenderFrame(
         taa_uniforms.debug = {
             static_cast<float>(taa_debug_.viz_mode),
             taa_debug_.variance_scale_moving,
-            0.0f,
+            taa_debug_.history_blend_moving,
             0.0f};
         if (!UploadGpuBuffer(*vulkan_context_, taa_uniform_buffer_, &taa_uniforms, sizeof(taa_uniforms)))
         {
@@ -3751,8 +3821,11 @@ bool RayTracing::RenderFrame(
 
     // Cache the current view-projection for next frame's motion vector
     // re-projection. We always update this so motion vectors are valid the
-    // first frame after TAA is enabled.
+    // first frame after TAA is enabled. The camera world position (the
+    // view_inverse translation column) is cached on the same schedule for
+    // the rgen's expected-previous-depth write.
     ComputePrevViewProjection(view_inverse, projection_inverse, prev_view_projection_);
+    prev_camera_position_ = {view_inverse[12], view_inverse[13], view_inverse[14], 0.0f};
     if (taa_dispatched)
     {
         taa_prev_jitter_px_[0] = jitter_x_px;
@@ -3782,6 +3855,10 @@ bool RayTracing::RenderFrame(
         accumulation_frame_count_ = (std::min)(accumulation_frame_count_ + 1u, kMaxAccumulationFrames);
         raw_frame_count_ += 1u;
         accumulation_reset_requested_ = false;
+        // This frame rendered with `latest_instance_transforms_`; promote
+        // them so the next frame's motion-vector "prev" matches the last
+        // RENDERED state (see the staging comment in UpdateScene).
+        prev_instance_transforms_ = latest_instance_transforms_;
     }
     return submitted;
 }
