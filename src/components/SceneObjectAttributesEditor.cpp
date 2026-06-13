@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -789,6 +790,7 @@ bool RenderAttributeSection(
             constexpr CameraTypeOption kCameraTypeOptions[] = {
                 {"Fixed", SceneObjectCameraType::Fixed},
                 {"Follow", SceneObjectCameraType::Follow},
+                {"Track", SceneObjectCameraType::Track},
             };
 
             int selected_camera_type_index = 0;
@@ -942,6 +944,141 @@ bool RenderAttributeSection(
                 }
 
                 ImGui::TextDisabled("Camera world position = follow target world position + Follow Offset. Camera keeps its own rotation. Follow Smoothing is the lag time constant (0 = snap).");
+            }
+
+            if (attribute.camera.type == SceneObjectCameraType::Track)
+            {
+                // Seed two default control points the first time a camera becomes
+                // a Track camera (the path needs at least two). They sit at the
+                // camera and 10 units in front of it along world -Z; the user
+                // then repositions them with the viewport gizmo.
+                if (attribute.camera.track_points.size() < 2)
+                {
+                    std::vector<SceneVector3> seeded = attribute.camera.track_points;
+                    const SceneVector3 base = object.position;
+                    while (seeded.size() < 2)
+                    {
+                        if (seeded.empty())
+                        {
+                            seeded.push_back(base);
+                        }
+                        else
+                        {
+                            seeded.push_back({base[0], base[1], base[2] - 10.0f});
+                        }
+                    }
+                    changed = SaveSceneObjectAttributeEdit(state, object, "camera track points", [&]()
+                    {
+                        return SetSceneObjectAttributeCameraTrackPoints(state.selected_item_path, object.name, attribute_index, seeded);
+                    }) || changed;
+                }
+                else
+                {
+                    ImGui::Spacing();
+                    ImGui::Text("Path Points (%d)", static_cast<int>(attribute.camera.track_points.size()));
+                    ImGui::TextDisabled("Select a point (here or in the viewport), then drag the gizmo to move it.");
+
+                    const int point_count = static_cast<int>(attribute.camera.track_points.size());
+                    int point_to_remove = -1;
+                    for (int point_index = 0; point_index < point_count; ++point_index)
+                    {
+                        ImGui::PushID(point_index);
+
+                        const bool is_selected = state.selected_track_point_index == point_index;
+                        if (ImGui::RadioButton("##select", is_selected))
+                        {
+                            state.selected_track_point_index = point_index;
+                        }
+                        ImGui::SameLine();
+
+                        float point_values[3] = {
+                            attribute.camera.track_points[static_cast<std::size_t>(point_index)][0],
+                            attribute.camera.track_points[static_cast<std::size_t>(point_index)][1],
+                            attribute.camera.track_points[static_cast<std::size_t>(point_index)][2],
+                        };
+                        ImGui::SetNextItemWidth(-60.0f);
+                        if (ImGui::DragFloat3("##point", point_values, 0.05f))
+                        {
+                            std::vector<SceneVector3> next_points = attribute.camera.track_points;
+                            next_points[static_cast<std::size_t>(point_index)] = {point_values[0], point_values[1], point_values[2]};
+                            changed = SaveSceneObjectAttributeEdit(state, object, "camera track point", [&]()
+                            {
+                                return SetSceneObjectAttributeCameraTrackPoints(state.selected_item_path, object.name, attribute_index, next_points);
+                            }) || changed;
+                        }
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled(point_count <= 2);
+                        if (ImGui::SmallButton("X"))
+                        {
+                            point_to_remove = point_index;
+                        }
+                        ImGui::EndDisabled();
+
+                        ImGui::PopID();
+                    }
+
+                    if (point_to_remove >= 0 && point_count > 2)
+                    {
+                        std::vector<SceneVector3> next_points = attribute.camera.track_points;
+                        next_points.erase(next_points.begin() + point_to_remove);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "remove camera track point", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraTrackPoints(state.selected_item_path, object.name, attribute_index, next_points);
+                        }) || changed;
+                        if (state.selected_track_point_index >= static_cast<int>(next_points.size()))
+                        {
+                            state.selected_track_point_index = static_cast<int>(next_points.size()) - 1;
+                        }
+                    }
+
+                    if (ImGui::Button("Add Point"))
+                    {
+                        std::vector<SceneVector3> next_points = attribute.camera.track_points;
+                        const SceneVector3 last = next_points.back();
+                        next_points.push_back({last[0], last[1], last[2] - 2.0f});
+                        changed = SaveSceneObjectAttributeEdit(state, object, "add camera track point", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraTrackPoints(state.selected_item_path, object.name, attribute_index, next_points);
+                        }) || changed;
+                        state.selected_track_point_index = static_cast<int>(next_points.size()) - 1;
+                    }
+
+                    float track_speed = attribute.camera.track_speed;
+                    if (ImGui::DragFloat("Speed", &track_speed, 0.05f, 0.0f, 1000.0f, "%.2f u/s"))
+                    {
+                        const float clamped = (std::max)(0.0f, track_speed);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "camera track speed", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraTrackSpeed(state.selected_item_path, object.name, attribute_index, clamped);
+                        }) || changed;
+                    }
+
+                    float track_acceleration = attribute.camera.track_acceleration;
+                    if (ImGui::DragFloat("Acceleration", &track_acceleration, 0.05f, 0.0f, 1000.0f, "%.2f u/s^2"))
+                    {
+                        const float clamped = (std::max)(0.0f, track_acceleration);
+                        changed = SaveSceneObjectAttributeEdit(state, object, "camera track acceleration", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraTrackAcceleration(state.selected_item_path, object.name, attribute_index, clamped);
+                        }) || changed;
+                    }
+
+                    float track_rotation_offset[3] = {
+                        attribute.camera.track_rotation_offset[0],
+                        attribute.camera.track_rotation_offset[1],
+                        attribute.camera.track_rotation_offset[2],
+                    };
+                    if (ImGui::DragFloat3("Rotation Offset", track_rotation_offset, 0.5f, -360.0f, 360.0f, "%.2f deg"))
+                    {
+                        const SceneVector3 next_rot = {track_rotation_offset[0], track_rotation_offset[1], track_rotation_offset[2]};
+                        changed = SaveSceneObjectAttributeEdit(state, object, "camera track rotation offset", [&]()
+                        {
+                            return SetSceneObjectAttributeCameraTrackRotationOffset(state.selected_item_path, object.name, attribute_index, next_rot);
+                        }) || changed;
+                    }
+
+                    ImGui::TextDisabled("Camera accelerates from 0 up to Speed (Acceleration = 0 means instant), faces along the path plus Rotation Offset, and stops at the final point when activated.");
+                }
             }
 
             float field_of_view = attribute.camera.field_of_view_degrees;

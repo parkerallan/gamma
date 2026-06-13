@@ -83,6 +83,10 @@ struct EngineState
     std::filesystem::path active_scene_path;
     std::filesystem::path selected_item_path;
     std::string selected_scene_object_name;
+    // Index of the Track camera control point currently selected for editing in
+    // the viewport (-1 = none). Shared between the inspector and the viewport
+    // gizmo; reset whenever the selected scene object changes.
+    int selected_track_point_index = -1;
     std::string version_control_remote_url;
     std::filesystem::path open_file_path;
     std::filesystem::path requested_graph_path;
@@ -334,12 +338,18 @@ struct EngineState
     {
         selected_item_path = std::move(path);
         selected_scene_object_name.clear();
+        selected_track_point_index = -1;
     }
 
     void SetSelectedSceneObject(std::filesystem::path scene_path, std::string object_name)
     {
+        const bool object_changed = selected_scene_object_name != object_name;
         selected_item_path = std::move(scene_path);
         selected_scene_object_name = std::move(object_name);
+        if (object_changed)
+        {
+            selected_track_point_index = -1;
+        }
     }
 
     void ClearOpenProject()
@@ -350,6 +360,7 @@ struct EngineState
         active_scene_path.clear();
         selected_item_path.clear();
         selected_scene_object_name.clear();
+        selected_track_point_index = -1;
         version_control_remote_url.clear();
         open_file_path.clear();
         requested_graph_path.clear();
@@ -490,6 +501,7 @@ struct EngineState
             {
                 selected_item_path.clear();
                 selected_scene_object_name.clear();
+                selected_track_point_index = -1;
                 AddLog("Cleared deleted selection");
             }
         }

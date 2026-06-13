@@ -2272,6 +2272,14 @@ void RuntimeRenderer::Shutdown()
     physics_accumulator_seconds_ = 0.0f;
     physics_last_tick_counter_ = 0;
     physics_has_curr_snapshot_ = false;
+    // Reset Track camera motion so each play session starts the camera at the
+    // beginning of its path. Without this the distance stays parked at the end
+    // of the track from the previous session (the per-frame reset only fires on
+    // an active-camera *name* change, which doesn't happen across sessions).
+    track_camera_key_.clear();
+    track_camera_distance_ = 0.0f;
+    track_camera_speed_ = 0.0f;
+    track_camera_last_tick_counter_ = 0;
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
@@ -2358,6 +2366,14 @@ bool RuntimeRenderer::StartSession(
     physics_accumulator_seconds_ = 0.0f;
     physics_last_tick_counter_ = 0;
     physics_has_curr_snapshot_ = false;
+    // Reset Track camera motion so each play session starts the camera at the
+    // beginning of its path. Without this the distance stays parked at the end
+    // of the track from the previous session (the per-frame reset only fires on
+    // an active-camera *name* change, which doesn't happen across sessions).
+    track_camera_key_.clear();
+    track_camera_distance_ = 0.0f;
+    track_camera_speed_ = 0.0f;
+    track_camera_last_tick_counter_ = 0;
     script_object_position_overrides_.clear();
     script_object_rotation_overrides_.clear();
     script_object_scale_overrides_.clear();
@@ -5997,6 +6013,61 @@ bool RuntimeRenderer::BuildQueuedScene(
     Vec3 camera_position = {resolved_view.position[0], resolved_view.position[1], resolved_view.position[2]};
     Vec3 camera_forward = {resolved_view.forward[0], resolved_view.forward[1], resolved_view.forward[2]};
     Vec3 camera_up = {resolved_view.up[0], resolved_view.up[1], resolved_view.up[2]};
+
+    // Track camera: when active, advance along the authored Catmull-Rom path,
+    // accelerating up to cruise speed and facing the direction of travel, then
+    // stopping at the final point. This runs every frame in BuildQueuedScene, so
+    // it drives the camera identically in editor play mode and the exported game
+    // build. Progress resets whenever the active Track camera changes so motion
+    // always starts from the first point on (re)activation.
+    if (active_camera.type == SceneObjectCameraType::Track && active_camera.track_points.size() >= 2)
+    {
+        const std::uint64_t now_perf_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+        const std::uint64_t perf_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+
+        if (active_camera_object.name != track_camera_key_)
+        {
+            track_camera_key_ = active_camera_object.name;
+            track_camera_distance_ = 0.0f;
+            track_camera_speed_ = 0.0f;
+            track_camera_last_tick_counter_ = now_perf_ticks;
+        }
+
+        const float dt = (perf_freq != 0 && now_perf_ticks > track_camera_last_tick_counter_)
+            ? static_cast<float>(static_cast<double>(now_perf_ticks - track_camera_last_tick_counter_)
+                                 / static_cast<double>(perf_freq))
+            : 0.0f;
+        // Cap dt so a single hitch doesn't teleport the camera down the track.
+        const float dt_clamped = std::clamp(dt, 0.0f, 0.25f);
+        track_camera_last_tick_counter_ = now_perf_ticks;
+
+        const float cruise_speed = (std::max)(0.0f, active_camera.track_speed);
+        const float acceleration = (std::max)(0.0f, active_camera.track_acceleration);
+        if (acceleration > 0.0f)
+        {
+            track_camera_speed_ = (std::min)(cruise_speed, track_camera_speed_ + acceleration * dt_clamped);
+        }
+        else
+        {
+            track_camera_speed_ = cruise_speed;
+        }
+
+        const float total_length = TrackTotalLength(active_camera.track_points);
+        track_camera_distance_ = (std::min)(track_camera_distance_ + track_camera_speed_ * dt_clamped, total_length);
+
+        const TrackSample sample = SampleTrackAtDistance(active_camera.track_points, track_camera_distance_);
+        const CameraView track_view = ResolveTrackCameraView(sample, active_camera.track_rotation_offset);
+
+        camera_position = Vec3{track_view.position[0], track_view.position[1], track_view.position[2]};
+        camera_forward = Vec3{track_view.forward[0], track_view.forward[1], track_view.forward[2]};
+        camera_up = Vec3{track_view.up[0], track_view.up[1], track_view.up[2]};
+    }
+    else
+    {
+        // Not a (valid) Track camera: forget any prior progress so re-activating
+        // a Track camera later restarts cleanly from the first point.
+        track_camera_key_.clear();
+    }
 
     // Apply exponential follow-camera smoothing. Only active when this is a
     // Follow camera with a resolvable target and a positive time constant.

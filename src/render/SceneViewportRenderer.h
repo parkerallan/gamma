@@ -166,6 +166,15 @@ private:
     bool gizmo_preview_write_rotation_ = false;
     bool gizmo_preview_write_scale_ = false;
 
+    // Deferred commit state for dragging a Track camera control point with the
+    // gizmo: hold the in-progress world position during the drag, write the full
+    // point list to disk once on release.
+    bool track_point_preview_active_ = false;
+    std::string track_point_preview_object_name_;
+    std::size_t track_point_preview_attribute_index_ = 0;
+    int track_point_preview_index_ = -1;
+    SceneVector3 track_point_preview_point_ = {0.0f, 0.0f, 0.0f};
+
     // Deferred 2D overlay commit state for 2D attribute drag/resize.
     bool overlay_preview_active_ = false;
     std::string overlay_preview_object_name_;

@@ -1,5 +1,6 @@
 #include "render/CameraController.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -76,6 +77,134 @@ Vec3Array RotateByEulerDegreesXYZ(const Vec3Array& v, const std::array<float, 3>
         b[2],
     };
     return c;
+}
+
+// Uniform cubic B-spline. Unlike Catmull-Rom this is C2-continuous (continuous
+// curvature), so the camera's turn rate has no kink at control points — the
+// per-point "snap" of an interpolating spline is gone. The curve passes NEAR the
+// interior control points rather than exactly through them, but the endpoints are
+// clamped (see TrackControlPoint) so it still starts/ends on the first/last point.
+Vec3Array BSpline(const Vec3Array& b0, const Vec3Array& b1, const Vec3Array& b2, const Vec3Array& b3, float t)
+{
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    Vec3Array result{};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const std::size_t a = static_cast<std::size_t>(axis);
+        result[a] = (1.0f / 6.0f) * (
+            (-b0[a] + 3.0f * b1[a] - 3.0f * b2[a] + b3[a]) * t3 +
+            (3.0f * b0[a] - 6.0f * b1[a] + 3.0f * b2[a]) * t2 +
+            (-3.0f * b0[a] + 3.0f * b2[a]) * t +
+            (b0[a] + 4.0f * b1[a] + b2[a]));
+    }
+    return result;
+}
+
+// Analytic derivative dP/dt of the uniform cubic B-spline (un-normalized tangent).
+Vec3Array BSplineDerivative(const Vec3Array& b0, const Vec3Array& b1, const Vec3Array& b2, const Vec3Array& b3, float t)
+{
+    const float t2 = t * t;
+    Vec3Array result{};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const std::size_t a = static_cast<std::size_t>(axis);
+        result[a] =
+            0.5f * (-b0[a] + 3.0f * b1[a] - 3.0f * b2[a] + b3[a]) * t2 +
+            (b0[a] - 2.0f * b1[a] + b2[a]) * t +
+            0.5f * (-b0[a] + b2[a]);
+    }
+    return result;
+}
+
+// Control point in the *augmented* index space [0, count+3]: the first and last
+// points are tripled (aug 0,1,2 -> P0; aug count+1,count+2,count+3 -> Pn) so the
+// uniform B-spline is clamped and interpolates the endpoints. The triplication
+// falls out of clamping the shifted index.
+Vec3Array TrackControlPoint(const std::vector<SceneVector3>& points, int aug_index)
+{
+    const int count = static_cast<int>(points.size());
+    int index = aug_index - 2;
+    index = (std::max)(0, (std::min)(index, count - 1));
+    return {points[static_cast<std::size_t>(index)][0],
+            points[static_cast<std::size_t>(index)][1],
+            points[static_cast<std::size_t>(index)][2]};
+}
+
+// Splits a global parameter u into a B-spline segment index and local t. There are
+// (count + 1) segments over the augmented control array, spanning u in [0, count+1].
+void TrackSegmentAndT(const std::vector<SceneVector3>& points, float u, int& segment, float& t)
+{
+    const int count = static_cast<int>(points.size());
+    const int segment_count = count + 1;
+    segment = static_cast<int>(std::floor(u));
+    segment = (std::max)(0, (std::min)(segment, segment_count - 1));
+    t = u - static_cast<float>(segment);
+}
+
+// Analytic position on the spline at global parameter u.
+Vec3Array EvalTrackPosition(const std::vector<SceneVector3>& points, float u)
+{
+    int segment = 0;
+    float t = 0.0f;
+    TrackSegmentAndT(points, u, segment, t);
+    return BSpline(
+        TrackControlPoint(points, segment), TrackControlPoint(points, segment + 1),
+        TrackControlPoint(points, segment + 2), TrackControlPoint(points, segment + 3), t);
+}
+
+// Analytic (un-normalized) tangent on the spline at global parameter u.
+Vec3Array EvalTrackTangent(const std::vector<SceneVector3>& points, float u)
+{
+    int segment = 0;
+    float t = 0.0f;
+    TrackSegmentAndT(points, u, segment, t);
+    return BSplineDerivative(
+        TrackControlPoint(points, segment), TrackControlPoint(points, segment + 1),
+        TrackControlPoint(points, segment + 2), TrackControlPoint(points, segment + 3), t);
+}
+
+// Arc-length table mapping a global parameter u to cumulative arc length, built by
+// densely sampling the analytic curve. Lets callers reparameterize an arc-length
+// distance back to a u value for constant-speed, smooth traversal.
+struct TrackArcTable
+{
+    std::vector<float> param;          // global u per sample
+    std::vector<float> cumulative_len; // arc length up to each sample
+    float              total_length = 0.0f;
+};
+
+constexpr int kSubdivisionsPerSpan = 24;
+
+TrackArcTable BuildTrackArcTable(const std::vector<SceneVector3>& points)
+{
+    TrackArcTable table;
+    if (points.size() < 2)
+    {
+        return table;
+    }
+
+    const int count = static_cast<int>(points.size());
+    const int segment_count = count + 1; // B-spline segments over the augmented array
+    table.param.push_back(0.0f);
+    table.cumulative_len.push_back(0.0f);
+    Vec3Array previous = EvalTrackPosition(points, 0.0f);
+
+    for (int segment = 0; segment < segment_count; ++segment)
+    {
+        for (int step = 1; step <= kSubdivisionsPerSpan; ++step)
+        {
+            const float t = static_cast<float>(step) / static_cast<float>(kSubdivisionsPerSpan);
+            const float u = static_cast<float>(segment) + t;
+            const Vec3Array sample = EvalTrackPosition(points, u);
+            const Vec3Array delta = {sample[0] - previous[0], sample[1] - previous[1], sample[2] - previous[2]};
+            table.total_length += LengthArray(delta);
+            table.param.push_back(u);
+            table.cumulative_len.push_back(table.total_length);
+            previous = sample;
+        }
+    }
+    return table;
 }
 
 CameraView ResolveFixedCameraView(const std::array<float, 16>& camera_world_matrix)
@@ -208,5 +337,115 @@ CameraView ResolveCameraView(
             view.up = {0.0f, 1.0f, 0.0f};
         }
     }
+    return view;
+}
+
+float TrackTotalLength(const std::vector<SceneVector3>& points)
+{
+    return BuildTrackArcTable(points).total_length;
+}
+
+TrackSample SampleTrackAtDistance(const std::vector<SceneVector3>& points, float distance)
+{
+    TrackSample sample;
+    if (points.size() < 2)
+    {
+        if (!points.empty())
+        {
+            sample.position = {points[0][0], points[0][1], points[0][2]};
+        }
+        return sample;
+    }
+
+    const TrackArcTable table = BuildTrackArcTable(points);
+    if (table.param.size() < 2 || table.total_length <= 0.0001f)
+    {
+        sample.position = EvalTrackPosition(points, 0.0f);
+        const Vec3Array tan0 = NormalizeArray(EvalTrackTangent(points, 0.0f));
+        if (LengthArray(tan0) > 0.0001f)
+        {
+            sample.tangent = tan0;
+        }
+        return sample;
+    }
+
+    const float clamped = (std::max)(0.0f, (std::min)(distance, table.total_length));
+
+    // Find the arc-table segment [i, i+1] whose cumulative length brackets
+    // `clamped`, then interpolate the global parameter u and evaluate the
+    // analytic curve there. This keeps both position and facing direction
+    // smooth through curves (no piecewise-constant snapping) while traversal
+    // stays at constant world speed (arc-length parameterized).
+    std::size_t segment = 0;
+    for (; segment + 1 < table.cumulative_len.size(); ++segment)
+    {
+        if (table.cumulative_len[segment + 1] >= clamped)
+        {
+            break;
+        }
+    }
+    if (segment + 1 >= table.param.size())
+    {
+        segment = table.param.size() - 2;
+    }
+
+    const float seg_start = table.cumulative_len[segment];
+    const float seg_len = table.cumulative_len[segment + 1] - seg_start;
+    const float local_t = seg_len > 0.0001f ? (clamped - seg_start) / seg_len : 0.0f;
+    const float u = table.param[segment] + (table.param[segment + 1] - table.param[segment]) * local_t;
+
+    sample.position = EvalTrackPosition(points, u);
+    Vec3Array tangent = NormalizeArray(EvalTrackTangent(points, u));
+    if (LengthArray(tangent) <= 0.0001f)
+    {
+        tangent = {0.0f, 0.0f, -1.0f};
+    }
+    sample.tangent = tangent;
+    return sample;
+}
+
+CameraView ResolveTrackCameraView(const TrackSample& sample, const SceneVector3& rotation_offset_degrees)
+{
+    CameraView view;
+    view.position = sample.position;
+
+    Vec3Array forward = NormalizeArray(sample.tangent);
+    if (LengthArray(forward) <= 0.0001f)
+    {
+        forward = {0.0f, 0.0f, -1.0f};
+    }
+
+    const std::array<float, 3> offset = {
+        rotation_offset_degrees[0],
+        rotation_offset_degrees[1],
+        rotation_offset_degrees[2],
+    };
+    if (std::abs(offset[0]) > 0.0001f || std::abs(offset[1]) > 0.0001f || std::abs(offset[2]) > 0.0001f)
+    {
+        forward = NormalizeArray(RotateByEulerDegreesXYZ(forward, offset));
+        if (LengthArray(forward) <= 0.0001f)
+        {
+            forward = {0.0f, 0.0f, -1.0f};
+        }
+    }
+
+    // Reconstruct an up vector orthogonal to forward, guarding against the
+    // forward pointing straight up/down (same convention as the fixed view).
+    Vec3Array up = {0.0f, 1.0f, 0.0f};
+    if (std::abs(DotArray(forward, up)) >= 0.999f)
+    {
+        up = {0.0f, 0.0f, 1.0f};
+    }
+    if (std::abs(offset[0]) > 0.0001f || std::abs(offset[1]) > 0.0001f || std::abs(offset[2]) > 0.0001f)
+    {
+        up = NormalizeArray(RotateByEulerDegreesXYZ(up, offset));
+        if (LengthArray(up) <= 0.0001f || std::abs(DotArray(forward, NormalizeArray(up))) >= 0.999f)
+        {
+            up = {0.0f, 1.0f, 0.0f};
+        }
+    }
+
+    view.forward = forward;
+    view.up = up;
     return view;
 }

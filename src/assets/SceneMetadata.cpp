@@ -565,6 +565,10 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeCameraFollowRotationOffset:") ||
     StartsWith(line, "AttributeCameraFollowLockPosition:") ||
     StartsWith(line, "AttributeCameraFollowSmoothing:") ||
+    StartsWith(line, "AttributeCameraTrackPoints:") ||
+    StartsWith(line, "AttributeCameraTrackSpeed:") ||
+    StartsWith(line, "AttributeCameraTrackAcceleration:") ||
+    StartsWith(line, "AttributeCameraTrackRotationOffset:") ||
     StartsWith(line, "AttributePhysicsShape:") ||
     StartsWith(line, "AttributePhysicsDynamic:") ||
     StartsWith(line, "AttributePhysicsLockRotationX:") ||
@@ -1884,41 +1888,85 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseBool(ExtractValue(trimmed, "AttributeActive:"), current_attribute->camera.active);
         }
-        else if (StartsWith(trimmed, "AttributeCameraType:") && current_attribute != nullptr)
+        else if (StartsWith(trimmed, "AttributeCamera") && current_attribute != nullptr)
         {
-            const std::string type_name = TrimCopy(ExtractValue(trimmed, "AttributeCameraType:"));
-            if (type_name == "Follow")
+            // All camera attribute lines are dispatched inside this single
+            // branch so the outer parse chain stays shallow (MSVC C1061 limits
+            // how deeply if/else-if blocks may nest).
+            if (StartsWith(trimmed, "AttributeCameraType:"))
             {
-                current_attribute->camera.type = SceneObjectCameraType::Follow;
+                const std::string type_name = TrimCopy(ExtractValue(trimmed, "AttributeCameraType:"));
+                if (type_name == "Follow")
+                {
+                    current_attribute->camera.type = SceneObjectCameraType::Follow;
+                }
+                else if (type_name == "Track")
+                {
+                    current_attribute->camera.type = SceneObjectCameraType::Track;
+                }
+                else
+                {
+                    current_attribute->camera.type = SceneObjectCameraType::Fixed;
+                }
             }
-            else
+            else if (StartsWith(trimmed, "AttributeCameraFollowTarget:"))
             {
-                current_attribute->camera.type = SceneObjectCameraType::Fixed;
+                current_attribute->camera.follow_target_object = TrimCopy(ExtractValue(trimmed, "AttributeCameraFollowTarget:"));
             }
-        }
-        else if (StartsWith(trimmed, "AttributeCameraFollowTarget:") && current_attribute != nullptr)
-        {
-            current_attribute->camera.follow_target_object = TrimCopy(ExtractValue(trimmed, "AttributeCameraFollowTarget:"));
-        }
-        else if (StartsWith(trimmed, "AttributeCameraFollowOffset:") && current_attribute != nullptr)
-        {
-            ParseVector3(ExtractValue(trimmed, "AttributeCameraFollowOffset:"), current_attribute->camera.follow_offset);
-        }
-        else if (StartsWith(trimmed, "AttributeCameraFollowOrbit:") && current_attribute != nullptr)
-        {
-            ParseVector3(ExtractValue(trimmed, "AttributeCameraFollowOrbit:"), current_attribute->camera.follow_orbit);
-        }
-        else if (StartsWith(trimmed, "AttributeCameraFollowRotationOffset:") && current_attribute != nullptr)
-        {
-            ParseVector3(ExtractValue(trimmed, "AttributeCameraFollowRotationOffset:"), current_attribute->camera.follow_rotation_offset);
-        }
-        else if (StartsWith(trimmed, "AttributeCameraFollowLockPosition:") && current_attribute != nullptr)
-        {
-            ParseBool(ExtractValue(trimmed, "AttributeCameraFollowLockPosition:"), current_attribute->camera.follow_lock_position);
-        }
-        else if (StartsWith(trimmed, "AttributeCameraFollowSmoothing:") && current_attribute != nullptr)
-        {
-            ParseScalar(ExtractValue(trimmed, "AttributeCameraFollowSmoothing:"), current_attribute->camera.follow_smoothing);
+            else if (StartsWith(trimmed, "AttributeCameraFollowOffset:"))
+            {
+                ParseVector3(ExtractValue(trimmed, "AttributeCameraFollowOffset:"), current_attribute->camera.follow_offset);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraFollowOrbit:"))
+            {
+                ParseVector3(ExtractValue(trimmed, "AttributeCameraFollowOrbit:"), current_attribute->camera.follow_orbit);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraFollowRotationOffset:"))
+            {
+                ParseVector3(ExtractValue(trimmed, "AttributeCameraFollowRotationOffset:"), current_attribute->camera.follow_rotation_offset);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraFollowLockPosition:"))
+            {
+                ParseBool(ExtractValue(trimmed, "AttributeCameraFollowLockPosition:"), current_attribute->camera.follow_lock_position);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraFollowSmoothing:"))
+            {
+                ParseScalar(ExtractValue(trimmed, "AttributeCameraFollowSmoothing:"), current_attribute->camera.follow_smoothing);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraTrackPoints:"))
+            {
+                current_attribute->camera.track_points.clear();
+                const std::string points_value = ExtractValue(trimmed, "AttributeCameraTrackPoints:");
+                std::size_t cursor = 0;
+                while (cursor <= points_value.size())
+                {
+                    const std::size_t separator = points_value.find('|', cursor);
+                    const std::string token = points_value.substr(
+                        cursor, separator == std::string::npos ? std::string::npos : separator - cursor);
+                    SceneVector3 point{};
+                    if (ParseVector3(TrimCopy(token), point))
+                    {
+                        current_attribute->camera.track_points.push_back(point);
+                    }
+                    if (separator == std::string::npos)
+                    {
+                        break;
+                    }
+                    cursor = separator + 1;
+                }
+            }
+            else if (StartsWith(trimmed, "AttributeCameraTrackSpeed:"))
+            {
+                ParseScalar(ExtractValue(trimmed, "AttributeCameraTrackSpeed:"), current_attribute->camera.track_speed);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraTrackAcceleration:"))
+            {
+                ParseScalar(ExtractValue(trimmed, "AttributeCameraTrackAcceleration:"), current_attribute->camera.track_acceleration);
+            }
+            else if (StartsWith(trimmed, "AttributeCameraTrackRotationOffset:"))
+            {
+                ParseVector3(ExtractValue(trimmed, "AttributeCameraTrackRotationOffset:"), current_attribute->camera.track_rotation_offset);
+            }
         }
         else if (StartsWith(trimmed, "AttributePhysicsShape:") && current_attribute != nullptr)
         {
@@ -2884,7 +2932,15 @@ bool SetSceneObjectAttributeStringValue(
 
 bool SetSceneObjectAttributeCameraType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectCameraType type)
 {
-    const std::string value = (type == SceneObjectCameraType::Follow) ? "Follow" : "Fixed";
+    std::string value = "Fixed";
+    if (type == SceneObjectCameraType::Follow)
+    {
+        value = "Follow";
+    }
+    else if (type == SceneObjectCameraType::Track)
+    {
+        value = "Track";
+    }
     return SetSceneObjectAttributeStringValue("AttributeCameraType", scene_path, object_name, attribute_index, value);
 }
 
@@ -2916,6 +2972,35 @@ bool SetSceneObjectAttributeCameraFollowLockPosition(const std::filesystem::path
 bool SetSceneObjectAttributeCameraFollowSmoothing(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float follow_smoothing)
 {
     return SetSceneObjectAttributeScalar("AttributeCameraFollowSmoothing", scene_path, object_name, attribute_index, follow_smoothing);
+}
+
+bool SetSceneObjectAttributeCameraTrackPoints(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::vector<SceneVector3>& track_points)
+{
+    std::string value;
+    for (std::size_t index = 0; index < track_points.size(); ++index)
+    {
+        if (index != 0)
+        {
+            value += " | ";
+        }
+        value += FormatVector3(track_points[index]);
+    }
+    return SetSceneObjectAttributeStringValue("AttributeCameraTrackPoints", scene_path, object_name, attribute_index, value);
+}
+
+bool SetSceneObjectAttributeCameraTrackSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float track_speed)
+{
+    return SetSceneObjectAttributeScalar("AttributeCameraTrackSpeed", scene_path, object_name, attribute_index, track_speed);
+}
+
+bool SetSceneObjectAttributeCameraTrackAcceleration(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float track_acceleration)
+{
+    return SetSceneObjectAttributeScalar("AttributeCameraTrackAcceleration", scene_path, object_name, attribute_index, track_acceleration);
+}
+
+bool SetSceneObjectAttributeCameraTrackRotationOffset(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& track_rotation_offset)
+{
+    return SetSceneObjectAttributeVector3Value("AttributeCameraTrackRotationOffset", scene_path, object_name, attribute_index, track_rotation_offset);
 }
 
 bool SetSceneObjectAttributePhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectPhysicsShape shape)

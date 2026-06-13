@@ -691,6 +691,14 @@ private:
     // makes the lag exactly v*tau independent of the dt sequence.
     std::array<float, 3> follow_camera_raw_target_prev_ = {0.0f, 0.0f, 0.0f};
     std::array<float, 3> follow_camera_target_velocity_ = {0.0f, 0.0f, 0.0f};
+    // Track-camera runtime motion state. track_camera_distance_ is the arc
+    // length traveled along the spline; track_camera_speed_ ramps up to the
+    // camera's cruise speed via its acceleration. Reset (via an empty key)
+    // whenever the active Track camera changes so it restarts from point 0.
+    float track_camera_distance_ = 0.0f;
+    float track_camera_speed_ = 0.0f;
+    std::string track_camera_key_;
+    std::uint64_t track_camera_last_tick_counter_ = 0;
     // Last frame's resolved world matrices for the active follow target.
     // Used to build the camera's `prev_view_projection` from
     // (target_prev_position + current offset), guaranteeing the followed

@@ -3367,6 +3367,34 @@ void SceneViewportRenderer::RenderUi(
         gizmo_object = &fallback_gizmo_object;
     }
 
+    // Detect a selected Track camera. When one of its control points is selected
+    // for editing, the gizmo drives that point instead of the camera object, so
+    // suppress the normal object gizmo this frame.
+    const SceneObjectCameraAttributes* selected_track_camera = nullptr;
+    std::size_t selected_track_camera_attribute_index = 0;
+    if (selected_scene_object_metadata != nullptr)
+    {
+        for (std::size_t i = 0; i < selected_scene_object_metadata->attributes.size(); ++i)
+        {
+            const SceneObjectAttribute& attr = selected_scene_object_metadata->attributes[i];
+            if (attr.kind == SceneObjectAttributeKind::Camera &&
+                attr.camera.type == SceneObjectCameraType::Track)
+            {
+                selected_track_camera = &attr.camera;
+                selected_track_camera_attribute_index = i;
+                break;
+            }
+        }
+    }
+    const bool track_point_editing =
+        selected_track_camera != nullptr &&
+        state.selected_track_point_index >= 0 &&
+        state.selected_track_point_index < static_cast<int>(selected_track_camera->track_points.size());
+    if (track_point_editing)
+    {
+        gizmo_object = nullptr;
+    }
+
     if (gizmo_object != nullptr)
     {
         constexpr float kGizmoTransformEpsilon = 0.0005f;
@@ -3462,6 +3490,135 @@ void SceneViewportRenderer::RenderUi(
             gizmo_preview_write_position_ = false;
             gizmo_preview_write_rotation_ = false;
             gizmo_preview_write_scale_ = false;
+        }
+    }
+
+    // --- Track camera path editing ----------------------------------------
+    // Draw the Catmull-Rom path of the selected Track camera, its clickable
+    // control-point handles, and a translate gizmo on the selected point. The
+    // path is sampled from the SAME curve the runtime uses, so the editor
+    // preview matches play mode. Points are world-space, so the gizmo matrix is
+    // a pure translation. A preview-then-commit pattern keeps disk writes to the
+    // end of a drag (mirrors the object gizmo's gizmo_preview_* handling).
+    if (selected_track_camera != nullptr)
+    {
+        const std::vector<SceneVector3>& points = selected_track_camera->track_points;
+
+        if (points.size() >= 2)
+        {
+            const float total_length = TrackTotalLength(points);
+            constexpr int kPathSegments = 96;
+            const ImU32 path_color = IM_COL32(120, 200, 255, 230);
+            Vec3 prev_world = ToVec3(SampleTrackAtDistance(points, 0.0f).position);
+            for (int seg = 1; seg <= kPathSegments; ++seg)
+            {
+                const float d = total_length * (static_cast<float>(seg) / static_cast<float>(kPathSegments));
+                const Vec3 cur_world = ToVec3(SampleTrackAtDistance(points, d).position);
+                DrawProjectedSegment(draw_list, view_projection_.data(), min, max, prev_world, cur_world, path_color, 2.0f);
+                prev_world = cur_world;
+            }
+        }
+
+        constexpr float kPointHandleRadius = 6.0f;
+        constexpr float kPointHitRadius = 12.0f;
+        const ImVec2 track_mouse = ImGui::GetMousePos();
+        int hovered_point = -1;
+        std::vector<ImVec2> point_screens(points.size(), ImVec2(0.0f, 0.0f));
+        std::vector<bool> point_visible(points.size(), false);
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            const Vec3 world = Vec3{points[i][0], points[i][1], points[i][2]};
+            ImVec2 screen;
+            if (ProjectWorldPointToScreen(world, view_projection_.data(), min, max, screen))
+            {
+                point_screens[i] = screen;
+                point_visible[i] = true;
+                const float dx = track_mouse.x - screen.x;
+                const float dy = track_mouse.y - screen.y;
+                if (hovered_point < 0 && std::sqrt(dx * dx + dy * dy) <= kPointHitRadius)
+                {
+                    hovered_point = static_cast<int>(i);
+                }
+            }
+        }
+
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            if (!point_visible[i])
+            {
+                continue;
+            }
+            const bool is_selected = state.selected_track_point_index == static_cast<int>(i);
+            const bool is_hovered = hovered_point == static_cast<int>(i);
+            ImU32 color = IM_COL32(120, 200, 255, 255);
+            if (is_selected)
+            {
+                color = IM_COL32(255, 220, 120, 255);
+            }
+            else if (is_hovered)
+            {
+                color = IM_COL32(200, 235, 255, 255);
+            }
+            draw_list->AddCircleFilled(point_screens[i], kPointHandleRadius, color, 16);
+            draw_list->AddCircle(point_screens[i], kPointHandleRadius + 1.5f, IM_COL32(20, 30, 40, 200), 16, 1.5f);
+        }
+
+        const bool gizmo_busy = ImGuizmo::IsOver() || ImGuizmo::IsUsing();
+        if (mouse_over_viewport && !gizmo_busy && hovered_point >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            state.selected_track_point_index = hovered_point;
+        }
+
+        if (track_point_editing)
+        {
+            const int idx = state.selected_track_point_index;
+            SceneVector3 current_point = points[static_cast<std::size_t>(idx)];
+            if (track_point_preview_active_ &&
+                track_point_preview_object_name_ == selected_scene_object_metadata->name &&
+                track_point_preview_index_ == idx)
+            {
+                current_point = track_point_preview_point_;
+            }
+
+            float point_matrix[16];
+            SetIdentity(point_matrix);
+            point_matrix[12] = current_point[0];
+            point_matrix[13] = current_point[1];
+            point_matrix[14] = current_point[2];
+
+            float track_delta_matrix[16];
+            SetIdentity(track_delta_matrix);
+            const bool manipulated = ImGuizmo::Manipulate(
+                view_matrix, projection_matrix, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, point_matrix, track_delta_matrix, nullptr);
+            if (manipulated)
+            {
+                track_point_preview_active_ = true;
+                track_point_preview_object_name_ = selected_scene_object_metadata->name;
+                track_point_preview_attribute_index_ = selected_track_camera_attribute_index;
+                track_point_preview_index_ = idx;
+                track_point_preview_point_ = {point_matrix[12], point_matrix[13], point_matrix[14]};
+            }
+
+            if (track_point_preview_active_ && !ImGuizmo::IsUsing())
+            {
+                std::vector<SceneVector3> next_points = points;
+                if (track_point_preview_index_ >= 0 &&
+                    track_point_preview_index_ < static_cast<int>(next_points.size()))
+                {
+                    next_points[static_cast<std::size_t>(track_point_preview_index_)] = track_point_preview_point_;
+                    if (SetSceneObjectAttributeCameraTrackPoints(
+                            state.active_scene_path,
+                            track_point_preview_object_name_,
+                            track_point_preview_attribute_index_,
+                            next_points))
+                    {
+                        state.request_files_tree_refresh = true;
+                    }
+                }
+                track_point_preview_active_ = false;
+                track_point_preview_object_name_.clear();
+                track_point_preview_index_ = -1;
+            }
         }
     }
 

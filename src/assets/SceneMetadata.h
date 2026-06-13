@@ -54,6 +54,7 @@ enum class SceneObjectCameraType
 {
     Fixed,
     Follow,
+    Track,
 };
 
 enum class SceneObjectAudioPlayMode
@@ -140,6 +141,20 @@ struct SceneObjectCameraAttributes
     // (camera snaps to target+offset every frame). Larger values = laggier
     // chase camera.
     float follow_smoothing = 0.0f;
+
+    // --- Track camera (type == Track) -------------------------------------
+    // World-space control points defining the path. A Catmull-Rom spline is
+    // fitted through every point (the path passes through each one). A Track
+    // camera needs at least 2 points; the editor seeds 2 by default.
+    std::vector<SceneVector3> track_points;
+    // Cruise speed in world units per second.
+    float track_speed = 5.0f;
+    // Acceleration in world units per second^2 used to ramp from 0 up to
+    // track_speed when the camera activates. 0 = instantly at full speed.
+    float track_acceleration = 0.0f;
+    // Additional Euler rotation (XYZ, degrees) applied on top of the path
+    // travel direction (the camera faces along the tangent by default).
+    SceneVector3 track_rotation_offset = {0.0f, 0.0f, 0.0f};
 };
 
 struct SceneObjectRigidbodyAttributes
@@ -400,6 +415,10 @@ bool SetSceneObjectAttributeCameraFollowOrbit(const std::filesystem::path& scene
 bool SetSceneObjectAttributeCameraFollowRotationOffset(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& follow_rotation_offset);
 bool SetSceneObjectAttributeCameraFollowLockPosition(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool follow_lock_position);
 bool SetSceneObjectAttributeCameraFollowSmoothing(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float follow_smoothing);
+bool SetSceneObjectAttributeCameraTrackPoints(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::vector<SceneVector3>& track_points);
+bool SetSceneObjectAttributeCameraTrackSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float track_speed);
+bool SetSceneObjectAttributeCameraTrackAcceleration(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float track_acceleration);
+bool SetSceneObjectAttributeCameraTrackRotationOffset(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneVector3& track_rotation_offset);
 bool SetSceneObjectAttributePhysicsShape(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectPhysicsShape shape);
 bool SetSceneObjectAttributePhysicsDynamic(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool is_dynamic);
 bool SetSceneObjectAttributePhysicsLockRotationX(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool locked);
