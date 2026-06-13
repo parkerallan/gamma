@@ -6021,13 +6021,14 @@ bool RuntimeRenderer::BuildQueuedScene(
             follow_camera_smoothed_position_ = {camera_position.x, camera_position.y, camera_position.z};
             follow_camera_smoothed_forward_  = {camera_forward.x,  camera_forward.y,  camera_forward.z};
             follow_camera_smoothed_up_       = {camera_up.x,       camera_up.y,       camera_up.z};
+            follow_camera_raw_target_prev_   = {camera_position.x, camera_position.y, camera_position.z};
+            follow_camera_target_velocity_   = {0.0f, 0.0f, 0.0f};
             follow_camera_smoothed_position_valid_ = follow_smoothing_active;
             follow_camera_smoothed_key_ = smoothing_key;
             follow_camera_last_tick_counter_ = now_perf_ticks;
         }
         else
         {
-            // Exponential ease: alpha = 1 - exp(-dt / tau).
             const float dt = (perf_freq != 0 && now_perf_ticks > follow_camera_last_tick_counter_)
                 ? static_cast<float>(static_cast<double>(now_perf_ticks - follow_camera_last_tick_counter_)
                                      / static_cast<double>(perf_freq))
@@ -6036,11 +6037,96 @@ bool RuntimeRenderer::BuildQueuedScene(
             const float dt_clamped = std::clamp(dt, 0.0f, 0.25f);
             const float tau = (std::max)(0.0001f, active_camera.follow_smoothing);
             const float alpha = 1.0f - std::exp(-dt_clamped / tau);
+            const float decay = 1.0f - alpha; // exp(-dt / tau)
 
-            follow_camera_smoothed_position_[0] += (camera_position.x - follow_camera_smoothed_position_[0]) * alpha;
-            follow_camera_smoothed_position_[1] += (camera_position.y - follow_camera_smoothed_position_[1]) * alpha;
-            follow_camera_smoothed_position_[2] += (camera_position.z - follow_camera_smoothed_position_[2]) * alpha;
+            // ---- Position: ramp-exact exponential smoothing. ----
+            // A plain "ease toward the current sample" update has a
+            // steady-state lag of ~v*tau that depends on frame dt at first
+            // order, so ordinary frame-time jitter (scheduler wake noise,
+            // vsync blocking) modulates the lag by ~v*ddt each frame — at
+            // gameplay speeds the player visibly vibrates against the
+            // camera. The closed-form solution of cam' = (p(t) - cam)/tau
+            // for a target moving linearly between the previous and current
+            // samples,
+            //   cam1 = p1 - v*tau + (cam0 - p0 + v*tau) * exp(-dt/tau)
+            // has a lag of exactly v*tau for any dt sequence: the deviation
+            // from the ideal lag point obeys g1 = g0 * exp(-dt/tau) and
+            // decays unconditionally, eliminating the jitter while behaving
+            // identically for stationary targets.
+            //
+            // The velocity MUST come from the physics fixed-step snapshots,
+            // (curr - prev) / fixed_step: the interpolated target position
+            // advances at exactly that rate between steps, and the quotient
+            // involves no measured frame time. Estimating it as
+            // delta_position / frame_dt instead is subtly wrong — the
+            // position delta was produced by the PHYSICS block's dt while
+            // the divisor is the CAMERA block's dt, two QPC reads taken at
+            // different points in the frame; their mismatch lands in the
+            // v*tau lag term amplified by tau/dt (~10x), which shakes the
+            // camera harder than the plain-ease artifact this filter
+            // replaces.
+            float target_velocity[3] = {0.0f, 0.0f, 0.0f};
+            bool have_exact_velocity = false;
+            {
+                const auto vcurr = physics_object_transforms_curr_.find(active_camera.follow_target_object);
+                const auto vprev = physics_object_transforms_prev_.find(active_camera.follow_target_object);
+                if (vcurr != physics_object_transforms_curr_.end() &&
+                    vprev != physics_object_transforms_prev_.end())
+                {
+                    constexpr float kPhysicsFixedStepSeconds = 1.0f / 120.0f;
+                    const float step_delta[3] = {
+                        vcurr->second.position[0] - vprev->second.position[0],
+                        vcurr->second.position[1] - vprev->second.position[1],
+                        vcurr->second.position[2] - vprev->second.position[2],
+                    };
+                    const float step_delta_sq =
+                        step_delta[0] * step_delta[0] +
+                        step_delta[1] * step_delta[1] +
+                        step_delta[2] * step_delta[2];
+                    // A huge single-step jump is a teleport/respawn, not
+                    // motion: suppress the velocity term so the camera
+                    // carries its current lag across the jump instead of
+                    // overshooting backward by v*tau.
+                    constexpr float kTeleportStepDistance = 2.0f;
+                    if (step_delta_sq < kTeleportStepDistance * kTeleportStepDistance)
+                    {
+                        target_velocity[0] = step_delta[0] / kPhysicsFixedStepSeconds;
+                        target_velocity[1] = step_delta[1] / kPhysicsFixedStepSeconds;
+                        target_velocity[2] = step_delta[2] / kPhysicsFixedStepSeconds;
+                        have_exact_velocity = true;
+                    }
+                }
+            }
+            follow_camera_target_velocity_ = {target_velocity[0], target_velocity[1], target_velocity[2]};
 
+            const float raw_target[3] = {camera_position.x, camera_position.y, camera_position.z};
+            if (have_exact_velocity)
+            {
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const float lag_point = raw_target[axis] - target_velocity[axis] * tau;
+                    const float prev_lag_point = follow_camera_raw_target_prev_[axis] - target_velocity[axis] * tau;
+                    follow_camera_smoothed_position_[axis] =
+                        lag_point + (follow_camera_smoothed_position_[axis] - prev_lag_point) * decay;
+                }
+            }
+            else
+            {
+                // Non-physics target (animated/scripted) or teleport frame:
+                // the ramp formula with v=0 would track the target 1:1 with
+                // no easing, so keep the original ease-toward-sample update
+                // here.
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    follow_camera_smoothed_position_[axis] +=
+                        (raw_target[axis] - follow_camera_smoothed_position_[axis]) * alpha;
+                }
+            }
+            follow_camera_raw_target_prev_ = {raw_target[0], raw_target[1], raw_target[2]};
+
+            // Forward/up stay on the plain ease: for a follow camera under
+            // steady motion the look direction is constant (rigid geometry),
+            // so the dt-jitter term that plagued the position is absent.
             follow_camera_smoothed_forward_[0] += (camera_forward.x - follow_camera_smoothed_forward_[0]) * alpha;
             follow_camera_smoothed_forward_[1] += (camera_forward.y - follow_camera_smoothed_forward_[1]) * alpha;
             follow_camera_smoothed_forward_[2] += (camera_forward.z - follow_camera_smoothed_forward_[2]) * alpha;
@@ -6399,6 +6485,14 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         // Cap the per-frame delta. A periodic editor hitch can otherwise dump
         // a huge dt into the accumulator and cause physics to "catch up" with
         // many steps, producing a visible warp.
+        //
+        // NOTE: feed the accumulator the RAW measured dt. Filtering it (an
+        // EMA was tried) desynchronizes the player's render-time base from
+        // the follow camera's smoothing dt and makes the player visibly
+        // vibrate against the camera. The dt-jitter sensitivity that
+        // motivated the filter lives in the camera smoothing filter and is
+        // fixed there (see the ramp-exact follow smoothing in
+        // BuildQueuedScene).
         constexpr float kMaxFrameDt = 1.0f / 30.0f;
         const float frame_dt = (std::min)(raw_phys_dt, kMaxFrameDt);
 
@@ -6860,6 +6954,34 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
         };
     }
 
+    // Clock-free world velocity of the owning object for the jiggle springs'
+    // trailing force: physics snapshot delta over the fixed step, the same
+    // construction as the follow-camera smoothing (no measured frame time,
+    // so no clock-mismatch jitter at gameplay speeds). Zero for
+    // non-physics-driven objects and across teleports.
+    std::array<float, 3> object_velocity = {0.0f, 0.0f, 0.0f};
+    {
+        const auto vcurr = physics_object_transforms_curr_.find(object.name);
+        const auto vprev = physics_object_transforms_prev_.find(object.name);
+        if (vcurr != physics_object_transforms_curr_.end() &&
+            vprev != physics_object_transforms_prev_.end())
+        {
+            constexpr float kPhysicsFixedStepSeconds = 1.0f / 120.0f;
+            const float dx = vcurr->second.position[0] - vprev->second.position[0];
+            const float dy = vcurr->second.position[1] - vprev->second.position[1];
+            const float dz = vcurr->second.position[2] - vprev->second.position[2];
+            constexpr float kTeleportStepDistance = 2.0f;
+            if (dx * dx + dy * dy + dz * dz < kTeleportStepDistance * kTeleportStepDistance)
+            {
+                object_velocity = {
+                    dx / kPhysicsFixedStepSeconds,
+                    dy / kPhysicsFixedStepSeconds,
+                    dz / kPhysicsFixedStepSeconds,
+                };
+            }
+        }
+    }
+
     const bool sampled = (bone_modifiers != nullptr)
         ? SampleClipBoneMatricesWithPhysics(
               *anim_cache_entry,
@@ -6868,6 +6990,7 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
               animation_last_delta_time_seconds_,
               *bone_modifiers,
               effective_model_matrix,
+              object_velocity,
               *runtime_state,
               bone_matrices,
               has_collision_modifier ? &bone_world_by_name : nullptr,

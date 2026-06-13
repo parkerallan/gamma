@@ -142,6 +142,7 @@ bool SampleClipBoneMatricesWithPhysics(
     float frame_delta_seconds,
     const std::vector<AnimatorBoneModifier>& modifiers,
     const std::array<float, 16>& object_world_matrix,
+    const std::array<float, 3>& object_velocity,
     RuntimeRenderer::RuntimeAnimatorState& runtime_state,
     std::vector<aiMatrix4x4>& out_bone_matrices,
     std::unordered_map<std::string, std::array<float, 16>>* out_bone_world_by_name,
@@ -265,6 +266,30 @@ bool SampleClipBoneMatricesWithPhysics(
     const std::array<float, 3> bz{M[8] * inv_sz, M[9] * inv_sz, M[10] * inv_sz};
     const std::array<float, 3> origin{M[12], M[13], M[14]};
 
+    // Per-frame rigid translation of the owning object. The spring state is
+    // carried along with it (sim_pos += shift) BEFORE integrating, so the
+    // object's own motion is never an excitation the spring has to chase.
+    // Chasing it is what caused jiggle bones to vibrate on a moving player:
+    // the spring integrates on quantized accumulator time (steps * 1/120s,
+    // including frames that integrate zero steps) while the target advances
+    // on measured wall time, and the oscillating phase between the two
+    // clocks reads as speed-proportional shaking. With the state carried,
+    // the spring only chases animation-relative motion (the part jiggle is
+    // for), and the steady trailing offset under uniform travel is restored
+    // by an explicit force from `object_velocity` (clock-free, from the
+    // physics fixed-step snapshots) inside simulate_bone.
+    std::array<float, 3> object_shift{0.0f, 0.0f, 0.0f};
+    if (runtime_state.jiggle_prev_object_origin_valid)
+    {
+        object_shift = {
+            origin[0] - runtime_state.jiggle_prev_object_origin[0],
+            origin[1] - runtime_state.jiggle_prev_object_origin[1],
+            origin[2] - runtime_state.jiggle_prev_object_origin[2],
+        };
+    }
+    runtime_state.jiggle_prev_object_origin = origin;
+    runtime_state.jiggle_prev_object_origin_valid = true;
+
     auto model_point_to_world = [&](float mx, float my, float mz) -> std::array<float, 3> {
         return {
             bx[0] * mx * sx + by[0] * my * sy + bz[0] * mz * sz + origin[0],
@@ -320,6 +345,13 @@ bool SampleClipBoneMatricesWithPhysics(
             return SimulateBoneResult::Skip;
         }
 
+        // Carry the spring along with the object's rigid translation (see
+        // the object_shift comment above): uniform object motion must not
+        // appear as spring excitation.
+        s.sim_pos[0] += object_shift[0];
+        s.sim_pos[1] += object_shift[1];
+        s.sim_pos[2] += object_shift[2];
+
         const float strength = std::clamp(m.strength, 0.0f, 2.0f);
 
         if (steps > 0)
@@ -335,6 +367,16 @@ bool SampleClipBoneMatricesWithPhysics(
             {
                 accel[a] = (target_world[a] - s.sim_pos[a]) * stiff_k / mass;
                 accel[a] += m.gravity_dir[a] * m.gravity_scale * 9.81f;
+                // Trailing force from the object's clock-free physics
+                // velocity. In the old world-space simulation the steady
+                // offset under uniform travel came from damping/drag acting
+                // on the spring's matched velocity; with the state carried
+                // by object_shift the spring's velocity no longer contains
+                // the travel component, so the same steady offset
+                // ((damp_k + drag_k) * v * m / k behind the motion) is
+                // produced explicitly. Velocity changes (start/stop/turn)
+                // step this force and swing the spring exactly as before.
+                accel[a] -= (damp_k + drag_k) * object_velocity[a];
             }
             for (int a = 0; a < 3; ++a)
             {

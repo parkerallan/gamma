@@ -37,6 +37,11 @@ bool SampleClipBoneMatricesWithPhysics(
     float frame_delta_seconds,
     const std::vector<AnimatorBoneModifier>& modifiers,
     const std::array<float, 16>& object_world_matrix,
+    // World-space linear velocity of the owning object (units/s), taken from
+    // the physics fixed-step snapshots ((curr - prev) / step) so it contains
+    // no measured frame time. Drives the steady "trailing" offset of jiggle
+    // springs under uniform motion; pass zeros for non-physics objects.
+    const std::array<float, 3>& object_velocity,
     RuntimeRenderer::RuntimeAnimatorState& runtime_state,
     std::vector<aiMatrix4x4>& out_bone_matrices,
     // Optional: when non-null, filled with the model-space world transform

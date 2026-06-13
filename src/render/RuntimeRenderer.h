@@ -314,6 +314,12 @@ public:
         // so springs don't reset when the user nudges parameters.
         std::vector<JiggleSimEntry> jiggle_states;
         float physics_accumulator_seconds = 0.0f;
+        // Object world origin at the previous jiggle update. The jiggle
+        // springs carry their state along with the object's frame-to-frame
+        // rigid translation so uniform motion cannot excite them through
+        // the quantized-substep clock (see SampleClipBoneMatricesWithPhysics).
+        std::array<float, 3> jiggle_prev_object_origin = {0.0f, 0.0f, 0.0f};
+        bool jiggle_prev_object_origin_valid = false;
         // Rigidbody bone-collider sweep state (prev resolved box centers).
         std::vector<BoneSweepEntry> bone_sweep_states;
     };
@@ -675,6 +681,16 @@ private:
     bool follow_camera_smoothed_position_valid_ = false;
     std::string follow_camera_smoothed_key_;
     std::uint64_t follow_camera_last_tick_counter_ = 0;
+    // Previous frame's RAW (unsmoothed) follow target position and the
+    // per-frame target velocity estimate derived from it. Used by the
+    // ramp-exact smoothing update: a plain "ease toward the current
+    // sample" filter has a steady-state lag of v*tau with a first-order
+    // dependence on frame dt, so normal frame-time jitter modulates the
+    // lag by ~v*ddt and the camera visibly vibrates against a smoothly
+    // moving player. The closed-form update for a linearly moving target
+    // makes the lag exactly v*tau independent of the dt sequence.
+    std::array<float, 3> follow_camera_raw_target_prev_ = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> follow_camera_target_velocity_ = {0.0f, 0.0f, 0.0f};
     // Last frame's resolved world matrices for the active follow target.
     // Used to build the camera's `prev_view_projection` from
     // (target_prev_position + current offset), guaranteeing the followed
