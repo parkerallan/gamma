@@ -16,8 +16,11 @@
 #include "render/SkyboxRenderer.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -376,6 +379,27 @@ private:
 
     const CachedModelAssetEntry& GetModelAssetEntry(const std::filesystem::path& path);
     const SceneMetadata& GetSceneMetadata();
+    // Tears down the current scene's runtime state (script instances,
+    // subscriptions, timers, overrides, queued objects, physics, timing) and
+    // switches scene_path_ / active camera to the supplied scene. Shared by the
+    // instant loading-scene switch and the final target swap in async loads.
+    void SwapToScene(const std::filesystem::path& scene_file,
+                     const SceneMetadata& scene_metadata,
+                     const ActiveSceneCameraSelection& camera);
+    // Begins an async load for a pending World.LoadScene request: validates the
+    // target cheaply (metadata + camera) on the main thread, dispatches a single
+    // background worker to parse models + read audio/video bytes, and switches to
+    // the loading scene (if any) immediately. No-op when no request is pending or
+    // a load is already in progress. On a validation failure it logs and keeps
+    // the current scene untouched.
+    void BeginAsyncSceneLoad();
+    // Polls an in-flight async load; when the worker is done it seeds the parsed
+    // assets into the runtime caches and begins the GPU warm-up phase.
+    void PollAsyncSceneLoad();
+    // During the warm-up phase, uploads a bounded number of the target scene's
+    // models to the GPU each frame (so the loading screen keeps rendering), then
+    // swaps to the target once every model is resident.
+    void WarmTargetScene();
     void ReleaseBuffer(GpuBuffer& buffer);
     void ReleaseTexture(GpuTexture& texture);
     void ReleaseMeshCacheEntry(GpuMeshCacheEntry& entry);
@@ -611,6 +635,8 @@ private:
     static int LuaWorldSetInterval(lua_State* lua_state);
     static int LuaWorldClearTimer(lua_State* lua_state);
         static int LuaWorldLoadScene(lua_State* lua_state);
+    static int LuaWorldGetSceneLoadProgress(lua_State* lua_state);
+    static int LuaWorldIsSceneLoading(lua_State* lua_state);
     static int LuaPhysicsRaycast(lua_State* lua_state);
     static int LuaPhysicsSetVelocity(lua_State* lua_state);
     static int LuaPhysicsGetVelocity(lua_State* lua_state);
@@ -808,7 +834,43 @@ private:
     std::uint64_t script_last_tick_ms_ = 0;
     std::uint64_t script_session_start_ms_ = 0;
     std::vector<QueuedSceneObject> queued_objects_;
+
+    // --- World.LoadScene async streaming --------------------------------
+    // A model parsed off the main thread, ready to seed into model_asset_cache_.
+    struct PreloadedSceneModel
+    {
+        std::filesystem::path path;
+        std::filesystem::file_time_type write_time = std::filesystem::file_time_type::min();
+        ModelAsset asset;
+    };
+    // Result of the background asset worker for one async scene load.
+    struct PreloadedSceneAssets
+    {
+        std::vector<PreloadedSceneModel> models;
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> audio_bytes;
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> video_bytes;
+    };
+    // Set by World.LoadScene; consumed by BeginAsyncSceneLoad on the next frame.
     std::string pending_scene_load_path_;
+    std::string pending_scene_load_loading_scene_;
+    // In-flight async load state.
+    bool scene_load_in_progress_ = false;
+    std::future<PreloadedSceneAssets> pending_async_scene_load_;
+    std::filesystem::path async_load_target_path_;
+    SceneMetadata async_load_target_metadata_{};
+    ActiveSceneCameraSelection async_load_target_camera_{};
+    // Resolved model cache keys for the target, used to warm the GPU mesh cache
+    // incrementally (a few per frame) before swapping so the loading screen never
+    // freezes on a one-frame upload of every model.
+    std::vector<std::filesystem::path> async_load_model_keys_;
+    bool scene_load_warming_ = false;
+    std::size_t async_load_warm_index_ = 0;
+    // Progress counters updated by the worker thread; read on the main thread to
+    // expose World.GetSceneLoadProgress().
+    std::shared_ptr<std::atomic<int>> async_load_models_done_;
+    int async_load_models_total_ = 0;
+    float scene_load_progress_ = 1.0f;
+
     RuntimePerformanceStats performance_stats_{};
     bool first_frame_logged_ = false;
 };

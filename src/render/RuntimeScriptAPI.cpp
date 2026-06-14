@@ -1350,8 +1350,49 @@ int RuntimeRenderer::LuaWorldLoadScene(lua_State* lua_state)
         return luaL_error(lua_state, "World.LoadScene requires a non-empty scene name");
     }
 
+    // Optional second argument: an options table. Currently supports
+    //   loadingScene = "Name"  -- a lightweight scene shown while the target
+    //                             streams its assets on a background thread.
+    std::string loading_scene;
+    if (lua_gettop(lua_state) >= 2 && lua_istable(lua_state, 2))
+    {
+        lua_getfield(lua_state, 2, "loadingScene");
+        if (lua_isstring(lua_state, -1))
+        {
+            loading_scene = lua_tostring(lua_state, -1);
+        }
+        lua_pop(lua_state, 1);
+    }
+
     renderer->pending_scene_load_path_ = scene_name;
+    renderer->pending_scene_load_loading_scene_ = std::move(loading_scene);
     return 0;
+}
+
+int RuntimeRenderer::LuaWorldGetSceneLoadProgress(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    // 0..1 while a load is in flight; 1 when idle (nothing loading).
+    const float progress = renderer->scene_load_in_progress_ ? renderer->scene_load_progress_ : 1.0f;
+    lua_pushnumber(lua_state, static_cast<lua_Number>(progress));
+    return 1;
+}
+
+int RuntimeRenderer::LuaWorldIsSceneLoading(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+
+    lua_pushboolean(lua_state, renderer->scene_load_in_progress_ ? 1 : 0);
+    return 1;
 }
 
 int RuntimeRenderer::LuaInputWasKeyPressed(lua_State* lua_state)

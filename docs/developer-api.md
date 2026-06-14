@@ -370,6 +370,42 @@ Quick summary: Emits an event to all subscribers.
 World.Emit("Damage", "10")
 ```
 
+#### `World.LoadScene(sceneName[, options])`
+Quick summary: Switches the running game to another scene. The target scene's assets (models, audio, video) are parsed/read on a **background thread** so the main loop stays responsive — no "not responding" freeze, and the standalone game no longer exits while a large scene loads. `sceneName` may omit the `.scene` extension and is resolved relative to the project's `Scenes/` directory (absolute paths are also accepted).
+
+`options` is an optional table:
+- `loadingScene` — name of a lightweight scene to display **immediately** while the target streams in the background. Author it like any other scene (a `Color2D`/`Image2D` background, a `Text2D`, and a script that animates). It is swapped in instantly (its own assets should be small) and replaced by the target once streaming completes.
+
+```lua
+-- Stream a large scene while showing a loading screen.
+World.LoadScene("Level2", { loadingScene = "Loading" })
+
+-- Without a loading scene: the current scene keeps rendering until the
+-- target is ready, then swaps in.
+World.LoadScene("Level2")
+```
+
+Notes:
+- If the target scene fails to parse or has no active camera, the call is logged and the **current scene keeps running** (it is not a fatal error).
+- The request is honored on the next frame; calling it again while a load is in progress queues the latest request.
+
+#### `World.IsSceneLoading()`
+Quick summary: Returns `true` while a `World.LoadScene` target is still streaming in the background.
+
+```lua
+if World.IsSceneLoading() then ... end
+```
+
+#### `World.GetSceneLoadProgress()`
+Quick summary: Returns the current load progress as a number in `0..1` (fraction of the target scene's models parsed so far), or `1` when nothing is loading. Use it from a loading scene's `OnUpdate` to drive a progress bar.
+
+```lua
+function OnUpdate(self, dt)
+    local p = World.GetSceneLoadProgress()   -- 0..1
+    Engine.SetObjectScale("ProgressBar", p, 1.0, 1.0)
+end
+```
+
 #### `World.Spawn(name, modelPath, x, y, z, scriptPath)`
 Quick summary: Spawns a runtime object and optionally attaches a script.
 

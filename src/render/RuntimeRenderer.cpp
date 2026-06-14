@@ -39,6 +39,36 @@ namespace
 {
 constexpr float kPi = 3.1415926535f;
 
+// Name of the synthetic camera injected into 2D-only scenes (see
+// EnsureActiveSceneCamera). Internal — not authored in any .scene file.
+constexpr const char* kSyntheticCameraObjectName = "__RuntimeDefaultCamera__";
+
+// 2D-only scenes (loading screens, menus, HUD-only scenes) carry no Camera
+// object, but the runtime render path requires an active camera every frame.
+// When a scene has none, append a synthetic fixed camera at the origin
+// in-memory so the scene can still be the active scene: the 3D pass renders an
+// empty view and the 2D overlay (Color2D/Image2D/Text2D) draws on top. Scenes
+// that already have an active camera are returned unchanged.
+ActiveSceneCameraSelection EnsureActiveSceneCamera(SceneMetadata& scene_metadata)
+{
+    ActiveSceneCameraSelection camera = FindActiveSceneCamera(scene_metadata);
+    if (camera.found || !scene_metadata.parsed)
+    {
+        return camera;
+    }
+
+    SceneObjectMetadata cam_object;
+    cam_object.name = kSyntheticCameraObjectName;
+    SceneObjectAttribute cam_attr;
+    cam_attr.kind = SceneObjectAttributeKind::Camera;
+    cam_attr.camera.active = true;
+    cam_attr.camera.type = SceneObjectCameraType::Fixed;
+    cam_object.attributes.push_back(std::move(cam_attr));
+    scene_metadata.objects.push_back(std::move(cam_object));
+
+    return FindActiveSceneCamera(scene_metadata);
+}
+
 std::string ToDisplayString(const aiString& value)
 {
     return value.length > 0 ? std::string(value.C_Str()) : std::string();
@@ -3048,6 +3078,9 @@ const SceneMetadata& RuntimeRenderer::GetSceneMetadata()
     cached_scene_path_ = scene_path_;
     cached_scene_write_time_ = has_filesystem_time ? write_time : std::filesystem::file_time_type::min();
     cached_scene_metadata_ = LoadSceneMetadata(scene_path_);
+    // Keep 2D-only scenes (which carry no Camera) renderable across reloads by
+    // re-injecting the synthetic camera the active-camera lookup expects.
+    EnsureActiveSceneCamera(cached_scene_metadata_);
     has_cached_scene_metadata_ = true;
 
     if (scene_changed && SceneChangeRequiresPhysicsReset(previous_scene_metadata, cached_scene_metadata_))
@@ -3663,6 +3696,12 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_pushlightuserdata(script_lua_state_, this);
     lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldLoadScene, 1);
     lua_setfield(script_lua_state_, -2, "LoadScene");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldGetSceneLoadProgress, 1);
+    lua_setfield(script_lua_state_, -2, "GetSceneLoadProgress");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWorldIsSceneLoading, 1);
+    lua_setfield(script_lua_state_, -2, "IsSceneLoading");
     lua_setglobal(script_lua_state_, "World");
 
     // Physics table
@@ -4525,6 +4564,428 @@ bool RuntimeRenderer::CallScriptTriggerMethod(
     return true;
 }
 
+void RuntimeRenderer::SwapToScene(
+    const std::filesystem::path& scene_file,
+    const SceneMetadata& scene_metadata,
+    const ActiveSceneCameraSelection& camera)
+{
+    // Reset all runtime state for the incoming scene.
+    DestroyAllScriptInstances();
+    ClearScriptEventSubscriptions();
+    ClearScriptTimers();
+    runtime_spawned_objects_.clear();
+    runtime_destroyed_objects_.clear();
+    script_object_position_overrides_.clear();
+    script_object_rotation_overrides_.clear();
+    script_object_scale_overrides_.clear();
+    script_active_instance_key_.clear();
+    script_active_object_name_.clear();
+    script_prev_keys_down_.clear();
+    script_frame_collision_events_.clear();
+    queued_objects_.clear();
+    script_next_timer_id_ = 1;
+    script_timer_pending_clear_.clear();
+    physics_world_built_ = false;
+    physics_object_transforms_.clear();
+    physics_object_transforms_prev_.clear();
+    physics_object_transforms_curr_.clear();
+    physics_accumulator_seconds_ = 0.0f;
+    physics_last_tick_counter_ = 0;
+    physics_has_curr_snapshot_ = false;
+
+    const std::uint64_t load_now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
+    script_last_tick_ms_ = load_now_ms;
+    script_session_start_ms_ = load_now_ms;
+
+    scene_path_ = scene_file;
+    active_camera_object_name_ = camera.object_name;
+    active_camera_attribute_index_ = camera.attribute_index;
+
+    // Seed the parsed metadata so GetSceneMetadata() returns it without a
+    // synchronous disk/pak reparse on the next frame.
+    if (scene_metadata.parsed)
+    {
+        cached_scene_path_ = scene_file;
+        cached_scene_metadata_ = scene_metadata;
+        has_cached_scene_metadata_ = true;
+        std::error_code error;
+        const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(scene_file, error);
+        cached_scene_write_time_ = error ? std::filesystem::file_time_type::min() : write_time;
+    }
+    else
+    {
+        cached_scene_path_.clear();
+        cached_scene_metadata_ = SceneMetadata{};
+        has_cached_scene_metadata_ = false;
+    }
+}
+
+void RuntimeRenderer::BeginAsyncSceneLoad()
+{
+    if (scene_load_in_progress_ || pending_scene_load_path_.empty())
+    {
+        return;
+    }
+
+    const std::string load_path = std::move(pending_scene_load_path_);
+    pending_scene_load_path_.clear();
+    const std::string loading_scene_request = std::move(pending_scene_load_loading_scene_);
+    pending_scene_load_loading_scene_.clear();
+
+    auto resolve_scene_path = [this](const std::string& name) -> std::filesystem::path
+    {
+        std::filesystem::path scene_file = name;
+        if (!scene_file.has_extension())
+        {
+            scene_file += ".scene";
+        }
+        if (scene_file.is_relative())
+        {
+            scene_file = project_root_ / "Scenes" / scene_file;
+        }
+        return scene_file;
+    };
+
+    const std::filesystem::path scene_file = resolve_scene_path(load_path);
+
+    // Validate cheaply on the main thread BEFORE any teardown. On failure we log
+    // and keep the current scene running untouched (so the built game does not
+    // exit on a bad World.LoadScene).
+    SceneMetadata target_metadata = LoadSceneMetadata(scene_file);
+    if (!target_metadata.parsed)
+    {
+        SDL_Log("World.LoadScene: failed to parse scene '%s' (%s); keeping current scene",
+                load_path.c_str(),
+                target_metadata.error_message.empty() ? "unknown error" : target_metadata.error_message.c_str());
+        return;
+    }
+    // 2D-only target scenes (menus, etc.) get a synthetic camera so they remain
+    // loadable; scenes with a real camera are unchanged.
+    ActiveSceneCameraSelection target_camera = EnsureActiveSceneCamera(target_metadata);
+
+    // Collect unique model/audio/video keys using the SAME resolution logic as
+    // BuildQueuedScene / the runtime audio path, so the seeded cache entries hit.
+    std::vector<std::filesystem::path> model_paths;
+    std::vector<std::string> audio_paths;   // raw clip_path keys
+    std::vector<std::string> video_paths;   // raw scene-relative video_path keys
+    {
+        std::unordered_set<std::string> seen_models;
+        std::unordered_set<std::string> seen_audio;
+        std::unordered_set<std::string> seen_video;
+        for (const SceneObjectMetadata& object : target_metadata.objects)
+        {
+            if (!object.model_path.empty())
+            {
+                std::filesystem::path model_path;
+                if (g_asset_reader != nullptr)
+                {
+                    std::string shape_file_name;
+                    for (const SceneObjectAttribute& attr : object.attributes)
+                    {
+                        if (attr.kind == SceneObjectAttributeKind::Shape3D)
+                        {
+                            shape_file_name = attr.shape_3d.shape_path.empty()
+                                ? std::filesystem::path(object.model_path).filename().string()
+                                : attr.shape_3d.shape_path;
+                            break;
+                        }
+                    }
+                    model_path = shape_file_name.empty()
+                        ? (project_root_ / object.model_path)
+                        : (std::filesystem::path("Shapes") / shape_file_name);
+                }
+                else
+                {
+                    model_path = project_root_ / object.model_path;
+                }
+                if (seen_models.insert(model_path.generic_string()).second)
+                {
+                    model_paths.push_back(model_path);
+                }
+            }
+            for (const SceneObjectAttribute& attr : object.attributes)
+            {
+                if (!attr.audio.clip_path.empty() && seen_audio.insert(attr.audio.clip_path).second)
+                {
+                    audio_paths.push_back(attr.audio.clip_path);
+                }
+                if (!attr.video_2d.video_path.empty() && seen_video.insert(attr.video_2d.video_path).second)
+                {
+                    video_paths.push_back(attr.video_2d.video_path);
+                }
+            }
+        }
+    }
+
+    // Dispatch a single background worker. All asset I/O is sequential because
+    // the built game's pak reader (g_asset_reader) owns a non-thread-safe handle.
+    async_load_models_done_ = std::make_shared<std::atomic<int>>(0);
+    async_load_models_total_ = static_cast<int>(model_paths.size());
+    scene_load_progress_ = 0.0f;
+    std::shared_ptr<std::atomic<int>> models_done = async_load_models_done_;
+    const std::filesystem::path project_root = project_root_;
+    const bool use_pak = (g_asset_reader != nullptr);
+
+    pending_async_scene_load_ = std::async(
+        std::launch::async,
+        [model_paths, audio_paths, video_paths, models_done, project_root, use_pak]() -> PreloadedSceneAssets
+        {
+            PreloadedSceneAssets out;
+            try
+            {
+                out.models.reserve(model_paths.size());
+                for (const std::filesystem::path& model_path : model_paths)
+                {
+                    PreloadedSceneModel result;
+                    result.path = model_path;
+                    std::error_code ec;
+                    const auto wt = std::filesystem::last_write_time(model_path, ec);
+                    result.write_time = ec ? std::filesystem::file_time_type::min() : wt;
+                    result.asset = LoadModelAsset(model_path);
+                    out.models.push_back(std::move(result));
+                    models_done->fetch_add(1, std::memory_order_relaxed);
+                }
+
+                auto read_bytes = [&](const std::string& rel) -> std::vector<std::uint8_t>
+                {
+                    if (use_pak && g_asset_reader)
+                    {
+                        return g_asset_reader->ReadFile(rel);
+                    }
+                    const std::filesystem::path stored(rel);
+                    const std::filesystem::path abs = stored.is_absolute() ? stored : (project_root / stored);
+                    std::ifstream file(abs, std::ios::binary);
+                    if (!file)
+                    {
+                        return {};
+                    }
+                    return std::vector<std::uint8_t>(
+                        (std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+                };
+
+                out.audio_bytes.reserve(audio_paths.size());
+                for (const std::string& clip_path : audio_paths)
+                {
+                    std::vector<std::uint8_t> bytes = read_bytes(clip_path);
+                    if (!bytes.empty())
+                    {
+                        // Editor playback keys audio by absolute on-disk path; the
+                        // built game keys by the raw pak-relative clip_path.
+                        const std::string key = use_pak
+                            ? clip_path
+                            : (std::filesystem::path(clip_path).is_absolute()
+                                ? std::filesystem::path(clip_path).generic_string()
+                                : (project_root / clip_path).generic_string());
+                        out.audio_bytes.emplace_back(key, std::move(bytes));
+                    }
+                }
+
+                out.video_bytes.reserve(video_paths.size());
+                for (const std::string& video_path : video_paths)
+                {
+                    std::vector<std::uint8_t> bytes = read_bytes(video_path);
+                    if (!bytes.empty())
+                    {
+                        // VideoPlaybackManager keys its preload cache by the raw
+                        // scene-relative video_path.
+                        out.video_bytes.emplace_back(video_path, std::move(bytes));
+                    }
+                }
+            }
+            catch (const std::exception& e)
+            {
+                SDL_Log("World.LoadScene background preload threw: %s", e.what());
+            }
+            catch (...)
+            {
+                SDL_Log("World.LoadScene background preload threw an unknown exception");
+            }
+            return out;
+        });
+
+    async_load_target_path_ = scene_file;
+    async_load_target_metadata_ = std::move(target_metadata);
+    async_load_target_camera_ = std::move(target_camera);
+    async_load_model_keys_ = model_paths;   // reused for the GPU warm-up phase
+    async_load_warm_index_ = 0;
+    scene_load_warming_ = false;
+    scene_load_in_progress_ = true;
+
+    SDL_Log("World.LoadScene: streaming '%s' (%d model(s)) in background%s",
+            load_path.c_str(),
+            async_load_models_total_,
+            loading_scene_request.empty() ? "" : " with loading scene");
+
+    // Switch to the loading scene immediately (cheap) so the player sees it while
+    // the target streams. If none was given, keep rendering the current scene's
+    // last state until the target is ready.
+    if (!loading_scene_request.empty())
+    {
+        const std::filesystem::path loading_scene_file = resolve_scene_path(loading_scene_request);
+        SceneMetadata loading_metadata = LoadSceneMetadata(loading_scene_file);
+        if (loading_metadata.parsed)
+        {
+            // Loading screens are typically pure 2D (no camera) — synthesize one.
+            const ActiveSceneCameraSelection loading_camera = EnsureActiveSceneCamera(loading_metadata);
+            SwapToScene(loading_scene_file, loading_metadata, loading_camera);
+        }
+        else
+        {
+            SDL_Log("World.LoadScene: loading scene '%s' failed to parse; streaming without it",
+                    loading_scene_request.c_str());
+        }
+    }
+}
+
+void RuntimeRenderer::PollAsyncSceneLoad()
+{
+    // The GPU warm-up phase runs after parsing completes; it has its own progress.
+    if (!scene_load_in_progress_ || scene_load_warming_)
+    {
+        return;
+    }
+
+    // Parsing occupies the first half of the progress bar (0..0.5); the GPU
+    // warm-up phase fills the second half (0.5..1.0).
+    if (async_load_models_total_ > 0 && async_load_models_done_)
+    {
+        const int done = async_load_models_done_->load(std::memory_order_relaxed);
+        scene_load_progress_ = std::clamp(
+            0.5f * static_cast<float>(done) / static_cast<float>(async_load_models_total_), 0.0f, 0.5f);
+    }
+    else
+    {
+        scene_load_progress_ = 0.25f;
+    }
+
+    if (!pending_async_scene_load_.valid())
+    {
+        scene_load_in_progress_ = false;
+        scene_load_progress_ = 1.0f;
+        return;
+    }
+    if (pending_async_scene_load_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+    {
+        return;
+    }
+
+    PreloadedSceneAssets assets = pending_async_scene_load_.get();
+
+    // Seed parsed assets so the first BuildQueuedScene on the target builds from
+    // cache (GPU upload only, no Assimp parse stall).
+    for (PreloadedSceneModel& model : assets.models)
+    {
+        if (model.asset.loaded)
+        {
+            SeedModelAsset(model.path, model.write_time, std::move(model.asset));
+        }
+    }
+    for (auto& entry : assets.audio_bytes)
+    {
+        SeedAudioClipBytes(entry.first, std::move(entry.second));
+    }
+    for (auto& entry : assets.video_bytes)
+    {
+        SeedVideoBytes(entry.first, std::move(entry.second));
+    }
+
+    // Parsing done. Enter the GPU warm-up phase: WarmTargetScene() uploads the
+    // target's models to the GPU a few per frame (still showing the loading
+    // scene) so the swap-in frame has no big one-shot upload stall.
+    scene_load_warming_ = true;
+    async_load_warm_index_ = 0;
+    scene_load_progress_ = 0.5f;
+    SDL_Log("World.LoadScene: '%s' parsed; warming %zu model(s) on the GPU",
+            async_load_target_path_.filename().string().c_str(),
+            async_load_model_keys_.size());
+}
+
+void RuntimeRenderer::WarmTargetScene()
+{
+    if (!scene_load_in_progress_ || !scene_load_warming_)
+    {
+        return;
+    }
+
+    // Upload a bounded number of models per frame so each warm-up frame stays
+    // responsive and the loading scene keeps animating. GPU residency (buffers +
+    // textures) is the dominant first-frame cost; spreading it removes the stall.
+    constexpr std::size_t kModelsPerFrame = 1;
+    std::size_t warmed_this_frame = 0;
+    while (async_load_warm_index_ < async_load_model_keys_.size() && warmed_this_frame < kModelsPerFrame)
+    {
+        const std::filesystem::path& key = async_load_model_keys_[async_load_warm_index_];
+        const CachedModelAssetEntry& entry = GetModelAssetEntry(key); // seeded -> no parse
+        if (entry.asset.loaded && EnsureMeshCacheEntry(key, entry))
+        {
+            // Pre-build the ray-tracing BLAS for this mesh too, so the swap-in
+            // frame's UpdateScene finds it cached instead of building every
+            // model's acceleration structure in one stalling frame.
+            const auto mesh_it = mesh_cache_.find(key);
+            if (mesh_it != mesh_cache_.end())
+            {
+                const GpuMeshCacheEntry& mesh_entry = mesh_it->second;
+                if (mesh_entry.vertex_buffer.device_address != 0 &&
+                    mesh_entry.index_buffer.device_address != 0 &&
+                    mesh_entry.vertex_count != 0 && mesh_entry.index_count >= 3)
+                {
+                    RayTracing::MeshInput mesh_input;
+                    mesh_input.key = key.string();
+                    mesh_input.vertex_device_address = mesh_entry.vertex_buffer.device_address;
+                    mesh_input.index_device_address = mesh_entry.index_buffer.device_address;
+                    mesh_input.vertex_count = mesh_entry.vertex_count;
+                    mesh_input.vertex_stride = static_cast<std::uint32_t>(sizeof(SceneGpuVertex));
+                    mesh_input.index_count = mesh_entry.index_count;
+                    mesh_input.materials = mesh_entry.materials;
+                    mesh_input.sections.reserve(mesh_entry.sections.size());
+                    for (const GpuMeshSection& section : mesh_entry.sections)
+                    {
+                        mesh_input.sections.push_back(RayTracing::MeshSectionRecord{
+                            section.first_index,
+                            section.index_count,
+                            section.material_index,
+                            section.uses_alpha_transparency});
+                    }
+                    ray_tracing_.EnsureMeshBlas(mesh_input);
+                }
+            }
+        }
+        ++async_load_warm_index_;
+        ++warmed_this_frame;
+    }
+
+    if (!async_load_model_keys_.empty())
+    {
+        const float warm_fraction = static_cast<float>(async_load_warm_index_) /
+                                     static_cast<float>(async_load_model_keys_.size());
+        scene_load_progress_ = std::clamp(0.5f + 0.5f * warm_fraction, 0.5f, 1.0f);
+    }
+
+    if (async_load_warm_index_ < async_load_model_keys_.size())
+    {
+        return; // more models to warm next frame
+    }
+
+    // All models are GPU-resident — swap the target in. The first real frame now
+    // builds from fully warmed caches (the only residual cost is the physics
+    // world build, which is CPU-proportional to body count, not asset I/O).
+    SwapToScene(async_load_target_path_, async_load_target_metadata_, async_load_target_camera_);
+    SDL_Log("World.LoadScene: '%s' ready; swapped in",
+            async_load_target_path_.filename().string().c_str());
+
+    scene_load_in_progress_ = false;
+    scene_load_warming_ = false;
+    scene_load_progress_ = 1.0f;
+    async_load_target_metadata_ = SceneMetadata{};
+    async_load_target_camera_ = ActiveSceneCameraSelection{};
+    async_load_target_path_.clear();
+    async_load_model_keys_.clear();
+    async_load_warm_index_ = 0;
+    async_load_models_done_.reset();
+    async_load_models_total_ = 0;
+}
+
 bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
 {
     if (script_lua_state_ == nullptr)
@@ -4538,69 +4999,10 @@ bool RuntimeRenderer::UpdateScriptsForFrame(std::string* error_message)
     AdvanceAutoSequence();
     ProcessSequencerQueue(error_message);
 
-    // Handle pending scene load requested by World.LoadScene
-    if (!pending_scene_load_path_.empty())
-    {
-        std::string load_path = std::move(pending_scene_load_path_);
-        pending_scene_load_path_.clear();
-
-        // Resolve path: if it has no extension, append .scene
-        std::filesystem::path scene_file = load_path;
-        if (!scene_file.has_extension())
-        {
-            scene_file += ".scene";
-        }
-        // If not absolute, resolve relative to project Scenes/ directory
-        if (scene_file.is_relative())
-        {
-            scene_file = project_root_ / "Scenes" / scene_file;
-        }
-
-        const SceneMetadata new_scene_metadata = LoadSceneMetadata(scene_file);
-        const ActiveSceneCameraSelection new_camera = FindActiveSceneCamera(new_scene_metadata);
-        if (!new_camera.found)
-        {
-            if (error_message != nullptr)
-            {
-                *error_message = "World.LoadScene: no camera found in scene '" + load_path + "'";
-            }
-            return false;
-        }
-
-        // Reset all runtime state for the new scene
-        DestroyAllScriptInstances();
-        ClearScriptEventSubscriptions();
-        ClearScriptTimers();
-        runtime_spawned_objects_.clear();
-        runtime_destroyed_objects_.clear();
-        script_object_position_overrides_.clear();
-        script_object_rotation_overrides_.clear();
-        script_object_scale_overrides_.clear();
-        script_active_instance_key_.clear();
-        script_active_object_name_.clear();
-        script_prev_keys_down_.clear();
-        script_frame_collision_events_.clear();
-        queued_objects_.clear();
-        script_next_timer_id_ = 1;
-        script_timer_pending_clear_.clear();
-        physics_world_built_ = false;
-        physics_object_transforms_.clear();
-        physics_object_transforms_prev_.clear();
-        physics_object_transforms_curr_.clear();
-        physics_accumulator_seconds_ = 0.0f;
-        physics_last_tick_counter_ = 0;
-        physics_has_curr_snapshot_ = false;
-        cached_scene_path_.clear();
-        cached_scene_metadata_ = SceneMetadata{};
-        has_cached_scene_metadata_ = false;
-        const std::uint64_t load_now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
-        script_last_tick_ms_ = load_now_ms;
-        script_session_start_ms_ = load_now_ms;
-
-        scene_path_ = scene_file;
-        active_camera_object_name_ = new_camera.object_name;
-        active_camera_attribute_index_ = new_camera.attribute_index;
-    }
+    // Scene loads requested via World.LoadScene are handled asynchronously by
+    // BeginAsyncSceneLoad()/PollAsyncSceneLoad() at the top of RenderFrame, so
+    // a large scene streams its assets on a worker thread instead of stalling
+    // this frame. Nothing to consume here.
 
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
     float delta_time = 0.0f;
@@ -6657,6 +7059,14 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
         }
         return false;
     }
+
+    // Drive async World.LoadScene streaming: start any pending request and, when
+    // a load is in flight, swap to the target once its assets finish parsing on
+    // the worker thread. Until then the loading scene (or the current scene)
+    // keeps rendering, so the main thread never stalls.
+    BeginAsyncSceneLoad();
+    PollAsyncSceneLoad();
+    WarmTargetScene();
 
     const SceneMetadata& scene_metadata = GetSceneMetadata();
     if (!scene_metadata.parsed)

@@ -148,6 +148,12 @@ public:
     void Shutdown();
     bool EnsureViewportOutput(std::uint32_t width, std::uint32_t height);
     bool UpdateScene(const std::vector<MeshInput>& meshes, const std::vector<InstanceInput>& instances);
+    // Pre-builds (or confirms) the bottom-level acceleration structure for a
+    // single mesh into the persistent BLAS cache, without touching the TLAS,
+    // instances, or any per-frame render state. Used to warm a scene's meshes a
+    // few per frame during an async World.LoadScene so the swap-in frame doesn't
+    // build every BLAS at once. Returns true if the BLAS is resident afterwards.
+    bool EnsureMeshBlas(const MeshInput& mesh);
     bool RenderFrame(
         const ResolvedSceneLighting& lighting,
         const std::array<float, 16>& view_inverse,

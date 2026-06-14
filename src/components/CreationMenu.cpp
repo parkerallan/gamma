@@ -423,6 +423,11 @@ bool CopyImportedModel(
 
 std::filesystem::path ResolveSceneTarget(const EngineState& state)
 {
+    if (state.HasActiveScene() && std::filesystem::exists(state.active_scene_path))
+    {
+        return state.active_scene_path;
+    }
+
     if (state.HasSelectedItem() && HasExtension(state.selected_item_path, {".scene"}))
     {
         return state.selected_item_path;

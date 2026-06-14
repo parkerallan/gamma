@@ -1126,6 +1126,43 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
     return true;
 }
 
+bool RayTracing::EnsureMeshBlas(const MeshInput& mesh)
+{
+    if (!available_)
+    {
+        return true;
+    }
+    if (vulkan_context_ == nullptr || command_pool_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+    if (mesh.key.empty() || mesh.vertex_device_address == 0 || mesh.index_device_address == 0 ||
+        mesh.vertex_count == 0 || mesh.index_count < 3)
+    {
+        return false;
+    }
+
+    BottomLevelCacheEntry& cache_entry = bottom_level_cache_[mesh.key];
+    const bool topology_changed =
+        cache_entry.acceleration_structure.handle == VK_NULL_HANDLE ||
+        cache_entry.vertex_device_address != mesh.vertex_device_address ||
+        cache_entry.index_device_address != mesh.index_device_address ||
+        cache_entry.vertex_count != mesh.vertex_count ||
+        cache_entry.index_count != mesh.index_count ||
+        cache_entry.opaque != IsOpaqueMesh(mesh);
+    if (!topology_changed)
+    {
+        return true; // already resident; per-frame refits are handled in UpdateScene
+    }
+
+    if (!BuildBottomLevelAccelerationStructure(*vulkan_context_, command_pool_, mesh, cache_entry))
+    {
+        status_message_ = "Failed to pre-build RT bottom-level acceleration structure";
+        return false;
+    }
+    return true;
+}
+
 bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::vector<InstanceInput>& instances)
 {
     if (!available_)

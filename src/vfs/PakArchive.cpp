@@ -1,6 +1,7 @@
 #include "vfs/PakArchive.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <system_error>
@@ -19,6 +20,28 @@ std::string NormalizeRelPath(std::string rel_path)
         rel_path.erase(rel_path.begin());
     }
     return rel_path;
+}
+
+// Case-insensitive ASCII compare. Paks are built from a Windows (case-
+// insensitive) filesystem, and the editor resolves assets case-insensitively
+// via NTFS. Matching pak entries the same way keeps the built game consistent
+// with the editor — e.g. World.LoadScene("main(1)") finds "Scenes/Main(1).scene".
+bool PathsEqualIgnoreCase(const std::string& a, const std::string& b)
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        const unsigned char ca = static_cast<unsigned char>(a[i]);
+        const unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (std::tolower(ca) != std::tolower(cb))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 } // namespace
 
@@ -198,7 +221,7 @@ bool PakArchive::Contains(const std::string& rel_path) const
     const std::string normalized = NormalizeRelPath(rel_path);
     for (const IndexEntry& entry : read_entries_)
     {
-        if (entry.rel_path == normalized)
+        if (PathsEqualIgnoreCase(entry.rel_path, normalized))
         {
             return true;
         }
@@ -217,7 +240,7 @@ std::vector<std::uint8_t> PakArchive::ReadEntry(const std::string& rel_path) con
     const IndexEntry* found = nullptr;
     for (const IndexEntry& entry : read_entries_)
     {
-        if (entry.rel_path == normalized)
+        if (PathsEqualIgnoreCase(entry.rel_path, normalized))
         {
             found = &entry;
             break;
