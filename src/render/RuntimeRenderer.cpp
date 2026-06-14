@@ -2129,7 +2129,9 @@ bool RuntimeRenderer::EnsureSkinningPipeline()
 
     if (skinning_descriptor_set_layout_ == VK_NULL_HANDLE)
     {
-        std::array<VkDescriptorSetLayoutBinding, 5> bindings = {};
+        // 0 bind-pose, 1 output, 2 influences, 3 palette, 4 prev-position,
+        // 5 morph-deltas, 6 morph-weights, 7 morph-descriptor.
+        std::array<VkDescriptorSetLayoutBinding, 8> bindings = {};
         for (std::uint32_t i = 0; i < bindings.size(); ++i)
         {
             bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
@@ -2151,7 +2153,7 @@ bool RuntimeRenderer::EnsureSkinningPipeline()
         VkPushConstantRange push = {};
         push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push.offset = 0;
-        push.size = 2 * sizeof(std::uint32_t);
+        push.size = 3 * sizeof(std::uint32_t); // vertex_count, bone_count, morph_target_count
 
         VkPipelineLayoutCreateInfo layout_info = {};
         layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -2231,11 +2233,16 @@ void RuntimeRenderer::ReleaseSkinningResources(GpuSkinningResources& resources)
     ReleaseBuffer(resources.influence_buffer);
     ReleaseBuffer(resources.palette_buffer);
     ReleaseBuffer(resources.prev_position_buffer);
+    ReleaseBuffer(resources.morph_delta_buffer);
+    ReleaseBuffer(resources.morph_weight_buffer);
+    ReleaseBuffer(resources.morph_descriptor_buffer);
     // Descriptor sets are freed implicitly when the pool is reset/destroyed.
     resources.descriptor_set = VK_NULL_HANDLE;
     resources.ready = false;
     resources.vertex_count = 0;
     resources.bone_count = 0;
+    resources.morph_target_count = 0;
+    resources.morph_target_names.clear();
 }
 
 void RuntimeRenderer::Shutdown()
@@ -3509,6 +3516,13 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
         {"Animator", "SetState", ScriptAttributeAccessorId::AnimatorSetState},
         {"Animator", "SetDefaultState", ScriptAttributeAccessorId::AnimatorSetDefaultState},
         {"Animator", "GetDefaultState", ScriptAttributeAccessorId::AnimatorGetDefaultState},
+        {"Animator", "SetFacePose", ScriptAttributeAccessorId::AnimatorSetFacePose},
+        {"Animator", "PlayLipSync", ScriptAttributeAccessorId::AnimatorPlayLipSync},
+        {"Animator", "StopLipSync", ScriptAttributeAccessorId::AnimatorStopLipSync},
+        {"Animator", "IsLipSyncPlaying", ScriptAttributeAccessorId::AnimatorIsLipSyncPlaying},
+        {"Animator", "SetEyeTarget", ScriptAttributeAccessorId::AnimatorSetEyeTarget},
+        {"Animator", "LookAt", ScriptAttributeAccessorId::AnimatorLookAt},
+        {"Animator", "ClearEyeTarget", ScriptAttributeAccessorId::AnimatorClearEyeTarget},
         {"AudioAttr", "ClipPath", ScriptAttributeAccessorId::AudioClipPath},
         {"AudioAttr", "PlayMode", ScriptAttributeAccessorId::AudioPlayMode},
         {"AudioAttr", "Volume", ScriptAttributeAccessorId::AudioVolume},
@@ -5541,6 +5555,202 @@ bool RuntimeRenderer::SetRuntimeAnimatorState(
     return true;
 }
 
+bool RuntimeRenderer::SetRuntimeAnimatorFacePose(
+    const std::string& object_name,
+    const std::string& pose_name,
+    float weight,
+    float blend_speed,
+    std::size_t occurrence_index)
+{
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+    state->face_pose_target = pose_name; // empty reverts to the controller default
+    state->face_pose_target_weight = std::clamp(weight, 0.0f, 1.0f);
+    state->face_pose_blend_speed = (std::max)(0.0f, blend_speed);
+    return true;
+}
+
+bool RuntimeRenderer::PlayRuntimeAnimatorLipSync(
+    const std::string& object_name,
+    const std::string& clip_name,
+    bool loop,
+    std::size_t occurrence_index)
+{
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    // Resolve clip_name against the controller's clip list (match by file stem
+    // or exact project-relative path), falling back to treating it as a path.
+    std::string resolved;
+    const std::filesystem::path controller_path = std::filesystem::path(state->controller_path).is_absolute()
+        ? std::filesystem::path(state->controller_path)
+        : (project_root_ / state->controller_path);
+    const auto controller_it = animator_controller_cache_.find(controller_path);
+    if (controller_it != animator_controller_cache_.end() && controller_it->second.loaded)
+    {
+        for (const std::string& c : controller_it->second.asset.face.lip_sync_clips)
+        {
+            if (c == clip_name || std::filesystem::path(c).stem().string() == clip_name)
+            {
+                resolved = c;
+                break;
+            }
+        }
+    }
+    if (resolved.empty())
+    {
+        if (clip_name.empty())
+        {
+            return false;
+        }
+        resolved = clip_name;
+    }
+
+    const FaceClipAsset& clip = GetOrLoadFaceClip(resolved);
+    if (clip.duration_seconds <= 0.0f)
+    {
+        return false; // clip missing or empty
+    }
+
+    // Stop any lip-sync already playing on this object before starting anew.
+    if (state->lipsync_sound != AudioEngine::kInvalidHandle)
+    {
+        audio_engine_.StopSound(state->lipsync_sound);
+        state->lipsync_sound = AudioEngine::kInvalidHandle;
+    }
+
+    // Start the source audio, 3D-positioned at the object. The evaluator drives
+    // the lip-sync curve time from this sound's playback cursor each frame so
+    // audio and mouth stay locked.
+    if (audio_engine_ready_ && !clip.source_audio_path.empty())
+    {
+        AudioEngine::PlayParams params;
+        // Resolve the audio bytes the same way scene Audio sources do: in a
+        // packed build the WAV lives in assets.pak (read via g_asset_reader by
+        // its project-relative path); in the editor it falls back to disk.
+        std::vector<std::uint8_t> bytes;
+        if (g_asset_reader)
+        {
+            bytes = g_asset_reader->ReadFile(clip.source_audio_path);
+        }
+        if (!bytes.empty())
+        {
+            params.clip_bytes = std::move(bytes);
+            params.clip_path = clip.source_audio_path; // relative path = cache key
+        }
+        else
+        {
+            const std::filesystem::path stored(clip.source_audio_path);
+            params.clip_path = stored.is_absolute()
+                ? stored.generic_string()
+                : (project_root_ / stored).generic_string();
+        }
+        params.loop = loop;
+        params.spatialize_3d = true;
+        SceneVector3 pos;
+        if (TryGetScriptObjectPosition(object_name, pos))
+        {
+            params.world_position = pos;
+        }
+        state->lipsync_sound = audio_engine_.PlaySound(params);
+    }
+
+    state->lipsync_clip_path = resolved;
+    state->lipsync_time_seconds = 0.0f;
+    state->lipsync_playing = true;
+    state->lipsync_loop = loop;
+    return true;
+}
+
+bool RuntimeRenderer::StopRuntimeAnimatorLipSync(const std::string& object_name, std::size_t occurrence_index)
+{
+    RuntimeAnimatorState* const state = FindRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+    if (state->lipsync_sound != AudioEngine::kInvalidHandle)
+    {
+        audio_engine_.StopSound(state->lipsync_sound);
+        state->lipsync_sound = AudioEngine::kInvalidHandle;
+    }
+    state->lipsync_playing = false;
+    state->lipsync_clip_path.clear();
+    state->lipsync_time_seconds = 0.0f;
+    return true;
+}
+
+bool RuntimeRenderer::IsRuntimeAnimatorLipSyncPlaying(const std::string& object_name, std::size_t occurrence_index) const
+{
+    const RuntimeAnimatorState* const state = FindRuntimeAnimatorState(object_name, occurrence_index);
+    return state != nullptr && state->lipsync_playing;
+}
+
+bool RuntimeRenderer::SetRuntimeAnimatorEyeTarget(
+    const std::string& object_name, float x, float y, float z, std::size_t occurrence_index)
+{
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+    state->gaze_active = true;
+    state->gaze_target_point = {x, y, z};
+    state->gaze_target_object.clear();
+    return true;
+}
+
+bool RuntimeRenderer::LookAtRuntimeAnimator(
+    const std::string& object_name, const std::string& target_object, std::size_t occurrence_index)
+{
+    RuntimeAnimatorState* const state = EnsureRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+    state->gaze_active = true;
+    state->gaze_target_object = target_object;
+    return true;
+}
+
+bool RuntimeRenderer::ClearRuntimeAnimatorEyeTarget(const std::string& object_name, std::size_t occurrence_index)
+{
+    RuntimeAnimatorState* const state = FindRuntimeAnimatorState(object_name, occurrence_index);
+    if (state == nullptr)
+    {
+        return false;
+    }
+    state->gaze_active = false; // eyes ease back to center in the evaluator
+    state->gaze_target_object.clear();
+    return true;
+}
+
+const FaceClipAsset& RuntimeRenderer::GetOrLoadFaceClip(const std::string& clip_path)
+{
+    const auto existing = face_clip_cache_.find(clip_path);
+    if (existing != face_clip_cache_.end())
+    {
+        return existing->second;
+    }
+
+    FaceClipAsset clip;
+    if (!clip_path.empty())
+    {
+        const std::filesystem::path abs = std::filesystem::path(clip_path).is_absolute()
+            ? std::filesystem::path(clip_path)
+            : (project_root_ / clip_path);
+        std::string err;
+        LoadFaceClipAsset(abs, clip, err); // leaves clip empty (duration 0) on failure
+    }
+    return face_clip_cache_.emplace(clip_path, std::move(clip)).first->second;
+}
+
 SceneObjectAttribute* RuntimeRenderer::FindScriptAttribute(
     const std::string& object_name,
     SceneObjectAttributeKind kind,
@@ -6948,7 +7158,18 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
         }
     }
 
-    if (runtime_state->active_clip_name.empty() && bone_modifiers == nullptr)
+    // Proceed when there's skeletal work (a clip or bone modifiers) OR the
+    // controller drives facial animation. Blendshapes need no skeleton, so a
+    // face mesh with neither a clip nor bones must still reach the deform pass.
+    const bool wants_face = controller_asset != nullptr &&
+        (!controller_asset->face.poses.empty() ||
+         !controller_asset->face.default_pose.empty() ||
+         !runtime_state->face_pose_target.empty() ||
+         !runtime_state->face_pose_current.empty() ||
+         runtime_state->gaze_active ||
+         std::fabs(runtime_state->gaze_cur_h) > 1e-3f ||
+         std::fabs(runtime_state->gaze_cur_v) > 1e-3f);
+    if (runtime_state->active_clip_name.empty() && bone_modifiers == nullptr && !wants_face)
     {
         return true;
     }
@@ -7053,23 +7274,51 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
         }
     }
 
-    const bool sampled = (bone_modifiers != nullptr)
-        ? SampleClipBoneMatricesWithPhysics(
-              *anim_cache_entry,
-              runtime_state->active_clip_name,
-              runtime_state->state_time_seconds,
-              animation_last_delta_time_seconds_,
-              *bone_modifiers,
-              effective_model_matrix,
-              object_velocity,
-              *runtime_state,
-              bone_matrices,
-              has_collision_modifier ? &bone_world_by_name : nullptr,
-              collision_resolve_query)
-        : SampleClipBoneMatrices(*anim_cache_entry, runtime_state->active_clip_name, runtime_state->state_time_seconds, bone_matrices);
-    if (!sampled)
+    // Does this model carry blendshape (morph) targets? Morph deformation runs
+    // through the same GPU pass as skinning, but must work with no skeleton.
+    bool model_has_morph = false;
+    for (const RuntimeSkinnedMeshData& sm : anim_cache_entry->skinned_meshes)
     {
-        return true;
+        if (sm.mesh != nullptr && sm.mesh->mNumAnimMeshes > 0)
+        {
+            model_has_morph = true;
+            break;
+        }
+    }
+
+    const bool has_skeletal_work =
+        !runtime_state->active_clip_name.empty() || bone_modifiers != nullptr;
+    if (has_skeletal_work)
+    {
+        const bool sampled = (bone_modifiers != nullptr)
+            ? SampleClipBoneMatricesWithPhysics(
+                  *anim_cache_entry,
+                  runtime_state->active_clip_name,
+                  runtime_state->state_time_seconds,
+                  animation_last_delta_time_seconds_,
+                  *bone_modifiers,
+                  effective_model_matrix,
+                  object_velocity,
+                  *runtime_state,
+                  bone_matrices,
+                  has_collision_modifier ? &bone_world_by_name : nullptr,
+                  collision_resolve_query)
+            : SampleClipBoneMatrices(*anim_cache_entry, runtime_state->active_clip_name, runtime_state->state_time_seconds, bone_matrices);
+        if (!sampled)
+        {
+            return true;
+        }
+    }
+    else
+    {
+        // Morph-only object (face mesh, no skeleton / no clip). Nothing to
+        // sample; use a single identity bone so the GPU deform pass still runs.
+        // Every vertex is unweighted and passes through the morphed bind pose.
+        if (!model_has_morph)
+        {
+            return true;
+        }
+        bone_matrices.assign(1, aiMatrix4x4());
     }
 
     // Append this object's bone colliders for the physics block to drive.
@@ -7227,6 +7476,25 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                 std::vector<GpuVertexInfluence> influence_storage;
                 influence_storage.reserve(total_vertex_count);
 
+                // ---- Morph-target (blendshape) extraction ----
+                // Model-global ordered target names (union across meshes);
+                // a name's index is its weight slot in morph_weight_buffer.
+                // Flat sparse delta storage holds kMorphEntryUints per entry
+                // ([dpos.xyz, dnorm.xyz, weight_index, pad]); the per-vertex
+                // (delta_base, count) descriptors run in lock-step with
+                // bind_pose_vertices.
+                constexpr std::uint32_t kMorphEntryUints = 8u;
+                std::vector<std::string> morph_names;
+                std::unordered_map<std::string, std::uint32_t> morph_name_to_index;
+                std::vector<std::uint32_t> morph_delta_storage;
+                std::vector<std::uint32_t> morph_descriptor_storage; // 2 uints/vertex
+                morph_descriptor_storage.reserve(static_cast<std::size_t>(total_vertex_count) * 2u);
+                auto float_bits = [](float f) {
+                    std::uint32_t u = 0u;
+                    std::memcpy(&u, &f, sizeof(u));
+                    return u;
+                };
+
                 const std::size_t mc =
                     (std::min)(model_asset_entry.asset.meshes.size(),
                                anim_cache_entry->skinned_meshes.size());
@@ -7317,7 +7585,84 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                             bind_v.uv0 = uv;
                         }
                         bind_pose_vertices.push_back(BuildSceneGpuVertex(bind_v, material));
+
+                        // ---- Sparse morph deltas for this vertex ----
+                        const std::uint32_t morph_base =
+                            static_cast<std::uint32_t>(morph_delta_storage.size() / kMorphEntryUints);
+                        std::uint32_t morph_count = 0u;
+                        for (unsigned int am = 0; am < skinned_mesh.mesh->mNumAnimMeshes; ++am)
+                        {
+                            const aiAnimMesh* anim = skinned_mesh.mesh->mAnimMeshes[am];
+                            if (anim == nullptr || !anim->HasPositions() ||
+                                vi >= anim->mNumVertices)
+                            {
+                                continue;
+                            }
+                            aiVector3D dpos = anim->mVertices[vi] - raw_pos;
+                            aiVector3D dnorm(0.0f, 0.0f, 0.0f);
+                            if (anim->HasNormals())
+                            {
+                                dnorm = anim->mNormals[vi] - raw_n;
+                            }
+                            // Match the bind-pose transform: weighted verts are
+                            // stored raw (bones carry the node transform);
+                            // unweighted verts are pre-transformed, so their
+                            // deltas need the node's linear (3x3) part too.
+                            if (!has_w)
+                            {
+                                dpos *= bind_tangent_transform; // 3x3 of node xform
+                                dnorm *= bind_normal_transform;
+                            }
+                            // Skip negligible deltas to keep the buffer sparse.
+                            if (dpos.SquareLength() < 1e-10f &&
+                                dnorm.SquareLength() < 1e-10f)
+                            {
+                                continue;
+                            }
+                            // Resolve / assign this target's global weight slot.
+                            // ARKit target names usually survive import; fall
+                            // back to an index-derived name if Assimp drops it.
+                            std::string target_name = ToDisplayString(anim->mName);
+                            if (target_name.empty())
+                            {
+                                target_name = "morph_" + std::to_string(am);
+                            }
+                            std::uint32_t widx;
+                            auto it = morph_name_to_index.find(target_name);
+                            if (it == morph_name_to_index.end())
+                            {
+                                widx = static_cast<std::uint32_t>(morph_names.size());
+                                morph_name_to_index.emplace(target_name, widx);
+                                morph_names.push_back(target_name);
+                            }
+                            else
+                            {
+                                widx = it->second;
+                            }
+                            morph_delta_storage.push_back(float_bits(dpos.x));
+                            morph_delta_storage.push_back(float_bits(dpos.y));
+                            morph_delta_storage.push_back(float_bits(dpos.z));
+                            morph_delta_storage.push_back(float_bits(dnorm.x));
+                            morph_delta_storage.push_back(float_bits(dnorm.y));
+                            morph_delta_storage.push_back(float_bits(dnorm.z));
+                            morph_delta_storage.push_back(widx);
+                            morph_delta_storage.push_back(0u); // pad
+                            ++morph_count;
+                        }
+                        morph_descriptor_storage.push_back(morph_base);
+                        morph_descriptor_storage.push_back(morph_count);
                     }
+                }
+
+                // Normalize the morph buffers for upload: ensure both
+                // device-local buffers are non-empty even when the model has no
+                // blendshapes (descriptor bindings must be valid; the shader
+                // skips the morph loop when morph_target_count == 0).
+                const std::uint32_t morph_target_count =
+                    static_cast<std::uint32_t>(morph_names.size());
+                if (morph_delta_storage.empty())
+                {
+                    morph_delta_storage.assign(kMorphEntryUints, 0u); // dummy entry
                 }
 
                 if (bind_pose_vertices.size() == total_vertex_count &&
@@ -7332,6 +7677,16 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                     // 3 floats per vertex = previous-frame skinned object-space position.
                     const VkDeviceSize prev_pos_size =
                         static_cast<VkDeviceSize>(total_vertex_count) * 3u * sizeof(float);
+                    // Morph buffers. Deltas + per-vertex descriptors are
+                    // device-local (read every frame); weights are host-coherent
+                    // and rewritten per frame like the palette. Weight buffer is
+                    // sized to at least one float so it is always a valid binding.
+                    const VkDeviceSize morph_delta_size =
+                        static_cast<VkDeviceSize>(morph_delta_storage.size() * sizeof(std::uint32_t));
+                    const VkDeviceSize morph_desc_size =
+                        static_cast<VkDeviceSize>(morph_descriptor_storage.size() * sizeof(std::uint32_t));
+                    const VkDeviceSize morph_weight_size =
+                        static_cast<VkDeviceSize>((std::max)(morph_target_count, 1u) * sizeof(float));
 
                     const bool buffers_ok =
                         CreateVulkanBuffer(*vulkan_context_, bind_size,
@@ -7351,7 +7706,19 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                            resources.prev_position_buffer);
+                            resources.prev_position_buffer) &&
+                        CreateVulkanBuffer(*vulkan_context_, morph_delta_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                            resources.morph_delta_buffer) &&
+                        CreateVulkanBuffer(*vulkan_context_, morph_desc_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                            resources.morph_descriptor_buffer) &&
+                        CreateVulkanBuffer(*vulkan_context_, morph_weight_size,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            resources.morph_weight_buffer);
 
                     // Seed the prev-position buffer with the bind-pose positions
                     // so the very first frame's motion vector reads sane data.
@@ -7379,6 +7746,7 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                         const VkCommandPool upload_pool = ray_tracing_.GetCommandPool();
 
                         GpuBuffer stage_bind{}, stage_inf{}, stage_prev{};
+                        GpuBuffer stage_morph_delta{}, stage_morph_desc{};
                         const bool staging_ok =
                             CreateVulkanBuffer(*vulkan_context_, bind_size,
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -7392,12 +7760,24 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                 stage_prev) &&
+                            CreateVulkanBuffer(*vulkan_context_, morph_delta_size,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                stage_morph_delta) &&
+                            CreateVulkanBuffer(*vulkan_context_, morph_desc_size,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                stage_morph_desc) &&
                             UploadBufferData(device, stage_bind,
                                 bind_pose_vertices.data(), static_cast<std::size_t>(bind_size)) &&
                             UploadBufferData(device, stage_inf,
                                 influence_storage.data(), static_cast<std::size_t>(inf_size)) &&
                             UploadBufferData(device, stage_prev,
-                                prev_pose_seed.data(), static_cast<std::size_t>(prev_pos_size));
+                                prev_pose_seed.data(), static_cast<std::size_t>(prev_pos_size)) &&
+                            UploadBufferData(device, stage_morph_delta,
+                                morph_delta_storage.data(), static_cast<std::size_t>(morph_delta_size)) &&
+                            UploadBufferData(device, stage_morph_desc,
+                                morph_descriptor_storage.data(), static_cast<std::size_t>(morph_desc_size));
 
                         if (staging_ok && upload_pool != VK_NULL_HANDLE)
                         {
@@ -7415,6 +7795,12 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                                     c.size = prev_pos_size;
                                     vkCmdCopyBuffer(cb, stage_prev.buffer,
                                                     resources.prev_position_buffer.buffer, 1, &c);
+                                    c.size = morph_delta_size;
+                                    vkCmdCopyBuffer(cb, stage_morph_delta.buffer,
+                                                    resources.morph_delta_buffer.buffer, 1, &c);
+                                    c.size = morph_desc_size;
+                                    vkCmdCopyBuffer(cb, stage_morph_desc.buffer,
+                                                    resources.morph_descriptor_buffer.buffer, 1, &c);
                                 });
                         }
                         else
@@ -7439,6 +7825,8 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                         release_stage(stage_bind);
                         release_stage(stage_inf);
                         release_stage(stage_prev);
+                        release_stage(stage_morph_delta);
+                        release_stage(stage_morph_desc);
                     }
 
                     VkDescriptorSet desc_set = VK_NULL_HANDLE;
@@ -7459,14 +7847,17 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
 
                     if (uploaded_static && desc_set != VK_NULL_HANDLE)
                     {
-                        std::array<VkDescriptorBufferInfo, 5> buf_infos = {};
+                        std::array<VkDescriptorBufferInfo, 8> buf_infos = {};
                         buf_infos[0] = {resources.bind_pose_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[1] = {mesh_cache_it->second.vertex_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[2] = {resources.influence_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[3] = {resources.palette_buffer.buffer, 0, VK_WHOLE_SIZE};
                         buf_infos[4] = {resources.prev_position_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[5] = {resources.morph_delta_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[6] = {resources.morph_weight_buffer.buffer, 0, VK_WHOLE_SIZE};
+                        buf_infos[7] = {resources.morph_descriptor_buffer.buffer, 0, VK_WHOLE_SIZE};
 
-                        std::array<VkWriteDescriptorSet, 5> writes = {};
+                        std::array<VkWriteDescriptorSet, 8> writes = {};
                         for (std::uint32_t i = 0; i < writes.size(); ++i)
                         {
                             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -7482,6 +7873,8 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                         resources.descriptor_set = desc_set;
                         resources.vertex_count = total_vertex_count;
                         resources.bone_count = total_bone_count;
+                        resources.morph_target_count = morph_target_count;
+                        resources.morph_target_names = std::move(morph_names);
                         resources.source_clip_model_path = clip_source_path;
                         resources.source_clip_write_time = anim_cache_entry->write_time;
                         resources.ready = true;
@@ -7521,6 +7914,244 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                 palette_floats.data(),
                 palette_floats.size() * sizeof(float));
 
+            // ---- Face (blendshape) layer ----
+            // Per-frame morph weights, written to the host-coherent weight
+            // buffer like the palette. The Face layer is evaluated
+            // independently of the skeletal pose: a base expression pose plus
+            // procedural eye blink. Lip-sync curves will layer in here later.
+            if (resources.morph_target_count > 0)
+            {
+                std::vector<float> morph_weights(resources.morph_target_count, 0.0f);
+
+                // Resolve a target name to its weight slot and write it. N is
+                // small (~52), so linear scans are fine and avoid a per-frame map.
+                auto apply_weight = [&](const std::string& target, float w)
+                {
+                    for (std::uint32_t t = 0; t < resources.morph_target_count; ++t)
+                    {
+                        if (resources.morph_target_names[t] == target)
+                        {
+                            morph_weights[t] = w;
+                            return;
+                        }
+                    }
+                };
+
+                if (controller_asset != nullptr)
+                {
+                    const AnimatorFaceConfig& face = controller_asset->face;
+
+                    // Target expression: requested pose ("" = controller
+                    // default) scaled by its intensity. Ease the current per-
+                    // shape weights toward it (snap when blend speed is 0) so
+                    // poses cross-fade and can be held partially open.
+                    const std::string& pose_name = runtime_state->face_pose_target.empty()
+                        ? face.default_pose
+                        : runtime_state->face_pose_target;
+                    std::unordered_map<std::string, float> pose_target;
+                    if (!pose_name.empty())
+                    {
+                        for (const FaceExpressionPose& p : face.poses)
+                        {
+                            if (p.name == pose_name)
+                            {
+                                for (const auto& [t, w] : p.weights)
+                                {
+                                    pose_target[t] = w * runtime_state->face_pose_target_weight;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    const float face_dt = (std::min)(animation_last_delta_time_seconds_, 0.1f);
+                    const float alpha = (runtime_state->face_pose_blend_speed <= 0.0f)
+                        ? 1.0f
+                        : (std::min)(1.0f, runtime_state->face_pose_blend_speed * face_dt);
+
+                    // Ease toward the target for shapes it drives.
+                    for (const auto& [t, w] : pose_target)
+                    {
+                        float& cur = runtime_state->face_pose_current[t];
+                        cur += (w - cur) * alpha;
+                    }
+                    // Decay shapes the target no longer drives toward 0, dropping
+                    // them once negligible so the map stays small.
+                    for (auto cur_it = runtime_state->face_pose_current.begin();
+                         cur_it != runtime_state->face_pose_current.end();)
+                    {
+                        if (pose_target.find(cur_it->first) == pose_target.end())
+                        {
+                            cur_it->second += (0.0f - cur_it->second) * alpha;
+                            if (std::fabs(cur_it->second) < 1e-3f)
+                            {
+                                cur_it = runtime_state->face_pose_current.erase(cur_it);
+                                continue;
+                            }
+                        }
+                        ++cur_it;
+                    }
+
+                    for (const auto& [t, w] : runtime_state->face_pose_current)
+                    {
+                        apply_weight(t, w);
+                    }
+                }
+
+                // Lip-sync clip (script-driven via Animator.PlayLipSync) layered
+                // over the pose; it overrides the mouth/jaw shapes it animates.
+                // The curve time is driven from the source audio's playback
+                // cursor so the mouth stays locked to the sound.
+                if (runtime_state->lipsync_playing && !runtime_state->lipsync_clip_path.empty())
+                {
+                    const FaceClipAsset& clip = GetOrLoadFaceClip(runtime_state->lipsync_clip_path);
+                    bool finished = (clip.duration_seconds <= 0.0f);
+
+                    if (!finished && runtime_state->lipsync_sound != AudioEngine::kInvalidHandle &&
+                        audio_engine_ready_)
+                    {
+                        // Keep the dialogue audio positioned on the (possibly
+                        // moving) object, then sync the curve to its cursor.
+                        AudioEngine::PlayParams up;
+                        up.loop = runtime_state->lipsync_loop;
+                        up.spatialize_3d = true;
+                        up.world_position = {
+                            effective_model_matrix[12],
+                            effective_model_matrix[13],
+                            effective_model_matrix[14],
+                        };
+                        if (!audio_engine_.UpdateSound(runtime_state->lipsync_sound, up))
+                        {
+                            finished = true; // the sound ended
+                        }
+                        else
+                        {
+                            runtime_state->lipsync_time_seconds =
+                                audio_engine_.GetPlaybackSeconds(runtime_state->lipsync_sound);
+                        }
+                    }
+                    else if (!finished)
+                    {
+                        // No audio (clip had no source) -> free-running timer.
+                        const float dt = (std::min)(animation_last_delta_time_seconds_, 0.1f);
+                        runtime_state->lipsync_time_seconds += dt;
+                        if (runtime_state->lipsync_time_seconds >= clip.duration_seconds)
+                        {
+                            if (runtime_state->lipsync_loop)
+                            {
+                                while (runtime_state->lipsync_time_seconds >= clip.duration_seconds)
+                                {
+                                    runtime_state->lipsync_time_seconds -= clip.duration_seconds;
+                                }
+                            }
+                            else
+                            {
+                                finished = true;
+                            }
+                        }
+                    }
+
+                    if (finished)
+                    {
+                        runtime_state->lipsync_playing = false;
+                        if (runtime_state->lipsync_sound != AudioEngine::kInvalidHandle)
+                        {
+                            audio_engine_.StopSound(runtime_state->lipsync_sound);
+                            runtime_state->lipsync_sound = AudioEngine::kInvalidHandle;
+                        }
+                    }
+                    else
+                    {
+                        std::vector<std::pair<std::string, float>> lip;
+                        clip.SampleInto(runtime_state->lipsync_time_seconds, lip);
+                        for (const auto& lw : lip)
+                        {
+                            apply_weight(lw.first, lw.second);
+                        }
+                    }
+                }
+
+                // Gaze / look-at: drive the ARKit eyeLook* shapes so the eyes
+                // track a world point or another object. The object's own frame
+                // is used as the head frame; the deflection is smoothed and
+                // eases back to center when gaze is cleared.
+                {
+                    float target_h = 0.0f;
+                    float target_v = 0.0f;
+                    if (runtime_state->gaze_active)
+                    {
+                        std::array<float, 3> tgt = runtime_state->gaze_target_point;
+                        if (!runtime_state->gaze_target_object.empty())
+                        {
+                            SceneVector3 p;
+                            if (TryGetScriptObjectPosition(runtime_state->gaze_target_object, p))
+                            {
+                                tgt = p;
+                            }
+                        }
+
+                        const std::array<float, 16>& m = effective_model_matrix;
+                        float dir[3] = {tgt[0] - m[12], tgt[1] - m[13], tgt[2] - m[14]};
+                        const float len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                        if (len > 1e-4f)
+                        {
+                            dir[0] /= len; dir[1] /= len; dir[2] /= len;
+                            // Normalized right (column 0) and up (column 1) axes.
+                            float rx = m[0], ry = m[1], rz = m[2];
+                            float ux = m[4], uy = m[5], uz = m[6];
+                            const float rl = std::sqrt(rx * rx + ry * ry + rz * rz);
+                            if (rl > 1e-5f) { rx /= rl; ry /= rl; rz /= rl; }
+                            const float ul = std::sqrt(ux * ux + uy * uy + uz * uz);
+                            if (ul > 1e-5f) { ux /= ul; uy /= ul; uz /= ul; }
+                            const float h = dir[0] * rx + dir[1] * ry + dir[2] * rz;
+                            const float v = dir[0] * ux + dir[1] * uy + dir[2] * uz;
+                            // Reach full deflection at ~35 deg off-axis (sin35 ~ 0.573).
+                            const float kGazeScale = 1.0f / 0.573f;
+                            target_h = std::clamp(h * kGazeScale, -1.0f, 1.0f);
+                            target_v = std::clamp(v * kGazeScale, -1.0f, 1.0f);
+                        }
+                    }
+
+                    const float gaze_dt = (std::min)(animation_last_delta_time_seconds_, 0.1f);
+                    const float gaze_alpha = (std::min)(1.0f, 12.0f * gaze_dt);
+                    runtime_state->gaze_cur_h += (target_h - runtime_state->gaze_cur_h) * gaze_alpha;
+                    runtime_state->gaze_cur_v += (target_v - runtime_state->gaze_cur_v) * gaze_alpha;
+
+                    const float gh = runtime_state->gaze_cur_h;
+                    const float gv = runtime_state->gaze_cur_v;
+                    if (std::fabs(gh) > 1e-3f || std::fabs(gv) > 1e-3f)
+                    {
+                        // Horizontal: +h = the character looks to its right.
+                        if (gh > 0.0f)
+                        {
+                            apply_weight("eyeLookInLeft", gh);
+                            apply_weight("eyeLookOutRight", gh);
+                        }
+                        else
+                        {
+                            apply_weight("eyeLookOutLeft", -gh);
+                            apply_weight("eyeLookInRight", -gh);
+                        }
+                        // Vertical: +v = up.
+                        if (gv > 0.0f)
+                        {
+                            apply_weight("eyeLookUpLeft", gv);
+                            apply_weight("eyeLookUpRight", gv);
+                        }
+                        else
+                        {
+                            apply_weight("eyeLookDownLeft", -gv);
+                            apply_weight("eyeLookDownRight", -gv);
+                        }
+                    }
+                }
+
+                UploadBufferData(vulkan_context_->GetDevice(),
+                                 resources.morph_weight_buffer,
+                                 morph_weights.data(),
+                                 morph_weights.size() * sizeof(float));
+            }
+
             if (palette_uploaded)
             {
                 RayTracing::PendingSkinningDispatch dispatch{};
@@ -7531,6 +8162,7 @@ bool RuntimeRenderer::UpdateAnimatedMeshForObject(const QueuedSceneObject& objec
                 dispatch.prev_position_buffer = resources.prev_position_buffer.buffer;
                 dispatch.vertex_count = resources.vertex_count;
                 dispatch.bone_count = resources.bone_count;
+                dispatch.morph_target_count = resources.morph_target_count;
                 dispatch.group_count_x = (resources.vertex_count + 63u) / 64u;
                 ray_tracing_.EnqueueSkinningDispatch(dispatch);
 

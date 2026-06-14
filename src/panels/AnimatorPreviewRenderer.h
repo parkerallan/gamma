@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class VulkanContext;
@@ -129,6 +130,11 @@ public:
 
     void SetBoneCollisions(const std::vector<BoneCollisionParams>& params);
 
+    // Sets the facial blendshape weights (ARKit target name -> weight) applied
+    // to the previewed mesh. Empty clears all morph deformation. Refreshed each
+    // frame by the Face tab so authored expressions show live.
+    void SetFaceWeights(const std::vector<std::pair<std::string, float>>& weights);
+
     // Estimates a box (in the bone's local space) that encloses the segment
     // from the named bone to its child joints, padded so thin bones still get
     // some girth. Returns false when the bone isn't in the loaded model, in
@@ -164,6 +170,15 @@ private:
         std::vector<std::array<float, 2>> bind_uvs;
         std::vector<std::uint32_t> indices; // triangle list (length % 3 == 0)
         std::vector<SkinInfluence> influences; // empty if mesh has no bones
+        // Morph (blendshape) targets: per-target per-vertex deltas vs the bind
+        // pose. Used by the Face-tab live preview to deform the mesh.
+        struct MorphTarget
+        {
+            std::string name;
+            std::vector<std::array<float, 3>> position_deltas;
+            std::vector<std::array<float, 3>> normal_deltas; // may be empty
+        };
+        std::vector<MorphTarget> morph_targets;
         // Diffuse tint (sRGB, [0,1]). Sampled from the model's material so meshes
         // render with the right base color even without GPU texturing.
         std::array<float, 3> base_color = {0.78f, 0.80f, 0.84f};
@@ -277,6 +292,10 @@ private:
     // wireframe overlays; carries no simulation state.
     std::vector<BoneCollisionParams> bone_collisions_;
 
+    // Current facial blendshape weights (ARKit target name -> weight), pushed by
+    // the Face tab each frame. Applied to mesh morph targets in EnsureGpuMeshes.
+    std::vector<std::pair<std::string, float>> face_weights_;
+
     // Per-modifier persistent simulation state. Indexed in lock-step with
     // bone_physics_; entries carry over across frames as long as bone_name
     // matches. Cleared on model reload.
@@ -354,6 +373,10 @@ private:
     {
         VkBuffer vertex_buffer = VK_NULL_HANDLE;
         VkDeviceMemory vertex_memory = VK_NULL_HANDLE;
+        // Host-visible mapping of the vertex buffer so morph (blendshape)
+        // deformation can be re-applied each frame. Non-null once uploaded.
+        void* vertex_mapped = nullptr;
+        std::uint32_t vertex_count = 0;
         VkBuffer index_buffer = VK_NULL_HANDLE;
         VkDeviceMemory index_memory = VK_NULL_HANDLE;
         VkBuffer material_ubo = VK_NULL_HANDLE;

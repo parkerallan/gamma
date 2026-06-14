@@ -109,7 +109,56 @@ json BuildBoneModifierJson(const AnimatorBoneModifier& modifier)
     data["collision_mode"] = AnimatorBoneCollisionModeToString(modifier.collision_mode);
     return data;
 }
+
+json BuildFacePoseJson(const FaceExpressionPose& pose)
+{
+    json data;
+    data["name"] = pose.name;
+    json weights = json::object();
+    for (const auto& [target, weight] : pose.weights)
+    {
+        weights[target] = weight;
+    }
+    data["weights"] = std::move(weights);
+    return data;
+}
+
+json BuildFaceJson(const AnimatorFaceConfig& face)
+{
+    json data;
+    data["default_pose"] = face.default_pose;
+    data["lip_sync_clips"] = face.lip_sync_clips;
+    data["poses"] = json::array();
+    for (const FaceExpressionPose& pose : face.poses)
+    {
+        data["poses"].push_back(BuildFacePoseJson(pose));
+    }
+    return data;
+}
 } // namespace
+
+const std::vector<std::string>& ArkitBlendshapeNames()
+{
+    // The 52 ARKit blendshapes in canonical order.
+    static const std::vector<std::string> names = {
+        "browDownLeft", "browDownRight", "browInnerUp", "browOuterUpLeft", "browOuterUpRight",
+        "cheekPuff", "cheekSquintLeft", "cheekSquintRight",
+        "eyeBlinkLeft", "eyeBlinkRight", "eyeLookDownLeft", "eyeLookDownRight",
+        "eyeLookInLeft", "eyeLookInRight", "eyeLookOutLeft", "eyeLookOutRight",
+        "eyeLookUpLeft", "eyeLookUpRight", "eyeSquintLeft", "eyeSquintRight",
+        "eyeWideLeft", "eyeWideRight",
+        "jawForward", "jawLeft", "jawOpen", "jawRight",
+        "mouthClose", "mouthDimpleLeft", "mouthDimpleRight", "mouthFrownLeft", "mouthFrownRight",
+        "mouthFunnel", "mouthLeft", "mouthLowerDownLeft", "mouthLowerDownRight",
+        "mouthPressLeft", "mouthPressRight", "mouthPucker", "mouthRight",
+        "mouthRollLower", "mouthRollUpper", "mouthShrugLower", "mouthShrugUpper",
+        "mouthSmileLeft", "mouthSmileRight", "mouthStretchLeft", "mouthStretchRight",
+        "mouthUpperUpLeft", "mouthUpperUpRight",
+        "noseSneerLeft", "noseSneerRight",
+        "tongueOut",
+    };
+    return names;
+}
 
 const char* AnimatorBoneModifierTypeToString(AnimatorBoneModifierType type)
 {
@@ -299,6 +348,52 @@ bool LoadAnimatorControllerAsset(const std::filesystem::path& path, AnimatorCont
         }
     }
 
+    if (const auto face_it = root.find("face"); face_it != root.end() && face_it->is_object())
+    {
+        const json& face_json = *face_it;
+        out_asset.face.default_pose = ReadString(face_json, "default_pose");
+        if (const auto clips_it = face_json.find("lip_sync_clips");
+            clips_it != face_json.end() && clips_it->is_array())
+        {
+            for (const json& clip_path : *clips_it)
+            {
+                if (clip_path.is_string())
+                {
+                    out_asset.face.lip_sync_clips.push_back(clip_path.get<std::string>());
+                }
+            }
+        }
+        // Migrate the old single-clip field if present.
+        else if (const std::string legacy = ReadString(face_json, "lip_sync_clip_path"); !legacy.empty())
+        {
+            out_asset.face.lip_sync_clips.push_back(legacy);
+        }
+        if (const auto poses_it = face_json.find("poses"); poses_it != face_json.end() && poses_it->is_array())
+        {
+            for (const json& pose_json : *poses_it)
+            {
+                if (!pose_json.is_object())
+                {
+                    continue;
+                }
+                FaceExpressionPose pose;
+                pose.name = ReadString(pose_json, "name");
+                if (const auto weights_it = pose_json.find("weights");
+                    weights_it != pose_json.end() && weights_it->is_object())
+                {
+                    for (const auto& [target, weight] : weights_it->items())
+                    {
+                        if (weight.is_number())
+                        {
+                            pose.weights.emplace_back(target, weight.get<float>());
+                        }
+                    }
+                }
+                out_asset.face.poses.push_back(std::move(pose));
+            }
+        }
+    }
+
     if (out_asset.default_state.empty() && !out_asset.states.empty())
     {
         out_asset.default_state = out_asset.states.front().name;
@@ -340,6 +435,8 @@ bool SaveAnimatorControllerAsset(const std::filesystem::path& path, const Animat
     {
         root["bone_modifiers"].push_back(BuildBoneModifierJson(modifier));
     }
+
+    root["face"] = BuildFaceJson(asset.face);
 
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output)

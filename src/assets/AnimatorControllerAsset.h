@@ -3,6 +3,7 @@
 #include <array>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct AnimatorClipReference
@@ -83,6 +84,32 @@ struct AnimatorBoneModifier
     AnimatorBoneCollisionMode collision_mode = AnimatorBoneCollisionMode::Trigger;
 };
 
+// A named facial expression = a sparse set of blendshape (ARKit) target
+// weights. Only the targets the pose actually drives are listed; everything
+// else is implicitly 0. Weights are usually [0,1] but are not clamped here.
+struct FaceExpressionPose
+{
+    std::string name;
+    std::vector<std::pair<std::string, float>> weights; // target name -> weight
+};
+
+// Facial-animation configuration on a controller. The Face layer is evaluated
+// independently of the skeletal (General) layer. Lip-sync curves layer in on
+// top in a later phase.
+struct AnimatorFaceConfig
+{
+    std::string default_pose;             // pose applied at runtime when none is set
+    std::vector<FaceExpressionPose> poses;
+    // Project-relative paths to baked lip-sync FaceClips (.faceclip) for this
+    // controller. A character has one per line of dialogue; any can be played
+    // (layered over the expression pose).
+    std::vector<std::string> lip_sync_clips;
+};
+
+// The 52 ARKit blendshape names, in the canonical ARKit order. Used by the
+// Face editor to offer a target palette and as a stable reference set.
+const std::vector<std::string>& ArkitBlendshapeNames();
+
 struct AnimatorControllerAsset
 {
     int version = 1;
@@ -96,6 +123,7 @@ struct AnimatorControllerAsset
     std::vector<AnimatorStateDefinition> states;
     std::vector<AnimatorTransitionDefinition> transitions;
     std::vector<AnimatorBoneModifier> bone_modifiers;
+    AnimatorFaceConfig face;
 };
 
 AnimatorControllerAsset CreateDefaultAnimatorControllerAsset(const std::string& controller_name);

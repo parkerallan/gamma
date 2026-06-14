@@ -1,6 +1,8 @@
 #include "panels/AnimatorPanel.h"
 
 #include "assets/AnimatorControllerAsset.h"
+#include "assets/FaceClipAsset.h"
+#include "assets/LipSyncBake.h"
 #include "assets/ModelMetadata.h"
 #include "imgui.h"
 #include "state/EngineState.h"
@@ -663,6 +665,308 @@ void AnimatorPanel::Render(EngineState& state, VulkanContext* vulkan_context)
     ImGui::End();
 }
 
+void AnimatorPanel::RenderFaceTab(EngineState& state)
+{
+    (void)state;
+    AnimatorFaceConfig& face = controller_.face;
+
+    // ---- Default pose selector ----
+    {
+        std::vector<const char*> pose_name_ptrs;
+        pose_name_ptrs.push_back("<None>");
+        int default_index = 0;
+        for (std::size_t i = 0; i < face.poses.size(); ++i)
+        {
+            pose_name_ptrs.push_back(face.poses[i].name.c_str());
+            if (face.poses[i].name == face.default_pose)
+            {
+                default_index = static_cast<int>(i) + 1;
+            }
+        }
+        if (ImGui::Combo("Default Pose", &default_index, pose_name_ptrs.data(),
+                         static_cast<int>(pose_name_ptrs.size())))
+        {
+            face.default_pose = default_index <= 0
+                ? std::string()
+                : face.poses[static_cast<std::size_t>(default_index - 1)].name;
+            controller_dirty_ = true;
+        }
+        ImGui::TextDisabled("Applied at runtime when no pose is set by script.");
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Expression Poses");
+
+    if (ImGui::Button(ICON_CI_ADD " Add Pose"))
+    {
+        FaceExpressionPose pose;
+        pose.name = "Pose " + std::to_string(face.poses.size() + 1);
+        face.poses.push_back(std::move(pose));
+        selected_face_pose_index_ = static_cast<int>(face.poses.size()) - 1;
+        controller_dirty_ = true;
+    }
+
+    // Keep the preview selection in range (poses may have been removed).
+    if (selected_face_pose_index_ >= static_cast<int>(face.poses.size()))
+    {
+        selected_face_pose_index_ = -1;
+    }
+
+    const std::vector<std::string>& arkit_names = ArkitBlendshapeNames();
+
+    for (std::size_t index = 0; index < face.poses.size(); ++index)
+    {
+        FaceExpressionPose& pose = face.poses[index];
+        ImGui::PushID(static_cast<int>(index));
+
+        const std::string title = pose.name.empty() ? "Pose" : pose.name;
+        // Use a stable per-index ID for the node (not the name) so renaming the
+        // pose in the field below doesn't change the node's ID and steal focus
+        // after each keystroke.
+        if (ImGui::TreeNode(reinterpret_cast<void*>(static_cast<std::uintptr_t>(index)), "%s", title.c_str()))
+        {
+            if (InputTextString("Name", pose.name))
+            {
+                controller_dirty_ = true;
+            }
+
+            bool previewing = (selected_face_pose_index_ == static_cast<int>(index));
+            if (ImGui::Checkbox("Preview in viewport", &previewing))
+            {
+                selected_face_pose_index_ = previewing ? static_cast<int>(index) : -1;
+            }
+
+            const bool is_default = (face.default_pose == pose.name) && !pose.name.empty();
+            if (is_default)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(default)");
+            }
+            else if (ImGui::Button("Set As Default"))
+            {
+                face.default_pose = pose.name;
+                controller_dirty_ = true;
+            }
+
+            ImGui::TextDisabled("Blendshape weights");
+
+            // Add a target from the ARKit palette (offers only shapes not yet
+            // present on this pose).
+            {
+                std::vector<const char*> available_ptrs;
+                std::vector<int> available_src; // combo entry -> ARKit index
+                available_ptrs.push_back("+ Add blendshape...");
+                available_src.push_back(-1);
+                for (int a = 0; a < static_cast<int>(arkit_names.size()); ++a)
+                {
+                    bool present = false;
+                    for (const auto& w : pose.weights)
+                    {
+                        if (w.first == arkit_names[a])
+                        {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if (!present)
+                    {
+                        available_ptrs.push_back(arkit_names[a].c_str());
+                        available_src.push_back(a);
+                    }
+                }
+                int add_index = 0;
+                if (ImGui::Combo("##addshape", &add_index, available_ptrs.data(),
+                                 static_cast<int>(available_ptrs.size())) &&
+                    add_index > 0)
+                {
+                    pose.weights.emplace_back(
+                        arkit_names[static_cast<std::size_t>(available_src[static_cast<std::size_t>(add_index)])],
+                        1.0f);
+                    controller_dirty_ = true;
+                }
+            }
+
+            for (std::size_t wi = 0; wi < pose.weights.size(); ++wi)
+            {
+                ImGui::PushID(static_cast<int>(wi));
+                if (ImGui::Button(ICON_CI_TRASH))
+                {
+                    pose.weights.erase(pose.weights.begin() + static_cast<std::ptrdiff_t>(wi));
+                    controller_dirty_ = true;
+                    ImGui::PopID();
+                    break;
+                }
+                ImGui::SameLine();
+                if (ImGui::SliderFloat(pose.weights[wi].first.c_str(), &pose.weights[wi].second,
+                                       0.0f, 1.0f, "%.2f"))
+                {
+                    controller_dirty_ = true;
+                }
+                ImGui::PopID();
+            }
+
+            if (ImGui::Button(ICON_CI_TRASH " Remove Pose"))
+            {
+                const std::string removed = pose.name;
+                face.poses.erase(face.poses.begin() + static_cast<std::ptrdiff_t>(index));
+                if (face.default_pose == removed)
+                {
+                    face.default_pose.clear();
+                }
+                if (selected_face_pose_index_ == static_cast<int>(index))
+                {
+                    selected_face_pose_index_ = -1;
+                }
+                controller_dirty_ = true;
+                ImGui::TreePop();
+                ImGui::PopID();
+                break;
+            }
+
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+
+    if (face.poses.empty())
+    {
+        ImGui::TextDisabled("No expression poses yet. Add one to author a facial\n"
+                            "expression from ARKit blendshapes.");
+    }
+
+    // ---- Lip Sync (offline Rhubarb bake) ----
+    ImGui::Separator();
+    ImGui::TextUnformatted("Lip Sync (Rhubarb)");
+
+    // Rhubarb is bundled in tools/rhubarb/ and auto-discovered -- no path to set.
+    const bool rhubarb_found = !ResolveRhubarbExe().empty();
+    if (!rhubarb_found)
+    {
+        ImGui::TextDisabled("Rhubarb not found -- put it in tools/rhubarb/rhubarb.exe.");
+    }
+
+    // WAV to bake: drag a .wav from the Files panel onto this target. The
+    // button just shows the current selection -- nothing to type.
+    const std::string wav_label = face_bake_wav_path_.empty()
+        ? std::string("Drop a .wav here")
+        : std::filesystem::path(face_bake_wav_path_).filename().string();
+    ImGui::Button(wav_label.c_str(), ImVec2(-1.0f, 0.0f));
+    if (ImGui::BeginDragDropTarget())
+    {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kFileTreeDragDropPayload))
+        {
+            const char* payload_text = static_cast<const char*>(payload->Data);
+            const std::size_t payload_size = payload->DataSize > 0
+                ? static_cast<std::size_t>(payload->DataSize - 1)
+                : 0;
+            const std::filesystem::path dropped(std::string(payload_text, payload_size));
+            face_bake_wav_path_ = ResolveProjectPath(state, dropped).string();
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    ImGui::BeginDisabled(!rhubarb_found || face_bake_wav_path_.empty());
+    const bool bake_clicked = ImGui::Button("Bake Lip-Sync");
+    ImGui::EndDisabled();
+    if (bake_clicked)
+    {
+        face_bake_status_.clear();
+        const std::filesystem::path wav = ResolveProjectPath(state, std::filesystem::path(face_bake_wav_path_));
+        FaceClipAsset clip;
+        std::string err;
+        if (BakeFaceClipFromAudio(wav, clip, err))
+        {
+            clip.name = wav.stem().string();
+            clip.source_audio_path = NormalizeAssetPath(state, wav);
+            std::filesystem::path clip_path = wav;
+            clip_path.replace_extension(".faceclip");
+            std::string save_err;
+            if (SaveFaceClipAsset(clip_path, clip, save_err))
+            {
+                const std::string rel = NormalizeAssetPath(state, clip_path);
+                if (std::find(face.lip_sync_clips.begin(), face.lip_sync_clips.end(), rel) ==
+                    face.lip_sync_clips.end())
+                {
+                    face.lip_sync_clips.push_back(rel);
+                }
+                controller_dirty_ = true;
+                char buf[128];
+                std::snprintf(buf, sizeof(buf), "Baked %zu curve(s), %.2fs.",
+                              clip.curves.size(), clip.duration_seconds);
+                face_bake_status_ = buf;
+                state.AddLog("Lip-sync baked: " + state.GetDisplayPath(clip_path));
+            }
+            else
+            {
+                face_bake_status_ = "Bake succeeded but save failed: " + save_err;
+            }
+        }
+        else
+        {
+            face_bake_status_ = "Bake failed: " + err;
+            state.AddLog("Lip-sync bake failed: " + err);
+        }
+    }
+
+    if (!face_bake_status_.empty())
+    {
+        ImGui::TextWrapped("%s", face_bake_status_.c_str());
+    }
+
+    if (face.lip_sync_clips.empty())
+    {
+        ImGui::TextDisabled("No lip-sync clips baked for this controller yet.");
+    }
+    else
+    {
+        ImGui::TextDisabled("Clips");
+    }
+
+    // Keep the previewing index in range (clips may have been removed).
+    if (face_lipsync_clip_index_ >= static_cast<int>(face.lip_sync_clips.size()))
+    {
+        face_lipsync_clip_index_ = -1;
+        face_lipsync_playing_ = false;
+    }
+
+    for (std::size_t index = 0; index < face.lip_sync_clips.size(); ++index)
+    {
+        ImGui::PushID(static_cast<int>(index));
+        const bool is_playing = face_lipsync_playing_ &&
+                                face_lipsync_clip_index_ == static_cast<int>(index);
+        if (ImGui::Button(is_playing ? "Stop" : "Play"))
+        {
+            if (is_playing)
+            {
+                face_lipsync_playing_ = false;
+            }
+            else
+            {
+                face_lipsync_clip_index_ = static_cast<int>(index);
+                face_lipsync_playing_ = true;
+                face_lipsync_time_seconds_ = 0.0f;
+                face_preview_clip_loaded_.clear(); // force reload of the chosen clip
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_CI_TRASH))
+        {
+            face.lip_sync_clips.erase(face.lip_sync_clips.begin() + static_cast<std::ptrdiff_t>(index));
+            controller_dirty_ = true;
+            if (face_lipsync_clip_index_ == static_cast<int>(index))
+            {
+                face_lipsync_playing_ = false;
+                face_lipsync_clip_index_ = -1;
+            }
+            ImGui::PopID();
+            break;
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(std::filesystem::path(face.lip_sync_clips[index]).filename().string().c_str());
+        ImGui::PopID();
+    }
+}
+
 void AnimatorPanel::RenderControllerEditor(EngineState& state)
 {
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -686,6 +990,10 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
             controller_dirty_ = true;
         }
 
+        ImGui::BeginTabBar("AnimatorEditorTabs");
+        const bool general_tab_open = ImGui::BeginTabItem("General");
+        if (general_tab_open)
+        {
         if (ImGui::CollapsingHeader("States", ImGuiTreeNodeFlags_DefaultOpen))
         {
             if (ImGui::Button(ICON_CI_ADD " Add State"))
@@ -713,7 +1021,9 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
                 AnimatorStateDefinition& state_def = controller_.states[index];
                 ImGui::PushID(static_cast<int>(index));
                 const std::string title = state_def.name.empty() ? "State" : state_def.name;
-                if (ImGui::TreeNode(title.c_str()))
+                // Stable per-index node ID so renaming the state below doesn't
+                // change the node ID and steal focus after each keystroke.
+                if (ImGui::TreeNode(reinterpret_cast<void*>(static_cast<std::uintptr_t>(index)), "%s", title.c_str()))
                 {
                     if (InputTextString("Name", state_def.name))
                     {
@@ -871,6 +1181,18 @@ void AnimatorPanel::RenderControllerEditor(EngineState& state)
                 ImGui::PopID();
             }
         }
+        } // General tab body
+        if (general_tab_open)
+        {
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Face"))
+        {
+            RenderFaceTab(state);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
     ImGui::EndChild();
 
@@ -1014,7 +1336,13 @@ bool AnimatorPanel::ImportAnimationsFromModel(const std::filesystem::path& model
         // default state if none exists so the runtime activates the animator.
         const std::string source_model_path_no_anim = NormalizeAssetPath(state, model_path);
         bool changed = false;
-        if (controller_.preview_model_path.empty())
+        // Bind this model as the preview when there's none yet, OR when the
+        // current preview path no longer resolves to a file on disk (the model
+        // was renamed/moved and re-imported). A still-valid preview is left
+        // alone so importing from a separate file doesn't hijack it.
+        const bool preview_missing_no_anim = controller_.preview_model_path.empty() ||
+            !std::filesystem::exists(ResolveProjectPath(state, std::filesystem::path(controller_.preview_model_path)));
+        if (preview_missing_no_anim)
         {
             controller_.preview_model_path = source_model_path_no_anim;
             SetPreviewModelPath(state, model_path);
@@ -1093,7 +1421,12 @@ bool AnimatorPanel::ImportAnimationsFromModel(const std::filesystem::path& model
         controller_.default_state = controller_.states.front().name;
     }
 
-    if (controller_.preview_model_path.empty() && imported_count > 0)
+    // Re-point the preview when there's none yet, or when the stored one no
+    // longer exists on disk (renamed/moved + re-imported). Valid previews are
+    // preserved so importing clips from a separate anim file won't hijack them.
+    const bool preview_missing = controller_.preview_model_path.empty() ||
+        !std::filesystem::exists(ResolveProjectPath(state, std::filesystem::path(controller_.preview_model_path)));
+    if (preview_missing && imported_count > 0)
     {
         controller_.preview_model_path = source_model_path;
         SetPreviewModelPath(state, model_path);
@@ -1243,7 +1576,10 @@ void AnimatorPanel::EnsurePreviewModelLoaded(EngineState& state)
     }
     else
     {
-        last_loaded_preview_path_ = wanted;
+        last_loaded_preview_path_ = wanted; // record to avoid a per-frame retry loop
+        state.AddLog("Animator preview failed to load model. stored=\"" + wanted +
+                     "\" resolved=\"" + absolute.string() +
+                     "\" (" + preview_renderer_.LastError() + ")");
     }
 }
 
@@ -1310,6 +1646,66 @@ void AnimatorPanel::RenderPreviewViewport(EngineState& state)
             collision_list.push_back(std::move(c));
         }
         preview_renderer_.SetBoneCollisions(collision_list);
+    }
+
+    // Push the face expression pose currently selected for preview (or clear
+    // it), with a playing lip-sync clip layered on top, so the viewport shows
+    // the live blendshape result.
+    {
+        std::vector<std::pair<std::string, float>> face_weights;
+        if (selected_face_pose_index_ >= 0 &&
+            selected_face_pose_index_ < static_cast<int>(controller_.face.poses.size()))
+        {
+            face_weights = controller_.face.poses[static_cast<std::size_t>(selected_face_pose_index_)].weights;
+        }
+
+        const bool clip_index_valid =
+            face_lipsync_clip_index_ >= 0 &&
+            face_lipsync_clip_index_ < static_cast<int>(controller_.face.lip_sync_clips.size());
+        if (face_lipsync_playing_ && clip_index_valid)
+        {
+            const std::string& clip_rel =
+                controller_.face.lip_sync_clips[static_cast<std::size_t>(face_lipsync_clip_index_)];
+
+            // Lazy-load the selected clip (and re-load when the selection changes).
+            if (face_preview_clip_loaded_ != clip_rel)
+            {
+                const std::filesystem::path clip_path =
+                    ResolveProjectPath(state, std::filesystem::path(clip_rel));
+                std::string err;
+                if (!LoadFaceClipAsset(clip_path, face_preview_clip_, err))
+                {
+                    face_preview_clip_ = {};
+                }
+                face_preview_clip_loaded_ = clip_rel; // avoid per-frame retry
+            }
+
+            if (face_preview_clip_.duration_seconds > 0.0f)
+            {
+                const float dt = (std::min)(ImGui::GetIO().DeltaTime, 0.1f);
+                face_lipsync_time_seconds_ += dt;
+                while (face_lipsync_time_seconds_ > face_preview_clip_.duration_seconds)
+                {
+                    face_lipsync_time_seconds_ -= face_preview_clip_.duration_seconds; // loop
+                }
+
+                std::vector<std::pair<std::string, float>> lip;
+                face_preview_clip_.SampleInto(face_lipsync_time_seconds_, lip);
+                // Lip-sync overrides the shapes it drives (jaw/mouth), layered
+                // on top of the expression pose.
+                for (const auto& lw : lip)
+                {
+                    bool found = false;
+                    for (auto& w : face_weights)
+                    {
+                        if (w.first == lw.first) { w.second = lw.second; found = true; break; }
+                    }
+                    if (!found) { face_weights.push_back(lw); }
+                }
+            }
+        }
+
+        preview_renderer_.SetFaceWeights(face_weights);
     }
 
     preview_renderer_.Render(vulkan_context_, canvas_min, canvas_max);

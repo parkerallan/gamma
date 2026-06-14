@@ -71,6 +71,11 @@ public:
     // True if the handle still refers to an instance that has not finished.
     bool IsPlaying(SoundHandle handle) const;
 
+    // Current playback position of a sound, in seconds. Returns 0 if the handle
+    // is invalid/finished. Used to drive lip-sync curves off the real audio
+    // clock so the mouth stays locked to the sound.
+    float GetPlaybackSeconds(SoundHandle handle) const;
+
     // Drop all currently-playing instances. Called on scene stop.
     void StopAll();
 

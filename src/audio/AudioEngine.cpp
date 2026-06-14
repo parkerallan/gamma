@@ -295,6 +295,25 @@ bool AudioEngine::IsPlaying(SoundHandle handle) const
     return true;
 }
 
+float AudioEngine::GetPlaybackSeconds(SoundHandle handle) const
+{
+    if (engine_ == nullptr || handle == kInvalidHandle)
+    {
+        return 0.0f;
+    }
+    const auto it = playing_.find(handle);
+    if (it == playing_.end())
+    {
+        return 0.0f;
+    }
+    float seconds = 0.0f;
+    if (ma_sound_get_cursor_in_seconds(it->second.sound.get(), &seconds) != MA_SUCCESS)
+    {
+        return 0.0f;
+    }
+    return seconds;
+}
+
 void AudioEngine::StopAll()
 {
     for (auto& [handle, playing] : playing_)

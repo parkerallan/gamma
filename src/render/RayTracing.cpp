@@ -3237,7 +3237,10 @@ bool RayTracing::RenderFrame(
                                 dispatch.pipeline_layout,
                                 0, 1, &dispatch.descriptor_set,
                                 0, nullptr);
-                            const std::uint32_t push[2] = {dispatch.vertex_count, dispatch.bone_count};
+                            const std::uint32_t push[3] = {
+                                dispatch.vertex_count,
+                                dispatch.bone_count,
+                                dispatch.morph_target_count};
                             vkCmdPushConstants(
                                 cb,
                                 dispatch.pipeline_layout,

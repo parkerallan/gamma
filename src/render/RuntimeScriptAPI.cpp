@@ -1022,6 +1022,59 @@ int RuntimeRenderer::LuaAttributeAccessor(lua_State* lua_state)
         lua_pushboolean(lua_state, set_ok ? 1 : 0);
         return 1;
     }
+    case ScriptAttributeAccessorId::AnimatorSetFacePose:
+    {
+        // (name, poseName [, weight] [, speed]). Empty/absent poseName reverts
+        // to the controller's default pose. weight (0..1) is the intensity
+        // (default 1); speed eases the transition (default 0 = snap).
+        const char* pose_name = luaL_optstring(lua_state, 2, "");
+        const float weight = static_cast<float>(luaL_optnumber(lua_state, 3, 1.0));
+        const float speed = static_cast<float>(luaL_optnumber(lua_state, 4, 0.0));
+        const bool set_ok = renderer->SetRuntimeAnimatorFacePose(object_name, pose_name, weight, speed);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorPlayLipSync:
+    {
+        const char* clip_name = luaL_checkstring(lua_state, 2);
+        const bool loop = lua_toboolean(lua_state, 3) != 0; // optional 2nd arg
+        const bool set_ok = renderer->PlayRuntimeAnimatorLipSync(object_name, clip_name, loop);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorStopLipSync:
+    {
+        const bool set_ok = renderer->StopRuntimeAnimatorLipSync(object_name);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorIsLipSyncPlaying:
+    {
+        lua_pushboolean(lua_state, renderer->IsRuntimeAnimatorLipSyncPlaying(object_name) ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorSetEyeTarget:
+    {
+        const float x = static_cast<float>(luaL_checknumber(lua_state, 2));
+        const float y = static_cast<float>(luaL_checknumber(lua_state, 3));
+        const float z = static_cast<float>(luaL_checknumber(lua_state, 4));
+        const bool set_ok = renderer->SetRuntimeAnimatorEyeTarget(object_name, x, y, z);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorLookAt:
+    {
+        const char* target_name = luaL_checkstring(lua_state, 2);
+        const bool set_ok = renderer->LookAtRuntimeAnimator(object_name, target_name);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
+    case ScriptAttributeAccessorId::AnimatorClearEyeTarget:
+    {
+        const bool set_ok = renderer->ClearRuntimeAnimatorEyeTarget(object_name);
+        lua_pushboolean(lua_state, set_ok ? 1 : 0);
+        return 1;
+    }
     case ScriptAttributeAccessorId::AnimatorGetState:
     {
         if (is_setter)

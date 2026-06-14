@@ -744,7 +744,9 @@ bool AnimatorPreviewRenderer::SetModel(const std::filesystem::path& absolute_mod
 
     if (absolute_model_path.empty() || !std::filesystem::exists(absolute_model_path))
     {
-        last_error_ = "File not found";
+        last_error_ = absolute_model_path.empty()
+            ? std::string("File not found: <empty path>")
+            : ("File not found: " + absolute_model_path.string());
         return false;
     }
 
@@ -1126,6 +1128,40 @@ void AnimatorPreviewRenderer::CollectMeshBindings(const aiScene* scene, const ai
             }
         }
 
+        // Capture morph (blendshape) targets as per-vertex deltas vs the bind
+        // pose, so the Face tab can preview authored expressions live.
+        for (unsigned int am = 0; am < mesh->mNumAnimMeshes; ++am)
+        {
+            const aiAnimMesh* anim = mesh->mAnimMeshes[am];
+            if (anim == nullptr || !anim->HasPositions() || anim->mNumVertices != mesh->mNumVertices)
+            {
+                continue;
+            }
+            MeshBinding::MorphTarget target;
+            target.name = std::string(anim->mName.C_Str());
+            if (target.name.empty())
+            {
+                target.name = "morph_" + std::to_string(am);
+            }
+            target.position_deltas.resize(mesh->mNumVertices);
+            const bool has_normals = anim->HasNormals();
+            if (has_normals)
+            {
+                target.normal_deltas.resize(mesh->mNumVertices);
+            }
+            for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
+            {
+                const aiVector3D dp = anim->mVertices[v] - mesh->mVertices[v];
+                target.position_deltas[v] = {dp.x, dp.y, dp.z};
+                if (has_normals)
+                {
+                    const aiVector3D dn = anim->mNormals[v] - mesh->mNormals[v];
+                    target.normal_deltas[v] = {dn.x, dn.y, dn.z};
+                }
+            }
+            binding.morph_targets.push_back(std::move(target));
+        }
+
         mesh_bindings_.push_back(std::move(binding));
     }
 
@@ -1332,6 +1368,11 @@ void AnimatorPreviewRenderer::SetBonePhysics(const std::vector<BonePhysicsParams
 void AnimatorPreviewRenderer::SetBoneCollisions(const std::vector<BoneCollisionParams>& params)
 {
     bone_collisions_ = params;
+}
+
+void AnimatorPreviewRenderer::SetFaceWeights(const std::vector<std::pair<std::string, float>>& weights)
+{
+    face_weights_ = weights;
 }
 
 bool AnimatorPreviewRenderer::ComputeBoneFitBox(
@@ -2206,6 +2247,57 @@ bool AnimatorPreviewRenderer::EnsureBoneBuffer(VulkanContext* vulkan_context)
 bool AnimatorPreviewRenderer::EnsureGpuMeshes(VulkanContext* vulkan_context)
 {
     if (mesh_bindings_.empty()) { return true; }
+
+    // Builds a binding's GpuVertex array with the current face (blendshape)
+    // weights applied to its morph targets. Shared by the one-time upload and
+    // the per-frame morph refresh so both stay in sync.
+    auto build_vertices = [this](const MeshBinding& binding) -> std::vector<GpuVertex>
+    {
+        std::vector<GpuVertex> vertices(binding.bind_positions.size(), GpuVertex{});
+        for (std::size_t v = 0; v < binding.bind_positions.size(); ++v)
+        {
+            GpuVertex& gv = vertices[v];
+            float px = binding.bind_positions[v][0];
+            float py = binding.bind_positions[v][1];
+            float pz = binding.bind_positions[v][2];
+            float nx = binding.bind_normals[v][0];
+            float ny = binding.bind_normals[v][1];
+            float nz = binding.bind_normals[v][2];
+            for (const MeshBinding::MorphTarget& target : binding.morph_targets)
+            {
+                float w = 0.0f;
+                for (const auto& fw : face_weights_)
+                {
+                    if (fw.first == target.name) { w = fw.second; break; }
+                }
+                if (w == 0.0f || v >= target.position_deltas.size()) { continue; }
+                px += w * target.position_deltas[v][0];
+                py += w * target.position_deltas[v][1];
+                pz += w * target.position_deltas[v][2];
+                if (v < target.normal_deltas.size())
+                {
+                    nx += w * target.normal_deltas[v][0];
+                    ny += w * target.normal_deltas[v][1];
+                    nz += w * target.normal_deltas[v][2];
+                }
+            }
+            gv.position[0] = px; gv.position[1] = py; gv.position[2] = pz;
+            gv.normal[0] = nx; gv.normal[1] = ny; gv.normal[2] = nz;
+            gv.uv[0] = binding.bind_uvs[v][0];
+            gv.uv[1] = binding.bind_uvs[v][1];
+            if (v < binding.influences.size())
+            {
+                const SkinInfluence& inf = binding.influences[v];
+                for (int s = 0; s < 4; ++s)
+                {
+                    gv.bone_indices[s] = std::max(inf.bone_indices[s], 0);
+                    gv.bone_weights[s] = inf.bone_weights[s];
+                }
+            }
+        }
+        return vertices;
+    };
+
     if (gpu_meshes_.size() == mesh_bindings_.size())
     {
         // Check if textures became available since last frame; rewrite the
@@ -2243,6 +2335,15 @@ bool AnimatorPreviewRenderer::EnsureGpuMeshes(VulkanContext* vulkan_context)
                 std::memcpy(gpu.material_ubo_mapped, &block, sizeof(block));
             }
 
+            // Re-apply morph (blendshape) deformation each frame so live Face-tab
+            // edits show immediately. Skips meshes without targets.
+            if (!binding.morph_targets.empty() && gpu.vertex_mapped != nullptr)
+            {
+                const std::vector<GpuVertex> morphed = build_vertices(binding);
+                std::memcpy(gpu.vertex_mapped, morphed.data(),
+                            morphed.size() * sizeof(GpuVertex));
+            }
+
             VkDescriptorImageInfo image_info = {};
             image_info.sampler = sampler;
             image_info.imageView = view;
@@ -2272,39 +2373,19 @@ bool AnimatorPreviewRenderer::EnsureGpuMeshes(VulkanContext* vulkan_context)
 
         if (binding.bind_positions.empty() || binding.indices.empty()) { continue; }
 
-        std::vector<GpuVertex> vertices(binding.bind_positions.size(), GpuVertex{});
-        for (std::size_t v = 0; v < binding.bind_positions.size(); ++v)
-        {
-            GpuVertex& gv = vertices[v];
-            gv.position[0] = binding.bind_positions[v][0];
-            gv.position[1] = binding.bind_positions[v][1];
-            gv.position[2] = binding.bind_positions[v][2];
-            gv.normal[0] = binding.bind_normals[v][0];
-            gv.normal[1] = binding.bind_normals[v][1];
-            gv.normal[2] = binding.bind_normals[v][2];
-            gv.uv[0] = binding.bind_uvs[v][0];
-            gv.uv[1] = binding.bind_uvs[v][1];
-            if (v < binding.influences.size())
-            {
-                const SkinInfluence& inf = binding.influences[v];
-                for (int s = 0; s < 4; ++s)
-                {
-                    gv.bone_indices[s] = std::max(inf.bone_indices[s], 0);
-                    gv.bone_weights[s] = inf.bone_weights[s];
-                }
-            }
-            else
-            {
-                for (int s = 0; s < 4; ++s) { gv.bone_indices[s] = 0; gv.bone_weights[s] = 0.0f; }
-            }
-        }
+        std::vector<GpuVertex> vertices = build_vertices(binding);
 
-        if (!AnimatorCreateDeviceBuffer(*vulkan_context, command_pool_,
-                vertices.data(), vertices.size() * sizeof(GpuVertex),
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, gpu.vertex_buffer, gpu.vertex_memory))
+        // Host-visible + mapped so morph deformation can be rewritten each frame
+        // without restaging. Editor-only preview, so the cost is negligible.
+        const VkDeviceSize vbytes = vertices.size() * sizeof(GpuVertex);
+        if (!AnimatorCreateHostBuffer(*vulkan_context, vbytes,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, gpu.vertex_buffer, gpu.vertex_memory,
+                &gpu.vertex_mapped))
         {
             continue;
         }
+        std::memcpy(gpu.vertex_mapped, vertices.data(), static_cast<std::size_t>(vbytes));
+        gpu.vertex_count = static_cast<std::uint32_t>(vertices.size());
         if (!AnimatorCreateDeviceBuffer(*vulkan_context, command_pool_,
                 binding.indices.data(), binding.indices.size() * sizeof(std::uint32_t),
                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT, gpu.index_buffer, gpu.index_memory))

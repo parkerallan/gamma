@@ -216,8 +216,63 @@ Quick summary: Immediately requests a runtime state change. Returns `true` on su
 local ok = Engine.Animator.SetState("Fox", "Run")
 ```
 
+#### `Engine.Animator.SetFacePose(name, poseName [, weight] [, speed])`
+Quick summary: Blends the face toward an expression pose authored on the controller's Face tab. `weight` (0–1, default `1`) is the intensity, so you can hold a pose partially open. `speed` (default `0` = snap) eases the transition — higher is faster — so poses cross-fade instead of popping. Pass an empty `poseName` to blend back to the controller's default pose. Returns `true` on success.
+
+```lua
+Engine.Animator.SetFacePose("Npc", "Angry")          -- full strength, instant
+Engine.Animator.SetFacePose("Npc", "Angry", 0.5, 6)  -- half strength, eased in
+Engine.Animator.SetFacePose("Npc", "", 1.0, 6)       -- ease back to default
+```
+
+#### `Engine.Animator.PlayLipSync(name, clipName [, loop])`
+Quick summary: Plays a baked lip-sync clip on the object. This **also plays the clip's source audio** (3D-positioned at the object) and drives the mouth from the audio's playback position, so speech and lips stay in sync. `clipName` matches a clip baked on the controller's Face tab, by file stem (e.g. `"hello"`) or its project-relative path. `loop` is optional (default `false`). Returns `true` if the clip was found and started.
+
+```lua
+Engine.Animator.PlayLipSync("Npc", "greeting")
+```
+
+#### `Engine.Animator.StopLipSync(name)`
+Quick summary: Stops lip-sync playback and its audio on the object. Returns `true` on success.
+
+```lua
+Engine.Animator.StopLipSync("Npc")
+```
+
+#### `Engine.Animator.IsLipSyncPlaying(name)`
+Quick summary: Returns `true` while a lip-sync clip is playing on the object.
+
+```lua
+if not Engine.Animator.IsLipSyncPlaying("Npc") then
+    Engine.Animator.PlayLipSync("Npc", "next_line")
+end
+```
+
+#### `Engine.Animator.SetEyeTarget(name, x, y, z)`
+Quick summary: Makes the object's eyes track a world-space point (drives the ARKit `eyeLook*` shapes). The gaze is smoothed; it holds until changed or cleared. Returns `true` on success.
+
+```lua
+Engine.Animator.SetEyeTarget("Npc", 0.0, 1.6, 5.0)
+```
+
+#### `Engine.Animator.LookAt(name, targetName)`
+Quick summary: Makes the object's eyes track another object's position, re-evaluated each frame as the target moves. Returns `true` on success.
+
+```lua
+Engine.Animator.LookAt("Npc", "Player")
+```
+
+#### `Engine.Animator.ClearEyeTarget(name)`
+Quick summary: Stops gaze tracking; the eyes ease back to center. Returns `true` on success.
+
+```lua
+Engine.Animator.ClearEyeTarget("Npc")
+```
+
 Notes:
 - Runtime controls: `SetBool`, `GetBool`, `SetTrigger`, `SetState`, `GetState`, `StateTime`.
+- Facial controls: `SetFacePose`, `PlayLipSync`, `StopLipSync`, `IsLipSyncPlaying`, `SetEyeTarget`, `LookAt`, `ClearEyeTarget`. The expression pose, a playing lip-sync clip, and gaze layer together (lip-sync overrides the mouth/jaw shapes it animates; gaze overrides the `eyeLook*` shapes).
+- Lip-sync clips are baked on the Animator panel's Face tab (drag a `.wav` onto the bake target); `PlayLipSync` owns audio playback, so do not start the same audio separately.
 - If an object has no Animator attribute, animator calls return `nil`, `false`, or no-op depending on function.
 
 ### `Time`

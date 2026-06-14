@@ -122,6 +122,7 @@ add_executable(game
     src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
     src/assets/AnimatorControllerAsset.cpp
+    src/assets/FaceClipAsset.cpp
     src/assets/ModelAsset.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp

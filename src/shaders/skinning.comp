@@ -42,13 +42,27 @@ layout(set = 0, binding = 3, std430) readonly buffer PaletteBuffer   { mat4 bone
 // record's `prev_position_buffer` field.
 layout(set = 0, binding = 4, std430) writeonly buffer PrevPositionBuffer { float data[]; } prev_positions;
 
+// ---- Morph-target (blendshape) inputs --------------------------------------
+// Sparse per-vertex layout: each vertex stores only the morph targets whose
+// delta is non-negligible. morph_descriptor holds (delta_base, count) per
+// vertex; each delta entry is 8 uints: [dpos.xyz, dnorm.xyz, weight_index,
+// pad]. morph_weights is the model-global ordered weight vector (one float per
+// ARKit target), uploaded host-coherent every frame like the bone palette.
+// All three buffers are always bound (minimal dummies when the model has no
+// blendshapes; descriptor sets require valid bindings).
+layout(set = 0, binding = 5, std430) readonly buffer MorphDeltaBuffer      { uint  data[]; }    morph_deltas;
+layout(set = 0, binding = 6, std430) readonly buffer MorphWeightBuffer     { float weights[]; } morph_weights;
+layout(set = 0, binding = 7, std430) readonly buffer MorphDescriptorBuffer { uint  data[]; }    morph_descriptor;
+
 layout(push_constant) uniform PushConstants
 {
     uint vertex_count;
     uint bone_count;
+    uint morph_target_count; // size of morph_weights; 0 when the model has no blendshapes
 } pc;
 
 const uint kVertexUintCount = 16u; // 64 bytes / sizeof(uint)
+const uint kMorphEntryUintCount = 8u; // dpos(3) + dnorm(3) + weight_index(1) + pad(1)
 
 vec3 read_vec3(uint base_index)
 {
@@ -94,11 +108,41 @@ void main()
     }
 
     // --- Read bind-pose vertex ---
-    const vec3 bind_position = read_vec3(base + 0u);
-    const vec3 bind_normal   = read_vec3(base + 3u);
+    // position/normal are mutable because morph targets deform them before the
+    // bone blend (morph-then-skin); tangent is passed through unchanged.
+    vec3 bind_position = read_vec3(base + 0u);
+    vec3 bind_normal   = read_vec3(base + 3u);
     // uv (2 floats) + color (4 floats) + tangent (4 floats) are passed through
     // unchanged. We copy them as raw uints to preserve exact bit patterns.
     const vec3 bind_tangent_xyz = read_vec3(base + 12u);
+
+    // --- Apply morph targets (blendshapes) to the bind pose ---
+    // Must run before skinning so deformed regions (e.g. an open jaw) are
+    // carried through the bone transform correctly.
+    if (pc.morph_target_count > 0u)
+    {
+        const uint desc_base   = vertex_index * 2u;
+        const uint delta_base  = morph_descriptor.data[desc_base + 0u];
+        const uint delta_count = morph_descriptor.data[desc_base + 1u];
+        for (uint i = 0u; i < delta_count; ++i)
+        {
+            const uint e    = (delta_base + i) * kMorphEntryUintCount;
+            const uint widx = morph_deltas.data[e + 6u];
+            const float w   = morph_weights.weights[widx];
+            if (w != 0.0)
+            {
+                bind_position += w * vec3(
+                    uintBitsToFloat(morph_deltas.data[e + 0u]),
+                    uintBitsToFloat(morph_deltas.data[e + 1u]),
+                    uintBitsToFloat(morph_deltas.data[e + 2u]));
+                bind_normal += w * vec3(
+                    uintBitsToFloat(morph_deltas.data[e + 3u]),
+                    uintBitsToFloat(morph_deltas.data[e + 4u]),
+                    uintBitsToFloat(morph_deltas.data[e + 5u]));
+            }
+        }
+        bind_normal = normalize(bind_normal);
+    }
     const uint passthrough_uv0     = bind_pose.data[base + 6u];
     const uint passthrough_uv1     = bind_pose.data[base + 7u];
     const uint passthrough_color0  = bind_pose.data[base + 8u];

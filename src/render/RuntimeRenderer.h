@@ -2,6 +2,7 @@
 
 #include "app/VulkanContext.h"
 #include "assets/AnimatorControllerAsset.h"
+#include "assets/FaceClipAsset.h"
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "audio/AudioEngine.h"
@@ -191,6 +192,20 @@ public:
         // primary motion-vector pass can compute `pos_obj_prev` for skinned
         // meshes.
         GpuBuffer prev_position_buffer{};
+        // ---- Morph-target (blendshape) resources -------------------------
+        // Sparse per-vertex deltas (binding 5, device-local, uploaded once),
+        // model-global weights (binding 6, host-coherent, written per frame),
+        // and per-vertex (delta_base, count) descriptors (binding 7,
+        // device-local, uploaded once). All three are always created -- when
+        // the model has no blendshapes they are 1-element dummies and
+        // morph_target_count is 0, so the shader's morph loop is skipped.
+        GpuBuffer morph_delta_buffer{};
+        GpuBuffer morph_weight_buffer{};
+        GpuBuffer morph_descriptor_buffer{};
+        std::uint32_t morph_target_count = 0;
+        // Model-global ordered ARKit target names; index N == weight slot N in
+        // morph_weight_buffer. Drives the per-frame weight upload.
+        std::vector<std::string> morph_target_names;
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         bool ready = false;
     };
@@ -322,6 +337,39 @@ public:
         bool jiggle_prev_object_origin_valid = false;
         // Rigidbody bone-collider sweep state (prev resolved box centers).
         std::vector<BoneSweepEntry> bone_sweep_states;
+
+        // ---- Face (blendshape) layer state -------------------------------
+        // Facial expression target (set via Animator.SetFacePose): the pose to
+        // blend toward ("" = the controller's default_pose), its intensity
+        // (0..1), and the ease speed (0 = snap, >0 = units/second). The current
+        // per-shape weights are eased toward the target each frame so poses
+        // cross-fade and can be held at partial strength.
+        std::string face_pose_target;
+        float face_pose_target_weight = 1.0f;
+        float face_pose_blend_speed = 0.0f;
+        std::unordered_map<std::string, float> face_pose_current;
+
+        // Gaze / look-at (set via Animator.SetEyeTarget / LookAt / ClearEyeTarget).
+        // The eyes drive the ARKit eyeLook* shapes toward a world point or, when
+        // gaze_target_object is set, that object's position (resolved each
+        // frame). gaze_cur_h/v are the smoothed horizontal/vertical deflections
+        // (-1..1) so the eyes ease rather than snap, and ease back to center
+        // when gaze is cleared.
+        bool gaze_active = false;
+        std::array<float, 3> gaze_target_point = {0.0f, 0.0f, 0.0f};
+        std::string gaze_target_object;
+        float gaze_cur_h = 0.0f;
+        float gaze_cur_v = 0.0f;
+        // Lip-sync playback (driven by Animator.PlayLipSync). lipsync_clip_path
+        // is the project-relative .faceclip currently playing, or empty.
+        std::string lipsync_clip_path;
+        float lipsync_time_seconds = 0.0f;
+        bool lipsync_playing = false;
+        bool lipsync_loop = false;
+        // Handle of the source-audio instance PlayLipSync started; the lip-sync
+        // curve time is driven from this sound's playback cursor so audio and
+        // mouth stay locked. kInvalidHandle when no audio is playing.
+        AudioEngine::SoundHandle lipsync_sound = AudioEngine::kInvalidHandle;
     };
 
 private:
@@ -386,6 +434,25 @@ private:
     bool TryGetRuntimeAnimatorParameter(const std::string& object_name, const std::string& parameter_name, float& out_value, bool& out_is_bool, std::size_t occurrence_index = 0) const;
     bool SetRuntimeAnimatorTrigger(const std::string& object_name, const std::string& trigger_name, std::size_t occurrence_index = 0);
     bool SetRuntimeAnimatorState(const std::string& object_name, const std::string& state_name, std::size_t occurrence_index = 0);
+    // Blends the face toward an expression pose. pose_name "" reverts to the
+    // controller's default pose; weight (0..1) scales the pose intensity;
+    // blend_speed eases the transition (0 = snap, >0 = units/second). Returns
+    // false if the object has no animator.
+    bool SetRuntimeAnimatorFacePose(const std::string& object_name, const std::string& pose_name, float weight, float blend_speed, std::size_t occurrence_index = 0);
+    // Starts lip-sync playback of a baked clip. clip_name matches a clip on the
+    // controller by file stem or project-relative path. Returns false if the
+    // object has no animator or the clip can't be resolved.
+    bool PlayRuntimeAnimatorLipSync(const std::string& object_name, const std::string& clip_name, bool loop, std::size_t occurrence_index = 0);
+    bool StopRuntimeAnimatorLipSync(const std::string& object_name, std::size_t occurrence_index = 0);
+    bool IsRuntimeAnimatorLipSyncPlaying(const std::string& object_name, std::size_t occurrence_index = 0) const;
+    // Gaze: make the eyes track a world point, or another object's position,
+    // until cleared. Returns false if the object has no animator.
+    bool SetRuntimeAnimatorEyeTarget(const std::string& object_name, float x, float y, float z, std::size_t occurrence_index = 0);
+    bool LookAtRuntimeAnimator(const std::string& object_name, const std::string& target_object, std::size_t occurrence_index = 0);
+    bool ClearRuntimeAnimatorEyeTarget(const std::string& object_name, std::size_t occurrence_index = 0);
+    // Loads (and caches) a baked FaceClip by project-relative path. Returns an
+    // empty clip (duration 0) on failure; cached either way to avoid retries.
+    const FaceClipAsset& GetOrLoadFaceClip(const std::string& clip_path);
     SceneObjectAttribute* FindScriptAttribute(const std::string& object_name, SceneObjectAttributeKind kind, std::size_t occurrence_index = 0);
     const SceneObjectAttribute* FindScriptAttribute(const std::string& object_name, SceneObjectAttributeKind kind, std::size_t occurrence_index = 0) const;
     enum class ScriptAttributeAccessorId
@@ -462,6 +529,13 @@ private:
         AnimatorGetState,
         AnimatorSetDefaultState,
         AnimatorGetDefaultState,
+        AnimatorSetFacePose,
+        AnimatorPlayLipSync,
+        AnimatorStopLipSync,
+        AnimatorIsLipSyncPlaying,
+        AnimatorSetEyeTarget,
+        AnimatorLookAt,
+        AnimatorClearEyeTarget,
         AudioClipPath,
         AudioPlayMode,
         AudioVolume,
@@ -594,6 +668,9 @@ private:
     VkPipeline skinning_pipeline_ = VK_NULL_HANDLE;
     std::unordered_map<std::filesystem::path, GpuSkinningResources> gpu_skinning_resources_;
     std::unordered_map<std::string, RuntimeAnimatorState> runtime_animator_states_;
+    // Baked lip-sync FaceClips loaded for runtime playback, keyed by their
+    // project-relative path. Populated lazily by GetOrLoadFaceClip.
+    std::unordered_map<std::string, FaceClipAsset> face_clip_cache_;
     std::unordered_map<std::filesystem::path, GpuMeshCacheEntry> mesh_cache_;
     std::unordered_map<std::filesystem::path, CachedScriptSourceEntry> script_cache_;
     PhysicsWorld physics_world_{};

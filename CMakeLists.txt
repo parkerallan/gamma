@@ -540,6 +540,8 @@ add_executable(engine
     src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
     src/assets/AnimatorControllerAsset.cpp
+    src/assets/FaceClipAsset.cpp
+    src/assets/LipSyncBake.cpp
     src/assets/ModelAsset.cpp
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp

@@ -221,6 +221,9 @@ public:
         std::uint32_t group_count_x = 0;
         std::uint32_t vertex_count = 0;
         std::uint32_t bone_count = 0;
+        // Number of morph (blendshape) targets in the bound weight buffer; 0
+        // when the model has no blendshapes (shader skips the morph loop).
+        std::uint32_t morph_target_count = 0;
     };
     void EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch);
 
