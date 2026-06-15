@@ -130,6 +130,7 @@ public:
         bool selected = false;
         bool is_water_surface = false;
         bool is_cloud = false;
+        bool is_fire = false;
     };
 
 private:

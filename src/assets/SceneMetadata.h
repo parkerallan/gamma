@@ -48,6 +48,7 @@ enum class SceneObjectShaderType
     None,
     Water,
     Cloud,
+    Fire,
 };
 
 enum class SceneObjectCameraType

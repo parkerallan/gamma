@@ -96,7 +96,7 @@ public:
         std::string key;
         std::string mesh_key;
         std::array<float, 16> transform = {};
-        std::uint32_t shader_type = 0; // 0=default, 1=water
+        std::uint32_t shader_type = 0; // 0=default, 1=water, 2=cloud, 3=fire
         // Optional caller-supplied previous-frame transform. If the caller
         // does not supply one (left default-initialized to all zeros), the
         // ray tracer uses its own cached previous transform for this

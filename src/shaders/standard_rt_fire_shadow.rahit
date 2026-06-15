@@ -1,0 +1,12 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Fire shadow any-hit: fire is an emissive transparent volume, so it must not
+// occlude shadow rays. Ignoring every intersection lets shadow rays pass through
+// the proxy cube to find the real occluder (or the shadow miss = fully lit),
+// so the rectangular proxy never casts a box-shaped shadow.
+
+void main()
+{
+    ignoreIntersectionEXT;
+}
