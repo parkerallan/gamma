@@ -115,6 +115,13 @@ struct SceneObjectSpotLightAttributes
     float range = 15.0f;
     float inner_cone_degrees = 20.0f;
     float outer_cone_degrees = 30.0f;
+    // Optional volumetric light shaft ("flashlight in fog"). When enabled the
+    // ray generation shader marches the camera ray through the cone and
+    // accumulates in-scattered light so the beam is visible in the air, not
+    // just where it lands on geometry. volumetric_intensity scales the
+    // scattering density.
+    bool volumetric_enabled = false;
+    float volumetric_intensity = 1.0f;
 };
 
 struct SceneObjectCameraAttributes
@@ -406,6 +413,8 @@ bool SetSceneObjectAttributeHaloIntensity(const std::filesystem::path& scene_pat
 bool SetSceneObjectAttributeHaloRadius(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float halo_radius);
 bool SetSceneObjectAttributeInnerConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float inner_cone_degrees);
 bool SetSceneObjectAttributeOuterConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float outer_cone_degrees);
+bool SetSceneObjectAttributeSpotVolumetricEnabled(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool enabled);
+bool SetSceneObjectAttributeSpotVolumetricIntensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float intensity);
 bool SetSceneObjectAttributeFieldOfView(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float field_of_view_degrees);
 bool SetSceneObjectAttributeNearClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float near_clip);
 bool SetSceneObjectAttributeFarClip(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float far_clip);

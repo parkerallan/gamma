@@ -554,6 +554,8 @@ bool IsAttributePropertyLine(std::string_view line)
         StartsWith(line, "AttributeHaloRadius:") ||
         StartsWith(line, "AttributeInnerCone:") ||
         StartsWith(line, "AttributeOuterCone:") ||
+        StartsWith(line, "AttributeSpotVolumetric:") ||
+        StartsWith(line, "AttributeSpotVolumetricIntensity:") ||
         StartsWith(line, "AttributeFov:") ||
         StartsWith(line, "AttributeNearClip:") ||
     StartsWith(line, "AttributeFarClip:") ||
@@ -1872,6 +1874,21 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
         {
             ParseScalar(ExtractValue(trimmed, "AttributeOuterCone:"), current_attribute->spot_light.outer_cone_degrees);
         }
+        else if (StartsWith(trimmed, "AttributeSpotVolumetric") && current_attribute != nullptr)
+        {
+            // Both spot-light volumetric keys are dispatched inside this single
+            // branch so the outer parse chain stays shallow (MSVC C1061 limits
+            // how deeply if/else-if blocks may nest). The Intensity key is
+            // checked first because it also begins with "AttributeSpotVolumetric".
+            if (StartsWith(trimmed, "AttributeSpotVolumetricIntensity:"))
+            {
+                ParseScalar(ExtractValue(trimmed, "AttributeSpotVolumetricIntensity:"), current_attribute->spot_light.volumetric_intensity);
+            }
+            else if (StartsWith(trimmed, "AttributeSpotVolumetric:"))
+            {
+                ParseBool(ExtractValue(trimmed, "AttributeSpotVolumetric:"), current_attribute->spot_light.volumetric_enabled);
+            }
+        }
         else if (StartsWith(trimmed, "AttributeFov:") && current_attribute != nullptr)
         {
             ParseScalar(ExtractValue(trimmed, "AttributeFov:"), current_attribute->camera.field_of_view_degrees);
@@ -2799,6 +2816,16 @@ bool SetSceneObjectAttributeInnerConeDegrees(const std::filesystem::path& scene_
 bool SetSceneObjectAttributeOuterConeDegrees(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float outer_cone_degrees)
 {
     return SetSceneObjectAttributeScalar("AttributeOuterCone", scene_path, object_name, attribute_index, outer_cone_degrees);
+}
+
+bool SetSceneObjectAttributeSpotVolumetricEnabled(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, bool enabled)
+{
+    return SetSceneObjectAttributeBoolean("AttributeSpotVolumetric", scene_path, object_name, attribute_index, enabled);
+}
+
+bool SetSceneObjectAttributeSpotVolumetricIntensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float intensity)
+{
+    return SetSceneObjectAttributeScalar("AttributeSpotVolumetricIntensity", scene_path, object_name, attribute_index, intensity);
 }
 
 bool SetSceneObjectAttributeFieldOfView(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float field_of_view_degrees)

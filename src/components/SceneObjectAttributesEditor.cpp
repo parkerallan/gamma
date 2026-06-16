@@ -774,6 +774,31 @@ bool RenderAttributeSection(
                     return SetSceneObjectAttributeOuterConeDegrees(state.selected_item_path, object.name, attribute_index, outer_cone);
                 }) || changed;
             }
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Volumetric Beam");
+            ImGui::TextDisabled("Makes the light cone visible in the air (flashlight in fog).");
+
+            bool volumetric_enabled = attribute.spot_light.volumetric_enabled;
+            if (ImGui::Checkbox("Project Light Shaft", &volumetric_enabled))
+            {
+                changed = SaveSceneObjectAttributeEdit(state, object, "spot light volumetric", [&]()
+                {
+                    return SetSceneObjectAttributeSpotVolumetricEnabled(state.selected_item_path, object.name, attribute_index, volumetric_enabled);
+                }) || changed;
+            }
+
+            if (attribute.spot_light.volumetric_enabled)
+            {
+                float volumetric_intensity = attribute.spot_light.volumetric_intensity;
+                if (ImGui::DragFloat("Beam Intensity", &volumetric_intensity, 0.01f, 0.0f, 10.0f, "%.3f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "spot light volumetric intensity", [&]()
+                    {
+                        return SetSceneObjectAttributeSpotVolumetricIntensity(state.selected_item_path, object.name, attribute_index, volumetric_intensity);
+                    }) || changed;
+                }
+            }
             break;
         }
 

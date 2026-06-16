@@ -128,10 +128,16 @@ void ApplySpotLight(ResolvedSceneLighting& lighting, const SceneLightingResolved
         position.y,
         position.z,
         (std::max)(attribute.spot_light.range, 0.001f)};
+    // .z packs the volumetric scattering strength: 0 means the optional light
+    // shaft is disabled (checkbox off), > 0 is the scattering density the ray
+    // generation shader uses to make the cone visible in the air.
+    const float volumetric_strength = attribute.spot_light.volumetric_enabled
+        ? (std::max)(attribute.spot_light.volumetric_intensity, 0.0f)
+        : 0.0f;
     lighting.spot_light_data = {
         std::cos(DegreesToRadians(attribute.spot_light.outer_cone_degrees)),
         kDefaultSpotLightSourceRadius,
-        0.0f,
+        volumetric_strength,
         0.0f};
 }
 
