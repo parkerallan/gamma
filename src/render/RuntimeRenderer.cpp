@@ -120,6 +120,19 @@ bool IsFireObject(const SceneObjectMetadata& object)
     return false;
 }
 
+bool IsRainObject(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Rain)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
 {
     if (end_ticks <= start_ticks)
@@ -6423,6 +6436,7 @@ bool RuntimeRenderer::BuildQueuedScene(
         queued_object.is_water_surface = IsWaterSurfaceObject(object);
         queued_object.is_cloud = IsCloudObject(object);
         queued_object.is_fire = IsFireObject(object);
+        queued_object.is_rain = IsRainObject(object);
         queued_object.script_paths.reserve(object.script_paths.size());
         for (const std::string& script_path : object.script_paths)
         {
@@ -6574,6 +6588,7 @@ bool RuntimeRenderer::BuildQueuedScene(
             queued_object.is_water_surface = IsWaterSurfaceObject(attr_proxy);
             queued_object.is_cloud = IsCloudObject(attr_proxy);
             queued_object.is_fire = IsFireObject(attr_proxy);
+            queued_object.is_rain = IsRainObject(attr_proxy);
         }
 
         if (!spawned.model_path.empty())
@@ -7000,7 +7015,7 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
         instance_input.transform = object.model_matrix;
-        instance_input.shader_type = object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u));
+        instance_input.shader_type = object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u)));
         ApplyLocalModelOffset(instance_input.transform.data(), object.model_visual_offset);
         instance_inputs.push_back(std::move(instance_input));
     }

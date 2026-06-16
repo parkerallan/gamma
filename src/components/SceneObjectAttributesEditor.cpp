@@ -2212,6 +2212,7 @@ bool RenderAttributeSection(
                 {"Water", SceneObjectShaderType::Water},
                 {"Cloud", SceneObjectShaderType::Cloud},
                 {"Fire", SceneObjectShaderType::Fire},
+                {"Rain", SceneObjectShaderType::Rain},
             };
 
             int selected_shader_index = 0;

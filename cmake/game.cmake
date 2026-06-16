@@ -83,6 +83,8 @@ add_game_shader(water_underwater.vert vert)
 add_game_shader(water_underwater.frag frag)
 add_game_shader(standard_rt_fire_shadow.rahit rahit)
 add_game_shader(standard_rt_fire.rchit rchit)
+add_game_shader(standard_rt_rain_shadow.rahit rahit)
+add_game_shader(standard_rt_rain.rchit rchit)
 
 add_custom_target(game_shaders
     DEPENDS ${GAME_SHADER_OUTPUTS}

@@ -99,6 +99,19 @@ bool IsFireObject(const SceneObjectMetadata& object)
     return false;
 }
 
+bool IsRainObject(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Rain)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 Vec3 ToVec3(const SceneVector3& value)
 {
     return Vec3{value[0], value[1], value[2]};
@@ -2782,7 +2795,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
-        instance_input.shader_type = object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u));
+        instance_input.shader_type = object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u)));
         BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -3167,6 +3180,7 @@ void SceneViewportRenderer::RenderUi(
         queued_object.is_water_surface = IsWaterSurfaceObject(object);
         queued_object.is_cloud = IsCloudObject(object);
         queued_object.is_fire = IsFireObject(object);
+        queued_object.is_rain = IsRainObject(object);
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;

@@ -1,0 +1,12 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Rain (window glass) shadow any-hit: the glass is a transparent refractive
+// surface, so it must not occlude shadow rays. Ignoring every intersection lets
+// shadow rays pass through the proxy plane to the real occluder (or the shadow
+// miss = fully lit), so the rectangular proxy never casts a slab-shaped shadow.
+
+void main()
+{
+    ignoreIntersectionEXT;
+}

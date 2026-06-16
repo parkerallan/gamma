@@ -224,6 +224,7 @@ public:
         bool is_water_surface = false;
         bool is_cloud = false;
         bool is_fire = false;
+        bool is_rain = false;
     };
 
     struct CachedScriptSourceEntry

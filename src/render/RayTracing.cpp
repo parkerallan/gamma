@@ -1502,7 +1502,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         acceleration_instance.instanceCustomIndex = mesh_index_it->second;
         acceleration_instance.mask = 0xFF;
         acceleration_instance.instanceShaderBindingTableRecordOffset =
-            (instance.shader_type == 3u) ? 4u : ((instance.shader_type == 2u) ? 2u : 0u);
+            (instance.shader_type == 4u) ? 6u : ((instance.shader_type == 3u) ? 4u : ((instance.shader_type == 2u) ? 2u : 0u));
         acceleration_instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         acceleration_instance.accelerationStructureReference = mesh_it->second.acceleration_structure.device_address;
         new_instances.push_back(acceleration_instance);
@@ -2085,6 +2085,8 @@ bool RayTracing::EnsurePipelineResources()
         VkShaderModule cloud_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_cloud.rchit.spv"));
         VkShaderModule fire_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_fire.rchit.spv"));
         VkShaderModule fire_shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_fire_shadow.rahit.spv"));
+        VkShaderModule rain_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_rain.rchit.spv"));
+        VkShaderModule rain_shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_rain_shadow.rahit.spv"));
         VkShaderModule primary_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_primary.rahit.spv"));
         VkShaderModule shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_shadow.rahit.spv"));
         if (raygen_shader == VK_NULL_HANDLE ||
@@ -2095,6 +2097,8 @@ bool RayTracing::EnsurePipelineResources()
             cloud_closest_hit_shader == VK_NULL_HANDLE ||
             fire_closest_hit_shader == VK_NULL_HANDLE ||
             fire_shadow_any_hit_shader == VK_NULL_HANDLE ||
+            rain_closest_hit_shader == VK_NULL_HANDLE ||
+            rain_shadow_any_hit_shader == VK_NULL_HANDLE ||
             primary_any_hit_shader == VK_NULL_HANDLE ||
             shadow_any_hit_shader == VK_NULL_HANDLE)
         {
@@ -2134,6 +2138,14 @@ bool RayTracing::EnsurePipelineResources()
             {
                 vkDestroyShaderModule(device, fire_shadow_any_hit_shader, allocator);
             }
+            if (rain_closest_hit_shader != VK_NULL_HANDLE)
+            {
+                vkDestroyShaderModule(device, rain_closest_hit_shader, allocator);
+            }
+            if (rain_shadow_any_hit_shader != VK_NULL_HANDLE)
+            {
+                vkDestroyShaderModule(device, rain_shadow_any_hit_shader, allocator);
+            }
             if (shadow_any_hit_shader != VK_NULL_HANDLE)
             {
                 vkDestroyShaderModule(device, shadow_any_hit_shader, allocator);
@@ -2143,7 +2155,7 @@ bool RayTracing::EnsurePipelineResources()
         }
 
         const char* entry_name = "main";
-        std::array<VkPipelineShaderStageCreateInfo, 10> stages = {};
+        std::array<VkPipelineShaderStageCreateInfo, 12> stages = {};
         stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_RAYGEN_BIT_KHR, raygen_shader, entry_name, nullptr};
         stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_MISS_BIT_KHR, miss_shader, entry_name, nullptr};
         stages[2] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_MISS_BIT_KHR, shadow_miss_shader, entry_name, nullptr};
@@ -2154,8 +2166,10 @@ bool RayTracing::EnsurePipelineResources()
         stages[7] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, cloud_closest_hit_shader, entry_name, nullptr};
         stages[8] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, fire_closest_hit_shader, entry_name, nullptr};
         stages[9] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_ANY_HIT_BIT_KHR, fire_shadow_any_hit_shader, entry_name, nullptr};
+        stages[10] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, rain_closest_hit_shader, entry_name, nullptr};
+        stages[11] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_ANY_HIT_BIT_KHR, rain_shadow_any_hit_shader, entry_name, nullptr};
 
-        std::array<VkRayTracingShaderGroupCreateInfoKHR, 9> groups = {};
+        std::array<VkRayTracingShaderGroupCreateInfoKHR, 11> groups = {};
         groups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
         groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
         groups[0].generalShader = 0;
@@ -2225,6 +2239,22 @@ bool RayTracing::EnsurePipelineResources()
         groups[8].anyHitShader = 9;
         groups[8].intersectionShader = VK_SHADER_UNUSED_KHR;
 
+        // hit group 6 (sbt offset 6): rain primary hit — refractive window glass
+        groups[9].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[9].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groups[9].generalShader = VK_SHADER_UNUSED_KHR;
+        groups[9].closestHitShader = 10;
+        groups[9].anyHitShader = VK_SHADER_UNUSED_KHR;
+        groups[9].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+        // hit group 7 (sbt offset 7): rain shadow hit — any-hit ignores so glass casts no shadow
+        groups[10].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[10].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groups[10].generalShader = VK_SHADER_UNUSED_KHR;
+        groups[10].closestHitShader = VK_SHADER_UNUSED_KHR;
+        groups[10].anyHitShader = 11;
+        groups[10].intersectionShader = VK_SHADER_UNUSED_KHR;
+
         VkRayTracingPipelineCreateInfoKHR pipeline_info = {VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
         pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
         pipeline_info.pStages = stages.data();
@@ -2256,6 +2286,8 @@ bool RayTracing::EnsurePipelineResources()
         vkDestroyShaderModule(device, cloud_closest_hit_shader, allocator);
         vkDestroyShaderModule(device, fire_closest_hit_shader, allocator);
         vkDestroyShaderModule(device, fire_shadow_any_hit_shader, allocator);
+        vkDestroyShaderModule(device, rain_closest_hit_shader, allocator);
+        vkDestroyShaderModule(device, rain_shadow_any_hit_shader, allocator);
         vkDestroyShaderModule(device, primary_any_hit_shader, allocator);
         vkDestroyShaderModule(device, shadow_any_hit_shader, allocator);
 
@@ -2268,7 +2300,7 @@ bool RayTracing::EnsurePipelineResources()
 
         if (!BuildShaderBindingTable(*vulkan_context_, pipeline_, 0, 1, raygen_sbt_) ||
             !BuildShaderBindingTable(*vulkan_context_, pipeline_, 1, 2, miss_sbt_) ||
-            !BuildShaderBindingTable(*vulkan_context_, pipeline_, 3, 6, hit_sbt_))
+            !BuildShaderBindingTable(*vulkan_context_, pipeline_, 3, 8, hit_sbt_))
         {
             status_message_ = "Failed to build viewport RT shader binding table";
             return false;
