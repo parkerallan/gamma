@@ -2239,6 +2239,7 @@ bool RenderAttributeSection(
                 {"Fire", SceneObjectShaderType::Fire},
                 {"Rain", SceneObjectShaderType::Rain},
                 {"Puddle", SceneObjectShaderType::Puddle},
+                {"Rain Particles", SceneObjectShaderType::RainParticles},
             };
 
             int selected_shader_index = 0;
@@ -2269,6 +2270,55 @@ bool RenderAttributeSection(
                     }
                 }
                 ImGui::EndCombo();
+            }
+
+            // Water-only: surface/volume tint. Defaults to the engine's deep blue.
+            if (attribute.shader.type == SceneObjectShaderType::Water)
+            {
+                float water_color[3] = {
+                    attribute.shader.color[0],
+                    attribute.shader.color[1],
+                    attribute.shader.color[2]};
+                if (ImGui::ColorEdit3("Color", water_color))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "water color", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderColor(state.selected_item_path, object.name, attribute_index, {water_color[0], water_color[1], water_color[2]});
+                    }) || changed;
+                }
+            }
+
+            // Rain Particles: tint color, fall speed, and streak size. Reuses the
+            // shared color / rain_speed / drop_scale attribute fields.
+            if (attribute.shader.type == SceneObjectShaderType::RainParticles)
+            {
+                float rain_color[3] = {
+                    attribute.shader.color[0],
+                    attribute.shader.color[1],
+                    attribute.shader.color[2]};
+                if (ImGui::ColorEdit3("Color", rain_color))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rain color", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderColor(state.selected_item_path, object.name, attribute_index, {rain_color[0], rain_color[1], rain_color[2]});
+                    }) || changed;
+                }
+                float fall_speed = attribute.shader.rain_speed;
+                if (ImGui::DragFloat("Fall Speed", &fall_speed, 0.02f, 0.1f, 5.0f, "%.2fx"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rain fall speed", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderDropSpeed(state.selected_item_path, object.name, attribute_index, fall_speed);
+                    }) || changed;
+                }
+                float drop_size = attribute.shader.drop_scale;
+                if (ImGui::DragFloat("Drop Size", &drop_size, 0.01f, 0.15f, 3.0f, "%.2fx"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "rain drop size", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderDropScale(state.selected_item_path, object.name, attribute_index, drop_size);
+                    }) || changed;
+                }
             }
 
             // Puddle-only: raindrop/ripple size. Smaller = smaller drops; stays

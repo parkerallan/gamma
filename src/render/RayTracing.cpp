@@ -1546,6 +1546,11 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
                 (cached != prev_instance_transforms_.end()) ? cached->second : instance.transform;
         }
         record.shader_data[0] = instance.shader_type;
+        // Pack the water tint color (read only by the water hit shader) into the
+        // remaining shader_data slots as raw float bits.
+        std::memcpy(&record.shader_data[1], &instance.water_color[0], sizeof(float));
+        std::memcpy(&record.shader_data[2], &instance.water_color[1], sizeof(float));
+        std::memcpy(&record.shader_data[3], &instance.water_color[2], sizeof(float));
         new_instance_records.push_back(record);
         instance_curr_for_cache.emplace_back(instance.key, instance.transform);
     }
@@ -3960,6 +3965,10 @@ bool RayTracing::RenderFrame(
             VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
         depth_layouts_[slot] = VK_IMAGE_LAYOUT_GENERAL;
     }
+
+    // Record the slot the rgen is about to write so GetLatestDepth* stays valid
+    // after the post-submit `taa_parity_` flip below.
+    depth_write_slot_ = taa_parity_;
 
     if (top_level_as_.handle == VK_NULL_HANDLE ||
         mesh_record_buffer_.buffer == VK_NULL_HANDLE ||

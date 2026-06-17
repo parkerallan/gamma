@@ -102,6 +102,9 @@ public:
         float puddle_drop_scale = 1.0f;
         // Puddle only: how fast new raindrops appear (wave-sim uRainSpeed).
         float puddle_drop_speed = 1.0f;
+        // Water (shader_type 1) only: surface/volume tint color. Default is the
+        // engine's deep blue, reproducing the original fixed water look.
+        std::array<float, 3> water_color = {0.02f, 0.25f, 0.75f};
         // Optional caller-supplied previous-frame transform. If the caller
         // does not supply one (left default-initialized to all zeros), the
         // ray tracer uses its own cached previous transform for this
@@ -258,6 +261,12 @@ public:
     // only by the TAA disocclusion test; sky/miss pixels contain 1e30.
     VkImage GetCurrentDepthImage() const { return depth_images_[taa_parity_]; }
     VkImageView GetCurrentDepthView() const { return depth_views_[taa_parity_]; }
+    // The depth slot actually written by the most recent RenderFrame. Unlike
+    // GetCurrentDepth*, this is stable after the post-submit `taa_parity_` flip,
+    // so consumers that read depth AFTER RenderFrame returns (e.g. the rain
+    // composite pass) get this frame's depth, not last frame's.
+    VkImage GetLatestDepthImage() const { return depth_images_[depth_write_slot_]; }
+    VkImageView GetLatestDepthView() const { return depth_views_[depth_write_slot_]; }
     VkAccelerationStructureKHR GetTopLevelAccelerationStructure() const { return top_level_as_.handle; }
 
 private:
@@ -609,6 +618,9 @@ private:
     VkDeviceMemory depth_memories_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkImageView depth_views_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkImageLayout depth_layouts_[2] = {VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED};
+    // Slot the rgen wrote this frame (captured before the post-submit
+    // `taa_parity_` flip). Consumed by GetLatestDepth*.
+    int depth_write_slot_ = 0;
     // Ping-pong storage for the previous and current TAA results (PQ-encoded
     // HDR). Index `taa_parity_` is the *current* output; the other slot is
     // sampled as the "previous frame" input.

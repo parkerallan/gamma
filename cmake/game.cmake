@@ -88,6 +88,9 @@ add_game_shader(standard_rt_rain.rchit rchit)
 add_game_shader(standard_rt_puddle.rchit rchit)
 add_game_shader(standard_rt_puddle_shadow.rahit rahit)
 add_game_shader(rain_wave.comp comp)
+add_game_shader(rain_particles.comp comp)
+add_game_shader(rain_particle.vert vert)
+add_game_shader(rain_particle.frag frag)
 
 add_custom_target(game_shaders
     DEPENDS ${GAME_SHADER_OUTPUTS}
@@ -141,6 +144,7 @@ add_executable(game
     src/render/Raytracing.cpp
     src/render/PhysicsWorld.cpp
     src/render/Scene2DRenderer.cpp
+    src/render/RainParticleRenderer.cpp
     src/render/SkyboxRenderer.cpp
     src/render/RuntimeRenderer.cpp
     src/render/CameraController.cpp

@@ -172,6 +172,32 @@ float GetPuddleDropSpeed(const SceneObjectMetadata& object)
     return 1.0f;
 }
 
+std::array<float, 3> GetWaterColor(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Water)
+        {
+            return attribute.shader.color;
+        }
+    }
+    return {0.02f, 0.25f, 0.75f};
+}
+
+const SceneObjectAttribute* FindRainParticlesAttribute(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::RainParticles)
+        {
+            return &attribute;
+        }
+    }
+    return nullptr;
+}
+
 float TicksToMilliseconds(std::uint64_t start_ticks, std::uint64_t end_ticks)
 {
     if (end_ticks <= start_ticks)
@@ -2087,6 +2113,7 @@ bool RuntimeRenderer::Initialize(VulkanContext* context)
     effects_renderer_.Initialize(context);
 
     scene_2d_renderer_.Initialize(context);
+    rain_particle_renderer_.Initialize(context);
     skybox_renderer_.Initialize(context);
 
     audio_engine_ready_ = audio_engine_.Initialize();
@@ -2349,6 +2376,7 @@ void RuntimeRenderer::Shutdown()
     scene_2d_renderer_.SetVideoPlaybackManager(nullptr);
     video_playback_manager_.Shutdown();
     scene_2d_renderer_.Shutdown();
+    rain_particle_renderer_.Shutdown();
     ray_tracing_.Shutdown();
     for (auto& [path, entry] : mesh_cache_)
     {
@@ -6479,6 +6507,14 @@ bool RuntimeRenderer::BuildQueuedScene(
         queued_object.is_puddle = IsPuddleObject(object);
         queued_object.puddle_drop_scale = GetPuddleDropScale(object);
         queued_object.puddle_drop_speed = GetPuddleDropSpeed(object);
+        queued_object.water_color = GetWaterColor(object);
+        if (const SceneObjectAttribute* rain_attr = FindRainParticlesAttribute(object))
+        {
+            queued_object.is_rain_particles = true;
+            queued_object.rain_color = rain_attr->shader.color;
+            queued_object.rain_fall_speed = rain_attr->shader.rain_speed;
+            queued_object.rain_drop_size = rain_attr->shader.drop_scale;
+        }
         queued_object.script_paths.reserve(object.script_paths.size());
         for (const std::string& script_path : object.script_paths)
         {
@@ -6634,6 +6670,14 @@ bool RuntimeRenderer::BuildQueuedScene(
             queued_object.is_puddle = IsPuddleObject(attr_proxy);
             queued_object.puddle_drop_scale = GetPuddleDropScale(attr_proxy);
             queued_object.puddle_drop_speed = GetPuddleDropSpeed(attr_proxy);
+            queued_object.water_color = GetWaterColor(attr_proxy);
+            if (const SceneObjectAttribute* rain_attr = FindRainParticlesAttribute(attr_proxy))
+            {
+                queued_object.is_rain_particles = true;
+                queued_object.rain_color = rain_attr->shader.color;
+                queued_object.rain_fall_speed = rain_attr->shader.rain_speed;
+                queued_object.rain_drop_size = rain_attr->shader.drop_scale;
+            }
         }
 
         if (!spawned.model_path.empty())
@@ -6986,8 +7030,22 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
     bone_collider_defs_.clear();
     bone_collider_targets_.clear();
 
+    rain_particles_active_ = false;
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
+        // Rain particle emitters are raster overlays, not ray-traced geometry —
+        // capture the proxy plane and skip the instance so it stays invisible.
+        if (object.is_rain_particles)
+        {
+            rain_particles_active_ = true;
+            rain_particles_plane_matrix_ = object.model_matrix;
+            rain_particles_color_ = object.rain_color;
+            rain_particles_fall_speed_ = object.rain_fall_speed;
+            rain_particles_drop_size_ = object.rain_drop_size;
+            continue;
+        }
+
         const std::uint64_t skinning_start_ticks = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
         const bool skinning_ok = UpdateAnimatedMeshForObject(object);
         if (out_skinning_ms != nullptr)
@@ -7063,6 +7121,7 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         instance_input.shader_type = object.is_puddle ? 5u : (object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u))));
         instance_input.puddle_drop_scale = object.puddle_drop_scale;
         instance_input.puddle_drop_speed = object.puddle_drop_speed;
+        instance_input.water_color = object.water_color;
         ApplyLocalModelOffset(instance_input.transform.data(), object.model_visual_offset);
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -7487,6 +7546,36 @@ bool RuntimeRenderer::RenderFrame(std::uint32_t target_width, std::uint32_t targ
             static_cast<std::uint64_t>(SDL_GetPerformanceCounter()));
     }
     performance_stats_.video_time_ms = video_update_ms;
+    if (ray_tracing_.WasFrameSubmittedLastCall() && rain_particles_active_)
+    {
+        std::array<float, 16> view_mat{};
+        std::array<float, 16> proj_mat{};
+        std::array<float, 16> view_proj{};
+        if (InvertMatrix(view_inverse.data(), view_mat.data()) &&
+            InvertMatrix(projection_inverse.data(), proj_mat.data()))
+        {
+            MultiplyMatrix(proj_mat.data(), view_mat.data(), view_proj.data());
+
+            RainParticleRenderer::Params rain_params;
+            rain_params.view_projection = view_proj;
+            rain_params.plane_to_world = rain_particles_plane_matrix_;
+            rain_params.camera_position = {view_inverse[12], view_inverse[13], view_inverse[14]};
+            rain_params.color = rain_particles_color_;
+            rain_params.fall_speed = rain_particles_fall_speed_;
+            rain_params.drop_size = rain_particles_drop_size_;
+            rain_particle_renderer_.Render(
+                rain_params,
+                ray_tracing_.GetTopLevelAccelerationStructure(),
+                ray_tracing_.GetOutputImage(),
+                ray_tracing_.GetOutputImageView(),
+                ray_tracing_.GetOutputWidth(),
+                ray_tracing_.GetOutputHeight(),
+                ray_tracing_.GetLatestDepthImage(),
+                ray_tracing_.GetLatestDepthView(),
+                ray_tracing_.GetOutputWidth(),
+                ray_tracing_.GetOutputHeight());
+        }
+    }
     if (ray_tracing_.WasFrameSubmittedLastCall())
     {
         scene_2d_renderer_.CompositeOverlay(

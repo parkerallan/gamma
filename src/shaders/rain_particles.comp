@@ -1,0 +1,109 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_ray_query : require
+
+// GPU rain particle simulation with world-space collision. Each particle is
+// stored emitter-relative: data.xy = (u, v) on the emitter plane in [-1, 1],
+// data.z = downward distance fallen, data.w = the per-column collision height
+// (distance from the emitter down to the first surface beneath). A downward ray
+// is cast each frame; the drop's fall is clamped to that surface so rain stops
+// at the floor / under shelters and recycles to the top with a fresh position.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Particles
+{
+    vec4 particles[];
+};
+
+layout(set = 0, binding = 1, std140) uniform RainParams
+{
+    vec4  params;   // x = dt, y = time, z = fall_speed (world/s), w = max_fall_dist
+    uvec4 control;  // x = particle_count, y = reset (1 on first/realloc frame)
+    mat4  plane_to_world; // emitter plane: local [-1,1] XZ quad, y = 0
+} u;
+
+// Scene TLAS for the downward collision ray. cullMask 0x01 = solid occluders.
+layout(set = 0, binding = 2) uniform accelerationStructureEXT scene_tlas;
+
+uint pcg(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float rnd(uint v)
+{
+    return float(pcg(v)) * (1.0 / 4294967295.0);
+}
+
+// Distance from the emitter down to the NEAREST solid surface beneath (u, v),
+// or max_fall_dist if nothing is hit within range.
+float column_height(vec2 uv, float max_fall_dist)
+{
+    vec3 origin = (u.plane_to_world * vec4(uv.x, 0.0, uv.y, 1.0)).xyz;
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq, scene_tlas,
+        gl_RayFlagsOpaqueEXT,
+        0x01,
+        origin + vec3(0.0, -1.0e-3, 0.0), 1.0e-3,
+        vec3(0.0, -1.0, 0.0), max_fall_dist);
+    while (rayQueryProceedEXT(rq)) {}
+    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)
+    {
+        return rayQueryGetIntersectionTEXT(rq, true);
+    }
+    return max_fall_dist;
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= u.control.x)
+    {
+        return;
+    }
+
+    const float max_fall = max(u.params.w, 0.1);
+
+    vec2 uv;
+    float fall;
+    if (u.control.y == 1u)
+    {
+        uv = vec2(rnd(i * 3u + 0u), rnd(i * 3u + 1u)) * 2.0 - 1.0;
+        fall = rnd(i * 3u + 2u); // fraction along the column, scaled below
+    }
+    else
+    {
+        uv = particles[i].xy;
+        fall = particles[i].z;
+    }
+
+    float col = column_height(uv, max_fall);
+
+    if (u.control.y == 1u)
+    {
+        fall *= col; // pre-fill the column on the first frame
+    }
+    else
+    {
+        fall += u.params.z * u.params.x;
+    }
+
+    if (fall > col)
+    {
+        // Carry the overshoot past the surface instead of snapping to fall = 0.
+        // Snapping re-releases every drop that lands this frame at the identical
+        // height, forming a synchronized sheet; one sheet per frame produces the
+        // evenly-spaced horizontal layers. Preserving the overshoot spreads the
+        // recycled drops continuously, so there are no cohorts and no banding.
+        fall -= col;
+        uint t = uint(u.params.y * 1000.0) + i * 2654435761u;
+        uv = vec2(rnd(t), rnd(t + 7919u)) * 2.0 - 1.0;
+        col = column_height(uv, max_fall);
+    }
+
+    particles[i] = vec4(uv, fall, col);
+}

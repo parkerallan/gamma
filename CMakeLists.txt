@@ -459,6 +459,9 @@ add_engine_shader(standard_rt_rain_shadow.rahit rahit)
 add_engine_shader(standard_rt_puddle.rchit rchit)
 add_engine_shader(standard_rt_puddle_shadow.rahit rahit)
 add_engine_shader(rain_wave.comp comp)
+add_engine_shader(rain_particles.comp comp)
+add_engine_shader(rain_particle.vert vert)
+add_engine_shader(rain_particle.frag frag)
 add_engine_shader(standard_rt_shadow.rchit rchit)
 add_engine_shader(standard_rt_primary.rahit rahit)
 add_engine_shader(standard_rt_shadow.rahit rahit)
@@ -589,6 +592,7 @@ add_executable(engine
     src/render/RuntimeScriptAPI.cpp
     src/render/PhysicsWorld.cpp
     src/render/Scene2DRenderer.cpp
+    src/render/RainParticleRenderer.cpp
     src/render/SkyboxRenderer.cpp
     src/render/SceneViewportRenderer.cpp
     src/render/VideoPlaybackManager.cpp

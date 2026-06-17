@@ -11,6 +11,7 @@
 #include "render/PhysicsWorld.h"
 #include "render/Raytracing.h"
 #include "render/RuntimeEffectsRenderer.h"
+#include "render/RainParticleRenderer.h"
 #include "render/Scene2DRenderer.h"
 #include "render/VideoPlaybackManager.h"
 #include "render/SkyboxRenderer.h"
@@ -228,6 +229,11 @@ public:
         bool is_puddle = false;
         float puddle_drop_scale = 1.0f;
         float puddle_drop_speed = 1.0f;
+        std::array<float, 3> water_color = {0.02f, 0.25f, 0.75f};
+        bool is_rain_particles = false;
+        std::array<float, 3> rain_color = {0.6f, 0.7f, 0.9f};
+        float rain_fall_speed = 1.0f;
+        float rain_drop_size = 1.0f;
     };
 
     struct CachedScriptSourceEntry
@@ -676,8 +682,18 @@ private:
     RayTracing ray_tracing_{};
     RuntimeEffectsRenderer effects_renderer_{};
     Scene2DRenderer scene_2d_renderer_{};
+    RainParticleRenderer rain_particle_renderer_{};
     VideoPlaybackManager video_playback_manager_{};
     SkyboxRenderer skybox_renderer_{};
+
+    // Rain particle emitter captured during scene build (Shape3D plane tagged
+    // with the RainParticles shader); composited over the RT image each frame.
+    bool rain_particles_active_ = false;
+    std::array<float, 16> rain_particles_plane_matrix_{};
+    std::array<float, 3> rain_particles_color_{0.6f, 0.7f, 0.9f};
+    float rain_particles_fall_speed_ = 1.0f;
+    float rain_particles_drop_size_ = 1.0f;
+
     std::filesystem::path project_root_;
     std::filesystem::path scene_path_;
     std::string active_camera_object_name_;

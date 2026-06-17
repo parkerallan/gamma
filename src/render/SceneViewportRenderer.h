@@ -4,6 +4,7 @@
 #include "assets/ModelAsset.h"
 #include "assets/SceneMetadata.h"
 #include "render/Lighting.h"
+#include "render/RainParticleRenderer.h"
 #include "render/Raytracing.h"
 #include "render/Scene2DRenderer.h"
 #include "render/SkyboxRenderer.h"
@@ -135,14 +136,29 @@ public:
         bool is_puddle = false;
         float puddle_drop_scale = 1.0f;
         float puddle_drop_speed = 1.0f;
+        std::array<float, 3> water_color = {0.02f, 0.25f, 0.75f};
+        bool is_rain_particles = false;
+        std::array<float, 3> rain_color = {0.6f, 0.7f, 0.9f};
+        float rain_fall_speed = 1.0f;
+        float rain_drop_size = 1.0f;
     };
 
 private:
     VulkanContext* vulkan_context_ = nullptr;
     RayTracing ray_tracing_{};
     Scene2DRenderer scene_2d_renderer_{};
+    RainParticleRenderer rain_particle_renderer_{};
     VideoPlaybackManager video_playback_manager_{};
     SkyboxRenderer skybox_renderer_{};
+
+    // Rain particle emitter captured from the scene each build (a Shape3D plane
+    // tagged with the RainParticles shader). Consumed by RenderGpu to composite
+    // falling rain over the ray-traced image.
+    bool rain_particles_active_ = false;
+    std::array<float, 16> rain_particles_plane_matrix_{};
+    std::array<float, 3> rain_particles_color_{0.6f, 0.7f, 0.9f};
+    float rain_particles_fall_speed_ = 1.0f;
+    float rain_particles_drop_size_ = 1.0f;
     bool render_requested_ = false;
     bool middle_mouse_panning_ = false;
     bool show_physics_colliders_ = false;

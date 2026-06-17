@@ -1611,6 +1611,12 @@ void main()
     uint shader_type = instance_records[gl_InstanceID].shader_data.x;
     if (shader_type == 1u)
     {
+        // User-authored water tint (attribute setting), packed as float bits in
+        // shader_data.yzw. Drives the deep-water absorption + fog colours below.
+        uvec4 water_shader_data = instance_records[gl_InstanceID].shader_data;
+        vec3 water_tint = vec3(uintBitsToFloat(water_shader_data.y),
+                               uintBitsToFloat(water_shader_data.z),
+                               uintBitsToFloat(water_shader_data.w));
         float time_seconds = scene_uniforms.animation_time_data.x;
         float distance_to_ray_origin = length(world_position - gl_WorldRayOriginEXT);
         float eps = max(0.03, distance_to_ray_origin * 0.0025);
@@ -1706,8 +1712,10 @@ void main()
         float depth_ratio     = clamp(water_thickness / max_depth, 0.0, 1.0);
         // Beer-Lambert over normalised depth: depth_ratio=0 → transmittance=1 (clear), depth_ratio=1 → fully absorbed.
         vec3 transmittance    = exp(-depth_ratio * vec3(3.0, 0.8, 0.2));
-        vec3 deep_color_v     = vec3(0.02,  0.25,  0.75);
-        vec3 underwater_fog_v = vec3(0.05,  0.35,  0.80);
+        // deep_color = the user water tint; fog = a slightly brightened variant.
+        // The default tint (0.02, 0.25, 0.75) reproduces the original look exactly.
+        vec3 deep_color_v     = water_tint;
+        vec3 underwater_fog_v = clamp(water_tint + vec3(0.03, 0.10, 0.05), 0.0, 1.0);
         vec3 water_volume_color    = mix(vec3(1.0), deep_color_v, depth_ratio);
         vec3 apparent_seabed_color = refracted_color * water_volume_color;
         vec3 transmitted_water     = mix(underwater_fog_v, apparent_seabed_color, transmittance);

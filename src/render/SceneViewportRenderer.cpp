@@ -151,6 +151,37 @@ float GetPuddleDropSpeed(const SceneObjectMetadata& object)
     return 1.0f;
 }
 
+std::array<float, 3> GetWaterColor(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Water)
+        {
+            return attribute.shader.color;
+        }
+    }
+    return {0.02f, 0.25f, 0.75f};
+}
+
+const SceneObjectAttribute* FindRainParticlesAttribute(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::RainParticles)
+        {
+            return &attribute;
+        }
+    }
+    return nullptr;
+}
+
+bool IsRainParticlesObject(const SceneObjectMetadata& object)
+{
+    return FindRainParticlesAttribute(object) != nullptr;
+}
+
 Vec3 ToVec3(const SceneVector3& value)
 {
     return Vec3{value[0], value[1], value[2]};
@@ -2442,6 +2473,7 @@ bool SceneViewportRenderer::Initialize(VulkanContext* context)
     ray_tracing_.Initialize(context);
     ray_tracing_.SetTAAEnabled(true);
     scene_2d_renderer_.Initialize(context);
+    rain_particle_renderer_.Initialize(context);
     video_playback_manager_.Initialize(&scene_2d_renderer_);
     scene_2d_renderer_.SetVideoPlaybackManager(&video_playback_manager_);
     skybox_renderer_.Initialize(context);
@@ -2533,6 +2565,7 @@ void SceneViewportRenderer::Shutdown()
     scene_2d_renderer_.SetVideoPlaybackManager(nullptr);
     video_playback_manager_.Shutdown();
     scene_2d_renderer_.Shutdown();
+    rain_particle_renderer_.Shutdown();
     ray_tracing_.Shutdown();
 
     for (auto& mesh_entry : mesh_cache_)
@@ -2789,8 +2822,23 @@ void SceneViewportRenderer::SyncRayTracingScene()
         ray_tracing_.SetClouds(clouds);
     }
 
+    rain_particles_active_ = false;
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
+        // Rain particle emitters are not ray-traced geometry — capture the proxy
+        // plane's transform/params for the raster overlay and skip the instance
+        // so the plane itself is invisible in the scene.
+        if (object.is_rain_particles)
+        {
+            rain_particles_active_ = true;
+            rain_particles_plane_matrix_ = object.model_matrix;
+            rain_particles_color_ = object.rain_color;
+            rain_particles_fall_speed_ = object.rain_fall_speed;
+            rain_particles_drop_size_ = object.rain_drop_size;
+            continue;
+        }
+
         const auto mesh_entry_it = mesh_cache_.find(object.model_path);
         if (mesh_entry_it == mesh_cache_.end())
         {
@@ -2837,6 +2885,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         instance_input.shader_type = object.is_puddle ? 5u : (object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u))));
         instance_input.puddle_drop_scale = object.puddle_drop_scale;
         instance_input.puddle_drop_speed = object.puddle_drop_speed;
+        instance_input.water_color = object.water_color;
         BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -3225,6 +3274,14 @@ void SceneViewportRenderer::RenderUi(
         queued_object.is_puddle = IsPuddleObject(object);
         queued_object.puddle_drop_scale = GetPuddleDropScale(object);
         queued_object.puddle_drop_speed = GetPuddleDropSpeed(object);
+        queued_object.water_color = GetWaterColor(object);
+        if (const SceneObjectAttribute* rain_attr = FindRainParticlesAttribute(object))
+        {
+            queued_object.is_rain_particles = true;
+            queued_object.rain_color = rain_attr->shader.color;
+            queued_object.rain_fall_speed = rain_attr->shader.rain_speed;
+            queued_object.rain_drop_size = rain_attr->shader.drop_scale;
+        }
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;
@@ -4383,6 +4440,28 @@ void SceneViewportRenderer::RenderGpu()
     {
         VkImageLayout water_output_layout = ray_tracing_.GetOutputLayout();
         ray_tracing_.SetOutputLayout(water_output_layout);
+
+        if (rain_particles_active_)
+        {
+            RainParticleRenderer::Params rain_params;
+            rain_params.view_projection = view_projection_;
+            rain_params.plane_to_world = rain_particles_plane_matrix_;
+            rain_params.camera_position = {view_inverse_[12], view_inverse_[13], view_inverse_[14]};
+            rain_params.color = rain_particles_color_;
+            rain_params.fall_speed = rain_particles_fall_speed_;
+            rain_params.drop_size = rain_particles_drop_size_;
+            rain_particle_renderer_.Render(
+                rain_params,
+                ray_tracing_.GetTopLevelAccelerationStructure(),
+                ray_tracing_.GetOutputImage(),
+                ray_tracing_.GetOutputImageView(),
+                ray_tracing_.GetOutputWidth(),
+                ray_tracing_.GetOutputHeight(),
+                ray_tracing_.GetLatestDepthImage(),
+                ray_tracing_.GetLatestDepthView(),
+                ray_tracing_.GetOutputWidth(),
+                ray_tracing_.GetOutputHeight());
+        }
 
         video_playback_manager_.Update(0.0f, pending_scene_metadata_, pending_project_root_);
         scene_2d_renderer_.CompositeOverlay(

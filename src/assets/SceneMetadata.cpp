@@ -648,6 +648,7 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeShaderType:") ||
     StartsWith(line, "AttributeShaderDropScale:") ||
     StartsWith(line, "AttributeShaderDropSpeed:") ||
+    StartsWith(line, "AttributeShaderColor:") ||
     StartsWith(line, "AttributeShape3DPath:");
 }
 
@@ -2344,41 +2345,55 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
                 current_attribute->effects.trigger_mode = SceneObjectEffectsPlayMode::Loop;
             }
         }
-        else if (StartsWith(trimmed, "AttributeShaderType:") && current_attribute != nullptr)
+        // All shader-attribute keys share the "AttributeShader" prefix and are
+        // dispatched inside this single outer branch to keep the LoadSceneMetadata
+        // else-if chain under the MSVC C1061 nesting limit.
+        else if (StartsWith(trimmed, "AttributeShader") && current_attribute != nullptr)
         {
-            const std::string type_name = TrimCopy(ExtractValue(trimmed, "AttributeShaderType:"));
-            if (type_name == "Water")
+            if (StartsWith(trimmed, "AttributeShaderType:"))
             {
-                current_attribute->shader.type = SceneObjectShaderType::Water;
+                const std::string type_name = TrimCopy(ExtractValue(trimmed, "AttributeShaderType:"));
+                if (type_name == "Water")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::Water;
+                }
+                else if (type_name == "Cloud")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::Cloud;
+                }
+                else if (type_name == "Fire")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::Fire;
+                }
+                else if (type_name == "Rain")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::Rain;
+                }
+                else if (type_name == "Puddle")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::Puddle;
+                }
+                else if (type_name == "RainParticles")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::RainParticles;
+                }
+                else
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::None;
+                }
             }
-            else if (type_name == "Cloud")
+            else if (StartsWith(trimmed, "AttributeShaderDropScale:"))
             {
-                current_attribute->shader.type = SceneObjectShaderType::Cloud;
+                ParseScalar(ExtractValue(trimmed, "AttributeShaderDropScale:"), current_attribute->shader.drop_scale);
             }
-            else if (type_name == "Fire")
+            else if (StartsWith(trimmed, "AttributeShaderDropSpeed:"))
             {
-                current_attribute->shader.type = SceneObjectShaderType::Fire;
+                ParseScalar(ExtractValue(trimmed, "AttributeShaderDropSpeed:"), current_attribute->shader.rain_speed);
             }
-            else if (type_name == "Rain")
+            else if (StartsWith(trimmed, "AttributeShaderColor:"))
             {
-                current_attribute->shader.type = SceneObjectShaderType::Rain;
+                ParseColor3(ExtractValue(trimmed, "AttributeShaderColor:"), current_attribute->shader.color);
             }
-            else if (type_name == "Puddle")
-            {
-                current_attribute->shader.type = SceneObjectShaderType::Puddle;
-            }
-            else
-            {
-                current_attribute->shader.type = SceneObjectShaderType::None;
-            }
-        }
-        else if (StartsWith(trimmed, "AttributeShaderDropScale:") && current_attribute != nullptr)
-        {
-            ParseScalar(ExtractValue(trimmed, "AttributeShaderDropScale:"), current_attribute->shader.drop_scale);
-        }
-        else if (StartsWith(trimmed, "AttributeShaderDropSpeed:") && current_attribute != nullptr)
-        {
-            ParseScalar(ExtractValue(trimmed, "AttributeShaderDropSpeed:"), current_attribute->shader.rain_speed);
         }
         else if (StartsWith(trimmed, "AttributeShape3DPath:") && current_attribute != nullptr)
         {
@@ -3661,6 +3676,7 @@ bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, 
     case SceneObjectShaderType::Fire:  value = "Fire";  break;
     case SceneObjectShaderType::Rain:  value = "Rain";  break;
     case SceneObjectShaderType::Puddle:     value = "Puddle";     break;
+    case SceneObjectShaderType::RainParticles: value = "RainParticles"; break;
     default:                           value = "None";  break;
     }
     return SetSceneObjectAttributeStringValue("AttributeShaderType", scene_path, object_name, attribute_index, value);
@@ -3674,6 +3690,11 @@ bool SetSceneObjectAttributeShaderDropScale(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeShaderDropSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_speed)
 {
     return SetSceneObjectAttributeScalar("AttributeShaderDropSpeed", scene_path, object_name, attribute_index, drop_speed);
+}
+
+bool SetSceneObjectAttributeShaderColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color)
+{
+    return SetSceneObjectAttributeColorValue("AttributeShaderColor", scene_path, object_name, attribute_index, color);
 }
 
 bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path)

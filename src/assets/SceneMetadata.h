@@ -51,6 +51,7 @@ enum class SceneObjectShaderType
     Fire,
     Rain,
     Puddle,
+    RainParticles,
 };
 
 enum class SceneObjectCameraType
@@ -290,12 +291,18 @@ struct SceneObjectShape3DAttributes
 struct SceneObjectShaderAttributes
 {
     SceneObjectShaderType type = SceneObjectShaderType::None;
-    // Puddle only: raindrop/ripple size multiplier (1.0 = default, smaller =
-    // smaller drops). Stays world-locked as the puddle is scaled.
+    // Puddle: raindrop/ripple size multiplier (1.0 = default, smaller = smaller
+    // drops); stays world-locked as the puddle is scaled. RainParticles reuses
+    // this as the streak size multiplier.
     float drop_scale = 1.0f;
-    // Puddle only: how fast new raindrops appear (article uRainSpeed). 1.0 =
-    // default; higher = more frequent drops.
+    // Puddle: how fast new raindrops appear (article uRainSpeed). 1.0 = default;
+    // higher = more frequent drops. RainParticles reuses this as the fall-speed
+    // multiplier.
     float rain_speed = 1.0f;
+    // Water: surface/volume tint color (default is the engine's deep blue, which
+    // reproduces the original fixed water look exactly). RainParticles reuses
+    // this as the rain streak tint.
+    SceneColor3 color = {0.02f, 0.25f, 0.75f};
 };
 
 struct SceneObjectAttribute
@@ -506,6 +513,7 @@ bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectShaderType type);
 bool SetSceneObjectAttributeShaderDropScale(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_scale);
 bool SetSceneObjectAttributeShaderDropSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_speed);
+bool SetSceneObjectAttributeShaderColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color);
 bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);
