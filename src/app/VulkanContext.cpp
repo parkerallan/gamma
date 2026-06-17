@@ -19,6 +19,10 @@ constexpr const char* kRequiredRayTracingDeviceExtensions[] = {
     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
     VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+    // Ray-query lets the wave-sim compute pass (rain_wave.comp) trace short
+    // upward occlusion rays against the TLAS so raindrops don't form under
+    // awnings/umbrellas. The RT closest-hit shaders use traceRayEXT instead.
+    VK_KHR_RAY_QUERY_EXTENSION_NAME,
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
     VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
 };
@@ -254,10 +258,13 @@ bool VulkanContext::CreateDevice()
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR ray_tracing_pipeline_features = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
+    VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
 
     descriptor_indexing_features.pNext = &buffer_device_address_features;
     buffer_device_address_features.pNext = &acceleration_structure_features;
     acceleration_structure_features.pNext = &ray_tracing_pipeline_features;
+    ray_tracing_pipeline_features.pNext = &ray_query_features;
 
     VkPhysicalDeviceFeatures2 available_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     available_features.pNext = &descriptor_indexing_features;
@@ -271,7 +278,8 @@ bool VulkanContext::CreateDevice()
             descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
             buffer_device_address_features.bufferDeviceAddress == VK_TRUE &&
             acceleration_structure_features.accelerationStructure == VK_TRUE &&
-            ray_tracing_pipeline_features.rayTracingPipeline == VK_TRUE)
+            ray_tracing_pipeline_features.rayTracingPipeline == VK_TRUE &&
+            ray_query_features.rayQuery == VK_TRUE)
         {
             for (const char* extension_name : kRequiredRayTracingDeviceExtensions)
             {
@@ -301,10 +309,13 @@ bool VulkanContext::CreateDevice()
             acceleration_structure_features.accelerationStructure = VK_TRUE;
             ray_tracing_pipeline_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
             ray_tracing_pipeline_features.rayTracingPipeline = VK_TRUE;
+            ray_query_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+            ray_query_features.rayQuery = VK_TRUE;
 
             descriptor_indexing_features.pNext = &buffer_device_address_features;
             buffer_device_address_features.pNext = &acceleration_structure_features;
             acceleration_structure_features.pNext = &ray_tracing_pipeline_features;
+            ray_tracing_pipeline_features.pNext = &ray_query_features;
         }
     }
 

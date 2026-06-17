@@ -50,6 +50,7 @@ enum class SceneObjectShaderType
     Cloud,
     Fire,
     Rain,
+    Puddle,
 };
 
 enum class SceneObjectCameraType
@@ -289,6 +290,12 @@ struct SceneObjectShape3DAttributes
 struct SceneObjectShaderAttributes
 {
     SceneObjectShaderType type = SceneObjectShaderType::None;
+    // Puddle only: raindrop/ripple size multiplier (1.0 = default, smaller =
+    // smaller drops). Stays world-locked as the puddle is scaled.
+    float drop_scale = 1.0f;
+    // Puddle only: how fast new raindrops appear (article uRainSpeed). 1.0 =
+    // default; higher = more frequent drops.
+    float rain_speed = 1.0f;
 };
 
 struct SceneObjectAttribute
@@ -497,6 +504,8 @@ bool SetSceneObjectAttributeVideo2DMuted(const std::filesystem::path& scene_path
 bool SetSceneObjectAttributeEffectsPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& effect_path);
 bool SetSceneObjectAttributeEffectsPlayMode(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectEffectsPlayMode play_mode);
 bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, SceneObjectShaderType type);
+bool SetSceneObjectAttributeShaderDropScale(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_scale);
+bool SetSceneObjectAttributeShaderDropSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_speed);
 bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);

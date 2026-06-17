@@ -1,0 +1,160 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Buffer A — 2D wave-equation puddle ripple simulation.
+//
+// Ported from the 4rknova "Raindrops on Puddle" article (src/shaders/rainfall.txt):
+// a discrete approximation of the 2D wave equation with damping, fed by
+// procedurally generated raindrops. The math (wave update, hash22/hash12,
+// getRaindrops, the smoothstep drop disturbance, the [-0.5,0.5]->[0,1] storage
+// remap) is reproduced as written there — that is the look/spec.
+//
+// Shadertoy keeps this in a single feedback texture sampling itself (red = new
+// height, green = old height). Here it is a Vulkan compute ping-pong: we sample
+// the PREVIOUS frame's RG height field (binding 1) and write the NEW one
+// (binding 2). The puddle closest-hit shader then samples the new field for its
+// surface normal.
+//
+// Selective rainfall: each candidate raindrop is mapped to a world position on
+// the puddle and a short ray-query is fired straight up (+Y). Drops whose
+// upward ray hits geometry (an awning, an umbrella) are suppressed, so no
+// ripples form under shelter.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Matches MAX_DROPS in the article (drop count is artist-controlled 1..10, but
+// we leave headroom). Drops are computed once per workgroup into shared memory.
+#define MAX_DROPS 16
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
+layout(set = 0, binding = 1) uniform sampler2D wave_prev;
+layout(set = 0, binding = 2, rg16f) uniform writeonly image2D wave_curr;
+layout(set = 0, binding = 3, std140) uniform WaveParams
+{
+    // Puddle object->world. Local plane spans [-puddleHalf, puddleHalf] in XZ
+    // with y = 0; used only to place drops in the world for the occlusion test.
+    mat4  puddle_to_world;
+    uvec4 res_count;  // x=width, y=height, z=dropCount, w=historyValid (0 on the first/realloc frame)
+    vec4  params0;    // x=time, y=rainSpeed, z=damping, w=dropIntensity
+    vec4  params1;    // x=occlusionMaxDist, y=puddleHalf, z=occlusionEnabled, w=stepPixels
+} wp;
+
+// ---- Hashes (Dave Hoskins) -------------------------------------------------
+vec2 hash22(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+float hash12(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Shared per-workgroup drop list. xy = pixel position, z = activated strength
+// (0 when inactive OR sheltered by overhead geometry).
+shared vec3 g_drops[MAX_DROPS];
+
+// True if a short ray straight up from a puddle-surface world point is blocked
+// by geometry within max_dist (i.e. that spot is under an awning/umbrella).
+bool sheltered(vec3 world_pos, float max_dist)
+{
+    rayQueryEXT rq;
+    // cullMask 0x01: only solid occluders (default/water), never effect proxies.
+    rayQueryInitializeEXT(
+        rq, top_level_as,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0x01,
+        world_pos + vec3(0.0, 1e-3, 0.0), 1e-3,
+        vec3(0.0, 1.0, 0.0), max_dist);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+void main()
+{
+    uvec2 res       = wp.res_count.xy;
+    int   dropCount = int(min(wp.res_count.z, uint(MAX_DROPS)));
+    float T         = wp.params0.x;
+    float rainSpeed = wp.params0.y;
+    float damping   = wp.params0.z;
+    float dropInt   = wp.params0.w;
+    float occMax    = wp.params1.x;
+    float puddleHalf= wp.params1.y;
+    bool  occEnabled= wp.params1.z > 0.5;
+
+    // ---- Generate the drop list once per workgroup, with occlusion ---------
+    uint li = gl_LocalInvocationIndex;
+    if (li < uint(MAX_DROPS))
+    {
+        vec3 drop = vec3(0.0);
+        if (int(li) < dropCount)
+        {
+            float t        = T * rainSpeed;
+            float baseTime = floor(t);                    // discrete intervals (~1/rainSpeed s)
+            float offset   = float(li) * 0.3711;          // de-sync the drops
+            vec2  seed     = vec2(baseTime + offset, float(li) * 17.3);
+            vec2  pos      = hash22(seed) * vec2(res);
+            float strength = dropInt * (0.5 + 0.5 * hash12(seed + 1.0));
+            float pulse    = fract(t + offset * 0.7);
+            float activation = smoothstep(0.0, 0.15, pulse) * smoothstep(0.35, 0.2, pulse);
+            float s        = strength * activation;
+
+            if (occEnabled && s > 0.001)
+            {
+                vec2 uv  = pos / vec2(res);
+                vec3 lp  = vec3((uv.x * 2.0 - 1.0) * puddleHalf, 0.0,
+                                (uv.y * 2.0 - 1.0) * puddleHalf);
+                vec3 wpos = (wp.puddle_to_world * vec4(lp, 1.0)).xyz;
+                if (sheltered(wpos, occMax)) s = 0.0;
+            }
+            drop = vec3(pos, s);
+        }
+        g_drops[li] = drop;
+    }
+    barrier();
+
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= res.x || gid.y >= res.y) return;
+
+    // First frame after (re)allocation: start from a flat surface (neutral 0.5).
+    if (wp.res_count.w == 0u)
+    {
+        imageStore(wave_curr, ivec2(gid), vec4(0.5, 0.5, 0.0, 0.0));
+        return;
+    }
+
+    vec2 fragCoord = vec2(gid) + 0.5;
+    vec2 p = fragCoord / vec2(res);
+    vec2 e = vec2(wp.params1.w) / vec2(res);   // STEP pixels, in uv
+
+    // Read current (R) / previous (G) state and the four neighbours.
+    vec4  c  = texture(wave_prev, p);
+    float s0 = c.y;                                   // previous center
+    float s1 = texture(wave_prev, p - vec2(e.x, 0.0)).x;
+    float s2 = texture(wave_prev, p - vec2(0.0, e.y)).x;
+    float s3 = texture(wave_prev, p + vec2(e.x, 0.0)).x;
+    float s4 = texture(wave_prev, p + vec2(0.0, e.y)).x;
+
+    // Discrete wave equation: -previous velocity + Laplacian, then damping.
+    float d = -(s0 - 0.5) * 2.0 + (s1 + s2 + s3 + s4 - 2.0);
+    d *= damping;
+
+    // Inject each active raindrop as a localized disturbance.
+    for (int i = 0; i < MAX_DROPS; i++)
+    {
+        if (i >= dropCount) break;
+        if (g_drops[i].z > 0.01)
+        {
+            float dist = length(g_drops[i].xy - fragCoord);
+            d += g_drops[i].z * smoothstep(4.0, 0.5, dist);
+        }
+    }
+
+    // Remap [-0.5,0.5]->[0,1]; store R = new state, G = old current (double buffer).
+    d = d * 0.5 + 0.5;
+    imageStore(wave_curr, ivec2(gid), vec4(d, c.x, 0.0, 0.0));
+}

@@ -96,7 +96,12 @@ public:
         std::string key;
         std::string mesh_key;
         std::array<float, 16> transform = {};
-        std::uint32_t shader_type = 0; // 0=default, 1=water, 2=cloud, 3=fire, 4=rain
+        std::uint32_t shader_type = 0; // 0=default, 1=water, 2=cloud, 3=fire, 4=rain, 5=puddle
+        // Puddle (shader_type 5) only: raindrop/ripple size multiplier driving
+        // the wave-sim grid density. 1.0 = default; smaller = smaller drops.
+        float puddle_drop_scale = 1.0f;
+        // Puddle only: how fast new raindrops appear (wave-sim uRainSpeed).
+        float puddle_drop_speed = 1.0f;
         // Optional caller-supplied previous-frame transform. If the caller
         // does not supply one (left default-initialized to all zeros), the
         // ray tracer uses its own cached previous transform for this
@@ -401,6 +406,19 @@ private:
         std::array<float, 4> prev_camera_position = {0.0f, 0.0f, 0.0f, 0.0f};
     };
 
+    // CPU-side parameters fed into the rain wave-sim (Buffer A) compute UBO.
+    // Layout matches `WaveParams` in rain_wave.comp (std140).
+    struct RainWaveUniformBlock
+    {
+        std::array<float, 16> puddle_to_world = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                 0.0f, 1.0f, 0.0f, 0.0f,
+                                                 0.0f, 0.0f, 1.0f, 0.0f,
+                                                 0.0f, 0.0f, 0.0f, 1.0f};
+        std::array<std::uint32_t, 4> res_count = {0, 0, 0, 0}; // w,h,dropCount,historyValid
+        std::array<float, 4> params0 = {0.0f, 1.0f, 0.99f, 0.5f}; // time,rainSpeed,damping,dropIntensity
+        std::array<float, 4> params1 = {200.0f, 1.0f, 1.0f, 1.0f}; // occMaxDist,puddleHalf,occEnabled,stepPixels
+    };
+
     // CPU-side parameters fed into the TAA compute UBO each frame.
     struct TaaUniformBlock
     {
@@ -424,6 +442,14 @@ private:
     bool EnsureTaaResources();
     bool UpdateTaaDescriptors();
     void DestroyTaaResources();
+
+    // ---- Rain wave-sim (Buffer A) helpers ----
+    // Ensure the ping-pong height images + compute pipeline exist and are sized
+    // to the current puddle footprint (world-locked texel density). Returns
+    // false if it cannot run this frame.
+    bool EnsureRainWaveResources();
+    bool UpdateRainWaveDescriptors();
+    void DestroyRainWaveResources();
     // Compute and cache an updated previous-frame view*projection matrix
     // from the current frame's inverses; updates the host UBO field.
     void ComputePrevViewProjection(
@@ -608,6 +634,36 @@ private:
                                                    0.0f, 0.0f, 0.0f, 1.0f};
     std::array<float, 2> taa_prev_jitter_px_ = {0.0f, 0.0f};
     std::uint32_t taa_jitter_index_ = 0;
+
+    // ---- Rain wave-sim (Buffer A) state ----
+    // Ping-pong RG16F height field (R = current, G = previous). Sized to the
+    // puddle footprint * a world-locked texel density. The puddle closest-hit
+    // shader samples the just-written image (bound to RT set binding 12).
+    bool has_puddle_ = false;
+    std::array<float, 16> puddle_object_to_world_ = {1.0f, 0.0f, 0.0f, 0.0f,
+                                                     0.0f, 1.0f, 0.0f, 0.0f,
+                                                     0.0f, 0.0f, 1.0f, 0.0f,
+                                                     0.0f, 0.0f, 0.0f, 1.0f};
+    float puddle_world_size_x_ = 1.0f;
+    float puddle_world_size_z_ = 1.0f;
+    VkImage rain_wave_images_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory rain_wave_memories_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView rain_wave_views_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageLayout rain_wave_layouts_[2] = {VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkSampler rain_wave_sampler_ = VK_NULL_HANDLE;
+    GpuBuffer rain_wave_uniform_buffer_{};
+    VkDescriptorSetLayout rain_wave_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout rain_wave_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline rain_wave_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet rain_wave_descriptor_sets_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    std::uint32_t rain_wave_width_ = 0;
+    std::uint32_t rain_wave_height_ = 0;
+    std::uint32_t rain_wave_parity_ = 0;
+    bool rain_wave_history_valid_ = false;
+    // Puddle drop/ripple size multiplier (host-set; scales the wave-sim density).
+    float puddle_drop_scale_ = 1.0f;
+    // Puddle raindrop rate (host-set; wave-sim uRainSpeed).
+    float puddle_drop_speed_ = 1.0f;
     // Camera world position of the last rendered frame; cached alongside
     // prev_view_projection_ and fed to the rgen as
     // SceneUniforms.prev_camera_position.

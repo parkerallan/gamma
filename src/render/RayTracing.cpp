@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -938,6 +939,7 @@ bool RayTracing::Initialize(VulkanContext* context)
 
 void RayTracing::Shutdown()
 {
+    DestroyRainWaveResources();
     DestroyTaaResources();
     DestroyOutputResources();
     DestroyPipelineResources();
@@ -1479,6 +1481,15 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
                                                   0.0f, 1.0f, 0.0f, 0.0f,
                                                   0.0f, 0.0f, 1.0f, 0.0f,
                                                   0.0f, 0.0f, 0.0f, 1.0f};
+    // First Puddle instance (shader_type 5). Its object->world transform drives
+    // the wave-sim footprint sizing + the per-drop occlusion world positions.
+    bool found_puddle = false;
+    float puddle_drop_scale_val = 1.0f;
+    float puddle_drop_speed_val = 1.0f;
+    std::array<float, 16> puddle_transform = {1.0f, 0.0f, 0.0f, 0.0f,
+                                              0.0f, 1.0f, 0.0f, 0.0f,
+                                              0.0f, 0.0f, 1.0f, 0.0f,
+                                              0.0f, 0.0f, 0.0f, 1.0f};
     for (const InstanceInput& instance : instances)
     {
         if (instance.shader_type == 1u && !found_water_surface)
@@ -1486,6 +1497,13 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
             found_water_surface = true;
             water_surface_height = instance.transform[13];
             Invert4x4(instance.transform, water_world_to_local);
+        }
+        if (instance.shader_type == 5u && !found_puddle)
+        {
+            found_puddle = true;
+            puddle_transform = instance.transform;
+            puddle_drop_scale_val = instance.puddle_drop_scale;
+            puddle_drop_speed_val = instance.puddle_drop_speed;
         }
 
         const auto mesh_it = bottom_level_cache_.find(instance.mesh_key);
@@ -1500,9 +1518,15 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
         VkAccelerationStructureInstanceKHR acceleration_instance = {};
         acceleration_instance.transform = ToVkTransformMatrix(instance.transform);
         acceleration_instance.instanceCustomIndex = mesh_index_it->second;
-        acceleration_instance.mask = 0xFF;
+        // Bit 0 marks a solid occluder. Translucent effect proxies (cloud/fire/
+        // rain-window/puddle/rain-volume, shader_type >= 2) clear it so the
+        // rain occlusion ray-queries (cullMask 0x01) skip them — otherwise the
+        // rain-volume box would shelter its own falling streaks, and puddles
+        // would never form ripples under an effect. Primary/shadow/reflection
+        // rays use 0xFF and still see these instances.
+        acceleration_instance.mask = (instance.shader_type >= 2u) ? 0xFEu : 0xFFu;
         acceleration_instance.instanceShaderBindingTableRecordOffset =
-            (instance.shader_type == 4u) ? 6u : ((instance.shader_type == 3u) ? 4u : ((instance.shader_type == 2u) ? 2u : 0u));
+            (instance.shader_type == 5u) ? 8u : ((instance.shader_type == 4u) ? 6u : ((instance.shader_type == 3u) ? 4u : ((instance.shader_type == 2u) ? 2u : 0u)));
         acceleration_instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         acceleration_instance.accelerationStructureReference = mesh_it->second.acceleration_structure.device_address;
         new_instances.push_back(acceleration_instance);
@@ -1528,6 +1552,7 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
 
     if (new_instances.empty())
     {
+        has_puddle_ = false;
         has_water_surface_ = false;
         water_surface_base_height_ = 0.0f;
         water_surface_world_to_local_ = {1.0f, 0.0f, 0.0f, 0.0f,
@@ -1552,6 +1577,25 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
                                 0.0f, 1.0f, 0.0f, 0.0f,
                                 0.0f, 0.0f, 1.0f, 0.0f,
                                 0.0f, 0.0f, 0.0f, 1.0f};
+
+    // Puddle footprint: world size = 2 * local-half * |basis| along local X/Z.
+    // Transform is column-major (col0 = [0,1,2], col2 = [8,9,10]).
+    has_puddle_ = found_puddle;
+    puddle_object_to_world_ = puddle_transform;
+    puddle_drop_scale_ = found_puddle ? puddle_drop_scale_val : 1.0f;
+    puddle_drop_speed_ = found_puddle ? puddle_drop_speed_val : 1.0f;
+    if (found_puddle)
+    {
+        const float kHalf = 1.0f; // matches PUDDLE_HALF in the puddle/wave shaders
+        const float sx = std::sqrt(puddle_transform[0] * puddle_transform[0] +
+                                   puddle_transform[1] * puddle_transform[1] +
+                                   puddle_transform[2] * puddle_transform[2]);
+        const float sz = std::sqrt(puddle_transform[8] * puddle_transform[8] +
+                                   puddle_transform[9] * puddle_transform[9] +
+                                   puddle_transform[10] * puddle_transform[10]);
+        puddle_world_size_x_ = 2.0f * kHalf * sx;
+        puddle_world_size_z_ = 2.0f * kHalf * sz;
+    }
 
     // Topology signature hashes BLAS device-addresses and instance count.
     // This is stable during a gizmo drag, enabling a cheap TLAS refit instead of a rebuild.
@@ -1998,7 +2042,7 @@ bool RayTracing::EnsurePipelineResources()
 
     if (descriptor_set_layout_ == VK_NULL_HANDLE)
     {
-        std::array<VkDescriptorSetLayoutBinding, 12> bindings = {};
+        std::array<VkDescriptorSetLayoutBinding, 13> bindings = {};
         bindings[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, nullptr};
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
         bindings[2] = {
@@ -2027,6 +2071,9 @@ bool RayTracing::EnsurePipelineResources()
         // current ping-pong slot every frame (descriptor refreshed in
         // UpdateDescriptors via depth_slot_).
         bindings[11] = {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR, nullptr};
+        // Rain wave-sim height field (rain_wave.comp output). Sampled by the
+        // puddle closest-hit shader (shader_type 5) for its surface normal.
+        bindings[12] = {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, nullptr};
 
         VkDescriptorSetLayoutCreateInfo layout_info = {};
         layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2087,6 +2134,8 @@ bool RayTracing::EnsurePipelineResources()
         VkShaderModule fire_shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_fire_shadow.rahit.spv"));
         VkShaderModule rain_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_rain.rchit.spv"));
         VkShaderModule rain_shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_rain_shadow.rahit.spv"));
+        VkShaderModule puddle_closest_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_puddle.rchit.spv"));
+        VkShaderModule puddle_shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_puddle_shadow.rahit.spv"));
         VkShaderModule primary_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_primary.rahit.spv"));
         VkShaderModule shadow_any_hit_shader = LoadShaderModule(device, ResolveShaderPath("standard_rt_shadow.rahit.spv"));
         if (raygen_shader == VK_NULL_HANDLE ||
@@ -2099,6 +2148,8 @@ bool RayTracing::EnsurePipelineResources()
             fire_shadow_any_hit_shader == VK_NULL_HANDLE ||
             rain_closest_hit_shader == VK_NULL_HANDLE ||
             rain_shadow_any_hit_shader == VK_NULL_HANDLE ||
+            puddle_closest_hit_shader == VK_NULL_HANDLE ||
+            puddle_shadow_any_hit_shader == VK_NULL_HANDLE ||
             primary_any_hit_shader == VK_NULL_HANDLE ||
             shadow_any_hit_shader == VK_NULL_HANDLE)
         {
@@ -2146,6 +2197,14 @@ bool RayTracing::EnsurePipelineResources()
             {
                 vkDestroyShaderModule(device, rain_shadow_any_hit_shader, allocator);
             }
+            if (puddle_closest_hit_shader != VK_NULL_HANDLE)
+            {
+                vkDestroyShaderModule(device, puddle_closest_hit_shader, allocator);
+            }
+            if (puddle_shadow_any_hit_shader != VK_NULL_HANDLE)
+            {
+                vkDestroyShaderModule(device, puddle_shadow_any_hit_shader, allocator);
+            }
             if (shadow_any_hit_shader != VK_NULL_HANDLE)
             {
                 vkDestroyShaderModule(device, shadow_any_hit_shader, allocator);
@@ -2155,7 +2214,7 @@ bool RayTracing::EnsurePipelineResources()
         }
 
         const char* entry_name = "main";
-        std::array<VkPipelineShaderStageCreateInfo, 12> stages = {};
+        std::array<VkPipelineShaderStageCreateInfo, 14> stages = {};
         stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_RAYGEN_BIT_KHR, raygen_shader, entry_name, nullptr};
         stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_MISS_BIT_KHR, miss_shader, entry_name, nullptr};
         stages[2] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_MISS_BIT_KHR, shadow_miss_shader, entry_name, nullptr};
@@ -2168,8 +2227,10 @@ bool RayTracing::EnsurePipelineResources()
         stages[9] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_ANY_HIT_BIT_KHR, fire_shadow_any_hit_shader, entry_name, nullptr};
         stages[10] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, rain_closest_hit_shader, entry_name, nullptr};
         stages[11] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_ANY_HIT_BIT_KHR, rain_shadow_any_hit_shader, entry_name, nullptr};
+        stages[12] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, puddle_closest_hit_shader, entry_name, nullptr};
+        stages[13] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_ANY_HIT_BIT_KHR, puddle_shadow_any_hit_shader, entry_name, nullptr};
 
-        std::array<VkRayTracingShaderGroupCreateInfoKHR, 11> groups = {};
+        std::array<VkRayTracingShaderGroupCreateInfoKHR, 13> groups = {};
         groups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
         groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
         groups[0].generalShader = 0;
@@ -2255,6 +2316,22 @@ bool RayTracing::EnsurePipelineResources()
         groups[10].anyHitShader = 11;
         groups[10].intersectionShader = VK_SHADER_UNUSED_KHR;
 
+        // hit group 8 (sbt offset 8): puddle primary hit — rippled water surface
+        groups[11].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[11].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groups[11].generalShader = VK_SHADER_UNUSED_KHR;
+        groups[11].closestHitShader = 12;
+        groups[11].anyHitShader = VK_SHADER_UNUSED_KHR;
+        groups[11].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+        // hit group 9 (sbt offset 9): puddle shadow hit — any-hit ignores so the puddle casts no shadow
+        groups[12].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[12].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groups[12].generalShader = VK_SHADER_UNUSED_KHR;
+        groups[12].closestHitShader = VK_SHADER_UNUSED_KHR;
+        groups[12].anyHitShader = 13;
+        groups[12].intersectionShader = VK_SHADER_UNUSED_KHR;
+
         VkRayTracingPipelineCreateInfoKHR pipeline_info = {VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
         pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
         pipeline_info.pStages = stages.data();
@@ -2288,6 +2365,8 @@ bool RayTracing::EnsurePipelineResources()
         vkDestroyShaderModule(device, fire_shadow_any_hit_shader, allocator);
         vkDestroyShaderModule(device, rain_closest_hit_shader, allocator);
         vkDestroyShaderModule(device, rain_shadow_any_hit_shader, allocator);
+        vkDestroyShaderModule(device, puddle_closest_hit_shader, allocator);
+        vkDestroyShaderModule(device, puddle_shadow_any_hit_shader, allocator);
         vkDestroyShaderModule(device, primary_any_hit_shader, allocator);
         vkDestroyShaderModule(device, shadow_any_hit_shader, allocator);
 
@@ -2300,7 +2379,7 @@ bool RayTracing::EnsurePipelineResources()
 
         if (!BuildShaderBindingTable(*vulkan_context_, pipeline_, 0, 1, raygen_sbt_) ||
             !BuildShaderBindingTable(*vulkan_context_, pipeline_, 1, 2, miss_sbt_) ||
-            !BuildShaderBindingTable(*vulkan_context_, pipeline_, 3, 8, hit_sbt_))
+            !BuildShaderBindingTable(*vulkan_context_, pipeline_, 3, 10, hit_sbt_))
         {
             status_message_ = "Failed to build viewport RT shader binding table";
             return false;
@@ -2406,7 +2485,18 @@ bool RayTracing::UpdateDescriptors()
     depth_image_info.imageView = depth_views_[taa_parity_];
     depth_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 12> writes = {};
+    // Rain wave-sim height field. Bound to the live wave image when a puddle is
+    // present (rebound per-frame in the dispatch path to follow the ping-pong),
+    // otherwise to the fallback so the binding is always valid.
+    VkDescriptorImageInfo wave_image_info = {};
+    wave_image_info.sampler = texture_sampler_;
+    wave_image_info.imageView =
+        (has_puddle_ && rain_wave_views_[rain_wave_parity_] != VK_NULL_HANDLE)
+            ? rain_wave_views_[rain_wave_parity_]
+            : fallback_texture_view_;
+    wave_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 13> writes = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     writes[0].pNext = &acceleration_write;
     writes[0].dstSet = descriptor_set_;
@@ -2490,6 +2580,13 @@ bool RayTracing::UpdateDescriptors()
     writes[11].descriptorCount = 1;
     writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[11].pImageInfo = &depth_image_info;
+
+    writes[12] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    writes[12].dstSet = descriptor_set_;
+    writes[12].dstBinding = 12;
+    writes[12].descriptorCount = 1;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[12].pImageInfo = &wave_image_info;
 
     vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -2851,6 +2948,248 @@ void RayTracing::DestroyTaaResources()
     if (taa_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, taa_pipeline_layout_, allocator); taa_pipeline_layout_ = VK_NULL_HANDLE; }
     if (taa_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, taa_descriptor_set_layout_, allocator); taa_descriptor_set_layout_ = VK_NULL_HANDLE; }
     taa_history_valid_ = false;
+}
+
+// ---- Rain wave-sim (Buffer A) ---------------------------------------------
+namespace
+{
+// World-locked ripple density: texels per world unit across the puddle. With a
+// constant density a bigger puddle gets MORE ripples at the same physical size.
+constexpr float kRainWaveDensity = 24.0f;
+constexpr std::uint32_t kRainWaveMinDim = 32;
+constexpr std::uint32_t kRainWaveMaxDim = 1024;
+} // namespace
+
+bool RayTracing::EnsureRainWaveResources()
+{
+    if (!available_ || vulkan_context_ == nullptr || !has_puddle_)
+    {
+        return false;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    // Desired image size from the puddle world footprint (world-locked density).
+    auto clamp_dim = [](float v) -> std::uint32_t {
+        std::uint32_t d = static_cast<std::uint32_t>(std::lround(v));
+        return std::clamp(d, kRainWaveMinDim, kRainWaveMaxDim);
+    };
+    // Smaller drop scale -> finer grid per world unit -> smaller drops/ripples,
+    // while staying world-locked (still texels-per-world-unit). Clamped so the
+    // image stays sane.
+    const float drop_scale = std::clamp(puddle_drop_scale_, 0.15f, 2.0f);
+    const float effective_density = kRainWaveDensity / drop_scale;
+    const std::uint32_t want_w = clamp_dim(puddle_world_size_x_ * effective_density);
+    const std::uint32_t want_h = clamp_dim(puddle_world_size_z_ * effective_density);
+
+    bool reallocated = false;
+    if (rain_wave_images_[0] == VK_NULL_HANDLE ||
+        want_w != rain_wave_width_ || want_h != rain_wave_height_)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            if (rain_wave_views_[i] != VK_NULL_HANDLE)   { vkDestroyImageView(device, rain_wave_views_[i], allocator); rain_wave_views_[i] = VK_NULL_HANDLE; }
+            if (rain_wave_images_[i] != VK_NULL_HANDLE)  { vkDestroyImage(device, rain_wave_images_[i], allocator); rain_wave_images_[i] = VK_NULL_HANDLE; }
+            if (rain_wave_memories_[i] != VK_NULL_HANDLE){ vkFreeMemory(device, rain_wave_memories_[i], allocator); rain_wave_memories_[i] = VK_NULL_HANDLE; }
+            rain_wave_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            if (!CreateVulkanImage(
+                    vulkan_context_->GetPhysicalDevice(), device, allocator,
+                    want_w, want_h,
+                    VK_FORMAT_R16G16_SFLOAT,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT,
+                    rain_wave_images_[i], rain_wave_memories_[i], rain_wave_views_[i]))
+            {
+                status_message_ = "Failed to create rain wave-sim image";
+                return false;
+            }
+        }
+        rain_wave_width_ = want_w;
+        rain_wave_height_ = want_h;
+        rain_wave_history_valid_ = false; // first frame on the new size starts flat
+        reallocated = true;
+    }
+
+    if (rain_wave_sampler_ == VK_NULL_HANDLE)
+    {
+        VkSamplerCreateInfo info = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        info.magFilter = VK_FILTER_LINEAR;
+        info.minFilter = VK_FILTER_LINEAR;
+        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.maxLod = 0.0f;
+        VkResult result = vkCreateSampler(device, &info, allocator, &rain_wave_sampler_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create rain wave-sim sampler"; return false; }
+    }
+
+    if (rain_wave_uniform_buffer_.buffer == VK_NULL_HANDLE)
+    {
+        if (!CreateGpuBuffer(*vulkan_context_, sizeof(RainWaveUniformBlock),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                rain_wave_uniform_buffer_))
+        {
+            status_message_ = "Failed to create rain wave-sim uniform buffer";
+            return false;
+        }
+    }
+
+    if (rain_wave_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        // 0: TLAS (ray query), 1: prev height (sampler), 2: curr height (storage), 3: uniforms.
+        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[3] = {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &info, allocator, &rain_wave_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create rain wave-sim descriptor layout"; return false; }
+    }
+
+    if (rain_wave_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        info.setLayoutCount = 1;
+        info.pSetLayouts = &rain_wave_descriptor_set_layout_;
+        VkResult result = vkCreatePipelineLayout(device, &info, allocator, &rain_wave_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create rain wave-sim pipeline layout"; return false; }
+    }
+
+    if (rain_wave_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule module = LoadShaderModule(device, ResolveShaderPath("rain_wave.comp.spv"));
+        if (module == VK_NULL_HANDLE) { status_message_ = "Failed to load rain_wave.comp"; return false; }
+        VkPipelineShaderStageCreateInfo stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";
+        VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = stage;
+        info.layout = rain_wave_pipeline_layout_;
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &info, allocator, &rain_wave_pipeline_);
+        vkDestroyShaderModule(device, module, allocator);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { rain_wave_pipeline_ = VK_NULL_HANDLE; status_message_ = "Failed to create rain wave-sim pipeline"; return false; }
+    }
+
+    bool sets_allocated = false;
+    for (int i = 0; i < 2; ++i)
+    {
+        if (rain_wave_descriptor_sets_[i] != VK_NULL_HANDLE) continue;
+        VkDescriptorSetAllocateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &rain_wave_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &info, &rain_wave_descriptor_sets_[i]);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { rain_wave_descriptor_sets_[i] = VK_NULL_HANDLE; status_message_ = "Failed to allocate rain wave-sim descriptor set"; return false; }
+        sets_allocated = true;
+    }
+
+    if (reallocated || sets_allocated)
+    {
+        if (!UpdateRainWaveDescriptors()) return false;
+    }
+    return true;
+}
+
+bool RayTracing::UpdateRainWaveDescriptors()
+{
+    if (vulkan_context_ == nullptr ||
+        rain_wave_views_[0] == VK_NULL_HANDLE || rain_wave_views_[1] == VK_NULL_HANDLE ||
+        rain_wave_sampler_ == VK_NULL_HANDLE ||
+        rain_wave_uniform_buffer_.buffer == VK_NULL_HANDLE ||
+        top_level_as_.handle == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    for (int parity = 0; parity < 2; ++parity)
+    {
+        if (rain_wave_descriptor_sets_[parity] == VK_NULL_HANDLE) continue;
+        const int prev = 1 - parity;
+
+        VkWriteDescriptorSetAccelerationStructureKHR as_write = {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+        as_write.accelerationStructureCount = 1;
+        as_write.pAccelerationStructures = &top_level_as_.handle;
+
+        VkDescriptorImageInfo prev_info = {};
+        prev_info.sampler = rain_wave_sampler_;
+        prev_info.imageView = rain_wave_views_[prev];
+        prev_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkDescriptorImageInfo curr_info = {};
+        curr_info.imageView = rain_wave_views_[parity];
+        curr_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorBufferInfo ubo = {};
+        ubo.buffer = rain_wave_uniform_buffer_.buffer;
+        ubo.range = sizeof(RainWaveUniformBlock);
+
+        std::array<VkWriteDescriptorSet, 4> writes = {};
+        for (auto& w : writes) { w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = rain_wave_descriptor_sets_[parity]; w.descriptorCount = 1; }
+        writes[0].pNext = &as_write; writes[0].dstBinding = 0; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        writes[1].dstBinding = 1; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[1].pImageInfo = &prev_info;
+        writes[2].dstBinding = 2; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[2].pImageInfo = &curr_info;
+        writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         writes[3].pBufferInfo = &ubo;
+
+        vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
+    return true;
+}
+
+void RayTracing::DestroyRainWaveResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            rain_wave_images_[i] = VK_NULL_HANDLE;
+            rain_wave_memories_[i] = VK_NULL_HANDLE;
+            rain_wave_views_[i] = VK_NULL_HANDLE;
+            rain_wave_descriptor_sets_[i] = VK_NULL_HANDLE;
+        }
+        rain_wave_sampler_ = VK_NULL_HANDLE;
+        rain_wave_uniform_buffer_ = {};
+        rain_wave_descriptor_set_layout_ = VK_NULL_HANDLE;
+        rain_wave_pipeline_layout_ = VK_NULL_HANDLE;
+        rain_wave_pipeline_ = VK_NULL_HANDLE;
+        rain_wave_width_ = 0;
+        rain_wave_height_ = 0;
+        return;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    for (int i = 0; i < 2; ++i)
+    {
+        if (rain_wave_views_[i] != VK_NULL_HANDLE)    { vkDestroyImageView(device, rain_wave_views_[i], allocator); rain_wave_views_[i] = VK_NULL_HANDLE; }
+        if (rain_wave_images_[i] != VK_NULL_HANDLE)   { vkDestroyImage(device, rain_wave_images_[i], allocator); rain_wave_images_[i] = VK_NULL_HANDLE; }
+        if (rain_wave_memories_[i] != VK_NULL_HANDLE) { vkFreeMemory(device, rain_wave_memories_[i], allocator); rain_wave_memories_[i] = VK_NULL_HANDLE; }
+        rain_wave_layouts_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        rain_wave_descriptor_sets_[i] = VK_NULL_HANDLE;
+    }
+    if (rain_wave_sampler_ != VK_NULL_HANDLE) { vkDestroySampler(device, rain_wave_sampler_, allocator); rain_wave_sampler_ = VK_NULL_HANDLE; }
+    DestroyGpuBuffer(vulkan_context_, rain_wave_uniform_buffer_);
+    if (rain_wave_pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, rain_wave_pipeline_, allocator); rain_wave_pipeline_ = VK_NULL_HANDLE; }
+    if (rain_wave_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, rain_wave_pipeline_layout_, allocator); rain_wave_pipeline_layout_ = VK_NULL_HANDLE; }
+    if (rain_wave_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, rain_wave_descriptor_set_layout_, allocator); rain_wave_descriptor_set_layout_ = VK_NULL_HANDLE; }
+    rain_wave_width_ = 0;
+    rain_wave_height_ = 0;
+    rain_wave_history_valid_ = false;
 }
 
 void RayTracing::EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch)
@@ -3382,7 +3721,8 @@ bool RayTracing::RenderFrame(
                             cb,
                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             0,
                             1, &barrier,
                             0, nullptr,
@@ -3458,7 +3798,7 @@ bool RayTracing::RenderFrame(
                 vkCmdPipelineBarrier(
                     cb,
                     VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     0,
                     1, &barrier,
                     0, nullptr,
@@ -3808,6 +4148,84 @@ bool RayTracing::RenderFrame(
         }
         descriptors_dirty_ = false;
     }
+
+    // --------------------------------------------------------------
+    // Rain wave-sim (Buffer A) pre-pass: advance the puddle ripple field and
+    // inject occlusion-gated raindrops, then hand the result to the puddle
+    // closest-hit shader (RT set binding 12). Runs after the TLAS is built (the
+    // occlusion ray-queries need current geometry) and before the RT trace.
+    // --------------------------------------------------------------
+    bool wave_dispatched = false;
+    if (has_puddle_ && EnsureRainWaveResources())
+    {
+        const int curr = static_cast<int>(rain_wave_parity_);
+        const int prev = 1 - curr;
+
+        // Refresh wave descriptors (the TLAS handle can change on rebuilds).
+        UpdateRainWaveDescriptors();
+
+        // Upload wave params.
+        RainWaveUniformBlock wb{};
+        wb.puddle_to_world = puddle_object_to_world_;
+        wb.res_count = {rain_wave_width_, rain_wave_height_, 10u,
+                        rain_wave_history_valid_ ? 1u : 0u};
+        wb.params0 = {elapsed_seconds, std::clamp(puddle_drop_speed_, 0.1f, 5.0f), 0.985f, 0.5f};   // time, rainSpeed, damping, dropIntensity
+        wb.params1 = {200.0f, 1.0f, 1.0f, 1.0f};              // occMaxDist, puddleHalf, occEnabled, stepPixels
+        UploadGpuBuffer(*vulkan_context_, rain_wave_uniform_buffer_, &wb, sizeof(wb));
+
+        // prev -> sampled, curr -> storage write.
+        TransitionImageLayout(
+            command_buffer_, rain_wave_images_[prev], VK_IMAGE_ASPECT_COLOR_BIT,
+            rain_wave_layouts_[prev], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            rain_wave_layouts_[prev] == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            rain_wave_layouts_[prev] == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+        rain_wave_layouts_[prev] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        TransitionImageLayout(
+            command_buffer_, rain_wave_images_[curr], VK_IMAGE_ASPECT_COLOR_BIT,
+            rain_wave_layouts_[curr], VK_IMAGE_LAYOUT_GENERAL,
+            rain_wave_layouts_[curr] == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            rain_wave_layouts_[curr] == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT);
+        rain_wave_layouts_[curr] = VK_IMAGE_LAYOUT_GENERAL;
+
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, rain_wave_pipeline_);
+        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                rain_wave_pipeline_layout_, 0, 1,
+                                &rain_wave_descriptor_sets_[curr], 0, nullptr);
+        const std::uint32_t gx = (rain_wave_width_ + 15u) / 16u;
+        const std::uint32_t gy = (rain_wave_height_ + 15u) / 16u;
+        vkCmdDispatch(command_buffer_, gx, gy, 1);
+
+        // curr -> sampled by the puddle closest-hit shader.
+        TransitionImageLayout(
+            command_buffer_, rain_wave_images_[curr], VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        rain_wave_layouts_[curr] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        // Rebind RT binding 12 to the freshly written image (follow ping-pong).
+        VkDescriptorImageInfo wave_bind = {};
+        wave_bind.sampler = rain_wave_sampler_;
+        wave_bind.imageView = rain_wave_views_[curr];
+        wave_bind.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet w12 = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w12.dstSet = descriptor_set_;
+        w12.dstBinding = 12;
+        w12.descriptorCount = 1;
+        w12.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w12.pImageInfo = &wave_bind;
+        vkUpdateDescriptorSets(vulkan_context_->GetDevice(), 1, &w12, 0, nullptr);
+
+        rain_wave_parity_ ^= 1u;
+        rain_wave_history_valid_ = true;
+        wave_dispatched = true;
+    }
+    (void)wave_dispatched;
 
     vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);
     vkCmdBindDescriptorSets(

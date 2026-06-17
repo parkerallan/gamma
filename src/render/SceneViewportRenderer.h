@@ -132,6 +132,9 @@ public:
         bool is_cloud = false;
         bool is_fire = false;
         bool is_rain = false;
+        bool is_puddle = false;
+        float puddle_drop_scale = 1.0f;
+        float puddle_drop_speed = 1.0f;
     };
 
 private:

@@ -2238,6 +2238,7 @@ bool RenderAttributeSection(
                 {"Cloud", SceneObjectShaderType::Cloud},
                 {"Fire", SceneObjectShaderType::Fire},
                 {"Rain", SceneObjectShaderType::Rain},
+                {"Puddle", SceneObjectShaderType::Puddle},
             };
 
             int selected_shader_index = 0;
@@ -2268,6 +2269,28 @@ bool RenderAttributeSection(
                     }
                 }
                 ImGui::EndCombo();
+            }
+
+            // Puddle-only: raindrop/ripple size. Smaller = smaller drops; stays
+            // world-locked (adaptive) as the puddle is scaled.
+            if (attribute.shader.type == SceneObjectShaderType::Puddle)
+            {
+                float drop_scale = attribute.shader.drop_scale;
+                if (ImGui::DragFloat("Drop Size", &drop_scale, 0.01f, 0.15f, 2.0f, "%.2fx"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "puddle drop size", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderDropScale(state.selected_item_path, object.name, attribute_index, drop_scale);
+                    }) || changed;
+                }
+                float drop_speed = attribute.shader.rain_speed;
+                if (ImGui::DragFloat("Drop Speed", &drop_speed, 0.02f, 0.1f, 5.0f, "%.2fx"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "puddle drop speed", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderDropSpeed(state.selected_item_path, object.name, attribute_index, drop_speed);
+                    }) || changed;
+                }
             }
 
             break;

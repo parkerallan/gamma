@@ -646,6 +646,8 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeEffectPath:") ||
     StartsWith(line, "AttributeEffectPlayMode:") ||
     StartsWith(line, "AttributeShaderType:") ||
+    StartsWith(line, "AttributeShaderDropScale:") ||
+    StartsWith(line, "AttributeShaderDropSpeed:") ||
     StartsWith(line, "AttributeShape3DPath:");
 }
 
@@ -2361,10 +2363,22 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             {
                 current_attribute->shader.type = SceneObjectShaderType::Rain;
             }
+            else if (type_name == "Puddle")
+            {
+                current_attribute->shader.type = SceneObjectShaderType::Puddle;
+            }
             else
             {
                 current_attribute->shader.type = SceneObjectShaderType::None;
             }
+        }
+        else if (StartsWith(trimmed, "AttributeShaderDropScale:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeShaderDropScale:"), current_attribute->shader.drop_scale);
+        }
+        else if (StartsWith(trimmed, "AttributeShaderDropSpeed:") && current_attribute != nullptr)
+        {
+            ParseScalar(ExtractValue(trimmed, "AttributeShaderDropSpeed:"), current_attribute->shader.rain_speed);
         }
         else if (StartsWith(trimmed, "AttributeShape3DPath:") && current_attribute != nullptr)
         {
@@ -3646,9 +3660,20 @@ bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, 
     case SceneObjectShaderType::Cloud: value = "Cloud"; break;
     case SceneObjectShaderType::Fire:  value = "Fire";  break;
     case SceneObjectShaderType::Rain:  value = "Rain";  break;
+    case SceneObjectShaderType::Puddle:     value = "Puddle";     break;
     default:                           value = "None";  break;
     }
     return SetSceneObjectAttributeStringValue("AttributeShaderType", scene_path, object_name, attribute_index, value);
+}
+
+bool SetSceneObjectAttributeShaderDropScale(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_scale)
+{
+    return SetSceneObjectAttributeScalar("AttributeShaderDropScale", scene_path, object_name, attribute_index, drop_scale);
+}
+
+bool SetSceneObjectAttributeShaderDropSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_speed)
+{
+    return SetSceneObjectAttributeScalar("AttributeShaderDropSpeed", scene_path, object_name, attribute_index, drop_speed);
 }
 
 bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path)

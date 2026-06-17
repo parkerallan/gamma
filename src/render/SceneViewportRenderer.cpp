@@ -112,6 +112,45 @@ bool IsRainObject(const SceneObjectMetadata& object)
     return false;
 }
 
+bool IsPuddleObject(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Puddle)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+float GetPuddleDropScale(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Puddle)
+        {
+            return attribute.shader.drop_scale;
+        }
+    }
+    return 1.0f;
+}
+
+float GetPuddleDropSpeed(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Puddle)
+        {
+            return attribute.shader.rain_speed;
+        }
+    }
+    return 1.0f;
+}
+
 Vec3 ToVec3(const SceneVector3& value)
 {
     return Vec3{value[0], value[1], value[2]};
@@ -2795,7 +2834,9 @@ void SceneViewportRenderer::SyncRayTracingScene()
         RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
-        instance_input.shader_type = object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u)));
+        instance_input.shader_type = object.is_puddle ? 5u : (object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u))));
+        instance_input.puddle_drop_scale = object.puddle_drop_scale;
+        instance_input.puddle_drop_speed = object.puddle_drop_speed;
         BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
@@ -3181,6 +3222,9 @@ void SceneViewportRenderer::RenderUi(
         queued_object.is_cloud = IsCloudObject(object);
         queued_object.is_fire = IsFireObject(object);
         queued_object.is_rain = IsRainObject(object);
+        queued_object.is_puddle = IsPuddleObject(object);
+        queued_object.puddle_drop_scale = GetPuddleDropScale(object);
+        queued_object.puddle_drop_speed = GetPuddleDropSpeed(object);
         queued_object.local_position = object.position;
         queued_object.local_rotation = object.rotation;
         queued_object.local_scale = object.scale;
