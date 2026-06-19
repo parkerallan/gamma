@@ -125,6 +125,32 @@ bool IsPuddleObject(const SceneObjectMetadata& object)
     return false;
 }
 
+bool IsFogObject(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Fog)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+float GetFogDensity(const SceneObjectMetadata& object)
+{
+    for (const SceneObjectAttribute& attribute : object.attributes)
+    {
+        if (attribute.kind == SceneObjectAttributeKind::Shader &&
+            attribute.shader.type == SceneObjectShaderType::Fog)
+        {
+            return attribute.shader.fog_density;
+        }
+    }
+    return 0.15f;
+}
+
 float GetPuddleDropScale(const SceneObjectMetadata& object)
 {
     for (const SceneObjectAttribute& attribute : object.attributes)
@@ -2824,6 +2850,13 @@ void SceneViewportRenderer::SyncRayTracingScene()
 
     rain_particles_active_ = false;
 
+    // Global volumetric fog region, sourced from a scene object's transform (the
+    // first object tagged with a Fog shader attribute). Like clouds, the object
+    // itself is not ray-traced geometry — its world-space box just bounds the
+    // post-process fog. Appearance stays at FogSettings defaults.
+    RayTracing::FogSettings fog_volume{};
+    fog_volume.enabled = false;
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
         // Rain particle emitters are not ray-traced geometry — capture the proxy
@@ -2836,6 +2869,24 @@ void SceneViewportRenderer::SyncRayTracingScene()
             rain_particles_color_ = object.rain_color;
             rain_particles_fall_speed_ = object.rain_fall_speed;
             rain_particles_drop_size_ = object.rain_drop_size;
+            continue;
+        }
+
+        // Fog volume: capture the object's world box (center + per-axis scale as
+        // half-extent) and skip the instance so the bounds object is invisible.
+        if (object.is_fog)
+        {
+            if (!fog_volume.enabled)
+            {
+                const auto& m = object.model_matrix;
+                fog_volume.enabled = true;
+                fog_volume.center = {m[12], m[13], m[14]};
+                float sx = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+                float sy = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+                float sz = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+                fog_volume.half_extent = {std::max(sx, 0.1f), std::max(sy, 0.1f), std::max(sz, 0.1f)};
+                fog_volume.density = object.fog_density;
+            }
             continue;
         }
 
@@ -2889,6 +2940,8 @@ void SceneViewportRenderer::SyncRayTracingScene()
         BuildModelMatrix(object, instance_input.transform.data());
         instance_inputs.push_back(std::move(instance_input));
     }
+
+    ray_tracing_.SetFogSettings(fog_volume);
 
     if (!ray_tracing_.UpdateScene(mesh_inputs, instance_inputs))
     {
@@ -3272,6 +3325,8 @@ void SceneViewportRenderer::RenderUi(
         queued_object.is_fire = IsFireObject(object);
         queued_object.is_rain = IsRainObject(object);
         queued_object.is_puddle = IsPuddleObject(object);
+        queued_object.is_fog = IsFogObject(object);
+        queued_object.fog_density = GetFogDensity(object);
         queued_object.puddle_drop_scale = GetPuddleDropScale(object);
         queued_object.puddle_drop_speed = GetPuddleDropSpeed(object);
         queued_object.water_color = GetWaterColor(object);

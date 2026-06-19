@@ -134,6 +134,8 @@ public:
         bool is_fire = false;
         bool is_rain = false;
         bool is_puddle = false;
+        bool is_fog = false;
+        float fog_density = 0.15f;
         float puddle_drop_scale = 1.0f;
         float puddle_drop_speed = 1.0f;
         std::array<float, 3> water_color = {0.02f, 0.25f, 0.75f};

@@ -213,6 +213,25 @@ public:
     void SetTaaDebugSettings(const TaaDebugSettings& settings) { taa_debug_ = settings; }
     const TaaDebugSettings& GetTaaDebugSettings() const { return taa_debug_; }
 
+    // Global volumetric fog (post-process pass). The fog fills a world-space
+    // box region and in-scatters the real directional/point/spot lights with
+    // ray-query shadow rays (god rays). Pushed in from the host each frame.
+    struct FogSettings
+    {
+        bool  enabled        = false;
+        std::array<float, 3> center = {0.0f, 2.0f, 0.0f}; // region center (world)
+        std::array<float, 3> half_extent = {20.0f, 4.0f, 20.0f}; // region half-size (world)
+        float density        = 0.15f;  // extinction sigma per world unit
+        std::array<float, 3> color = {0.85f, 0.9f, 1.0f}; // scatter tint
+        float scatter        = 1.0f;   // in-scatter brightness
+        float anisotropy     = 0.55f;  // HG g (forward scattering)
+        float ambient        = 0.4f;   // ambient in-scatter fill (0..1)
+        float height_falloff = 0.0f;   // 0 = uniform; >0 = denser near the bottom (ground fog)
+        int   steps          = 48;     // march samples
+    };
+    void SetFogSettings(const FogSettings& settings) { fog_settings_ = settings; }
+    const FogSettings& GetFogSettings() const { return fog_settings_; }
+
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
 
@@ -452,6 +471,11 @@ private:
     bool UpdateTaaDescriptors();
     void DestroyTaaResources();
 
+    // ---- Volumetric fog (post-process) helpers ----
+    bool EnsureFogResources();
+    bool UpdateFogDescriptors();
+    void DestroyFogResources();
+
     // ---- Rain wave-sim (Buffer A) helpers ----
     // Ensure the ping-pong height images + compute pipeline exist and are sized
     // to the current puddle footprint (world-locked texel density). Returns
@@ -646,6 +670,17 @@ private:
                                                    0.0f, 0.0f, 0.0f, 1.0f};
     std::array<float, 2> taa_prev_jitter_px_ = {0.0f, 0.0f};
     std::uint32_t taa_jitter_index_ = 0;
+
+    // ---- Volumetric fog (post-process) state ----
+    // A single compute pass run on the final display image after TAA. Binds the
+    // TLAS (ray-query shadow rays), the display image (storage read+write), the
+    // scene UBO (camera + lights + time) and the current-frame depth image; fog
+    // parameters are supplied via push constants from `fog_settings_`.
+    FogSettings fog_settings_{};
+    VkDescriptorSetLayout fog_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout fog_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline fog_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet fog_descriptor_set_ = VK_NULL_HANDLE;
 
     // ---- Rain wave-sim (Buffer A) state ----
     // Ping-pong RG16F height field (R = current, G = previous). Sized to the

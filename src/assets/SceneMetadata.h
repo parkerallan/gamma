@@ -52,6 +52,7 @@ enum class SceneObjectShaderType
     Rain,
     Puddle,
     RainParticles,
+    Fog,
 };
 
 enum class SceneObjectCameraType
@@ -303,6 +304,8 @@ struct SceneObjectShaderAttributes
     // reproduces the original fixed water look exactly). RainParticles reuses
     // this as the rain streak tint.
     SceneColor3 color = {0.02f, 0.25f, 0.75f};
+    // Fog: volume density / opacity (extinction per world unit). Higher = thicker.
+    float fog_density = 0.15f;
 };
 
 struct SceneObjectAttribute
@@ -514,6 +517,7 @@ bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, 
 bool SetSceneObjectAttributeShaderDropScale(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_scale);
 bool SetSceneObjectAttributeShaderDropSpeed(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float drop_speed);
 bool SetSceneObjectAttributeShaderColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color);
+bool SetSceneObjectAttributeShaderFogDensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float fog_density);
 bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path);
 bool SetSceneReferenceViewportSize(const std::filesystem::path& scene_path, std::uint32_t width, std::uint32_t height);
 bool SetSceneObjectModel(const std::filesystem::path& scene_path, const std::string& object_name, const std::filesystem::path& project_root, const std::filesystem::path& model_path);

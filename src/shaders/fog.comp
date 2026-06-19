@@ -1,0 +1,362 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_scalar_block_layout : require
+
+// ============================================================================
+// Global volumetric fog — POST-PROCESS pass.
+//
+// This is the GLSL realization of the EVL/UIC "Real-Time Volume Graphics" fog
+// technique (https://www.evl.uic.edu/sjames/cs525/shader.html): the camera ray
+// is marched and a fog-noise volume is oversampled, accumulating a transmittance
+// term `a` and an in-scattered-light term `b`, compositing
+//   final = scene_color * a + fog_in_scatter
+//
+// Unlike a proxy-mesh material, this runs over the WHOLE image as a compute pass
+// AFTER the ray tracer (and TAA): there is no geometry to hit, the fog simply
+// fills a world-space region the user configures. Each march sample evaluates
+// the engine's REAL directional / point / spot lights with the same attenuation
+// and spot-cone model as the surface shader, gated by a ray-query shadow ray so
+// solid geometry carves real volumetric light shafts ("god rays") out of the
+// fog. Mirrors the conventions of `evaluate_spot_light_volume` in
+// standard_rt.rgen, generalized to all three light types and bounded to a box.
+//
+// The march is clamped to the scene depth (binding 3, .x = primary hit distance)
+// so fog never paints in front of solid geometry, and to the configured region
+// box so it stays a bounded volume (a valley, a room) rather than fogging the
+// whole world.
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
+// HDR current-color buffer (history_image_, R16G16B16A16_SFLOAT, LINEAR). The fog
+// is composited here in place BEFORE the TAA resolve so TAA temporally stabilizes
+// it (no silhouette shimmer). Read+write.
+layout(set = 0, binding = 1, rgba16f) uniform image2D color_image;
+// Scene uniforms — same buffer/layout as the RT pipeline (binding 2). Only the
+// prefix through animation_time_data is needed (camera + lights + time).
+layout(set = 0, binding = 2, std140) uniform SceneUniforms
+{
+    mat4 view_inverse;
+    mat4 projection_inverse;
+    vec4 ambient_light;
+    vec4 directional_light_color;
+    vec4 directional_light_direction;
+    vec4 directional_light_data;
+    vec4 point_light_color;
+    vec4 point_light_position;
+    vec4 point_light_data;
+    vec4 spot_light_color;
+    vec4 spot_light_direction;
+    vec4 spot_light_position;
+    vec4 spot_light_data;
+    vec4 grid_data;
+    vec4 grid_origin_extent;
+    vec4 skybox_data;
+    uvec4 counts;
+    uvec4 accumulation_data;
+    vec4 animation_time_data;
+} scene;
+// Linear-depth G-buffer (rg32f). .x = primary-ray hit distance from the camera
+// (1e30 on a sky miss). Written by the rgen; read here to clamp the march.
+layout(set = 0, binding = 3, rg32f) uniform readonly image2D depth_image;
+// sRGB display image (R8G8B8A8_UNORM). Only written when TAA is disabled (no
+// resolve pass), gated by the write_display push flag.
+layout(set = 0, binding = 4, rgba8) uniform writeonly image2D display_image;
+
+layout(push_constant, std430) uniform FogPush
+{
+    vec4 center;     // xyz = region center (world), w = enabled (0/1)
+    vec4 half_size;  // xyz = region half-extent (world), w = density (extinction sigma / world unit)
+    vec4 color;      // rgb = fog scatter tint, w = scatter strength
+    vec4 params;     // x = anisotropy g, y = ambient fill, z = height falloff, w = step count
+    vec4 extent;     // x = image width, y = image height, z = write display (TAA off)
+} fog;
+
+const float FOG_PI = 3.14159265358979323846;
+#define FOG_NOISE_SCALE 0.18
+#define FOG_DRIFT       vec3(0.020, 0.008, 0.014)
+#define FOG_EDGE_START  0.70
+
+// ---- Procedural 3D value-noise fbm (world-locked, animated) ----------------
+float fog_hash(vec3 p)
+{
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float fog_value_noise(vec3 x)
+{
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(mix(fog_hash(p + vec3(0, 0, 0)), fog_hash(p + vec3(1, 0, 0)), f.x),
+            mix(fog_hash(p + vec3(0, 1, 0)), fog_hash(p + vec3(1, 1, 0)), f.x), f.y),
+        mix(mix(fog_hash(p + vec3(0, 0, 1)), fog_hash(p + vec3(1, 0, 1)), f.x),
+            mix(fog_hash(p + vec3(0, 1, 1)), fog_hash(p + vec3(1, 1, 1)), f.x), f.y),
+        f.z);
+}
+
+float fog_fbm(vec3 p)
+{
+    float f = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; ++i)
+    {
+        f += amp * fog_value_noise(p);
+        p *= 2.02;
+        amp *= 0.5;
+    }
+    return f;
+}
+
+float hash12(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// sRGB <-> linear (the display image stores sRGB-encoded values in a UNORM).
+vec3 srgb_to_linear(vec3 c)
+{
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+vec3 linear_to_srgb(vec3 c)
+{
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+// Density of the fog volume at a world point. Returns [0,1]: a billowing noise
+// fill, faded near the region faces (so the box is invisible) and optionally
+// thicker near the bottom (ground fog) via the height-falloff parameter.
+float fog_density(vec3 world_pos, float t)
+{
+    vec3 local = (world_pos - fog.center.xyz) / max(fog.half_size.xyz, vec3(1e-3));
+    vec3 a = abs(local);
+    if (any(greaterThan(a, vec3(1.0))))
+    {
+        return 0.0;
+    }
+
+    float n = fog_fbm(world_pos * FOG_NOISE_SCALE + t * FOG_DRIFT);
+    float d = mix(0.55, 1.0, smoothstep(0.2, 0.8, n));
+
+    float height_falloff = fog.params.z;
+    if (height_falloff > 0.0)
+    {
+        // 0 at the region bottom, 1 at the top; denser low down.
+        float yb = clamp(local.y * 0.5 + 0.5, 0.0, 1.0);
+        d *= exp(-yb * height_falloff * 4.0);
+    }
+
+    float edge = (1.0 - smoothstep(FOG_EDGE_START, 1.0, a.x))
+               * (1.0 - smoothstep(FOG_EDGE_START, 1.0, a.y))
+               * (1.0 - smoothstep(FOG_EDGE_START, 1.0, a.z));
+    return d * edge;
+}
+
+float fog_phase(float g, float mu)
+{
+    float gg = g * g;
+    return (1.0 / (4.0 * FOG_PI)) * ((1.0 - gg) / pow(max(1.0 + gg - 2.0 * g * mu, 1e-4), 1.5));
+}
+
+// Ray-query shadow test toward a light. cullMask 0x01 = only SOLID geometry
+// (mask bit 0); translucent effect proxies (cloud/puddle, mask 0xFE) are skipped
+// so they never falsely shadow the fog. Returns 1.0 lit, 0.0 occluded.
+float fog_shadow(vec3 origin, vec3 direction, float max_distance)
+{
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq, top_level_as,
+        gl_RayFlagsTerminateOnFirstHitEXT,
+        0x01,
+        origin, 0.02, direction, max_distance);
+    while (rayQueryProceedEXT(rq)) {}
+    return (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+}
+
+// In-scattered radiance reaching the eye from one march sample. Evaluates the
+// engine's real directional / point / spot lights (attenuation + spot cone match
+// the surface shader), each gated by a shadow ray and weighted by the HG phase
+// toward the view ray. view_dir points camera -> scene.
+vec3 fog_inscatter(vec3 world_pos, vec3 view_dir, float g)
+{
+    vec3 result = scene.ambient_light.rgb * scene.ambient_light.a * fog.params.y;
+
+    // Directional (sun) -> light shafts through gaps in geometry.
+    if (scene.directional_light_color.a > 0.0)
+    {
+        vec3 light_dir = normalize(-scene.directional_light_direction.xyz);
+        float vis = fog_shadow(world_pos, light_dir, 1.0e4);
+        if (vis > 0.0)
+        {
+            float phase = fog_phase(g, dot(view_dir, light_dir));
+            result += scene.directional_light_color.rgb * scene.directional_light_color.a * vis * phase;
+        }
+    }
+
+    // Point -> soft glowing halo around the source.
+    if (scene.point_light_color.a > 0.0)
+    {
+        vec3 to_light = scene.point_light_position.xyz - world_pos;
+        float dist = length(to_light);
+        if (dist > 1e-4)
+        {
+            vec3 light_dir = to_light / dist;
+            float range = max(scene.point_light_position.w, 0.0001);
+            float nd = dist / range;
+            float range_fade = clamp(1.0 - nd * nd * nd * nd, 0.0, 1.0);
+            float atten = (range_fade * range_fade) / max(dist * dist, 0.01);
+            if (atten > 0.0)
+            {
+                float vis = fog_shadow(world_pos, light_dir, max(dist - 0.02, 0.02));
+                if (vis > 0.0)
+                {
+                    float phase = fog_phase(g, dot(view_dir, light_dir));
+                    result += scene.point_light_color.rgb * scene.point_light_color.a * atten * vis * phase;
+                }
+            }
+        }
+    }
+
+    // Spot -> a visible volumetric cone/beam in the fog.
+    if (scene.spot_light_color.a > 0.0)
+    {
+        vec3 light_axis = normalize(-scene.spot_light_direction.xyz);
+        vec3 to_light = scene.spot_light_position.xyz - world_pos;
+        float dist = length(to_light);
+        if (dist > 1e-4)
+        {
+            vec3 light_dir = to_light / dist;
+            float range = max(scene.spot_light_position.w, 0.0001);
+            float range_factor = clamp(1.0 - (dist / range), 0.0, 1.0);
+            float cone_cos = dot(light_axis, light_dir);
+            float cone_factor = smoothstep(scene.spot_light_data.x, scene.spot_light_direction.w, cone_cos);
+            float atten = range_factor * range_factor * cone_factor;
+            if (atten > 0.0)
+            {
+                float vis = fog_shadow(world_pos, light_dir, max(dist - 0.02, 0.02));
+                if (vis > 0.0)
+                {
+                    float phase = fog_phase(g, dot(view_dir, light_dir));
+                    result += scene.spot_light_color.rgb * scene.spot_light_color.a * atten * vis * phase;
+                }
+            }
+        }
+    }
+
+    return result * fog.color.rgb * fog.color.w;
+}
+
+bool intersect_box(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1)
+{
+    vec3 inv = 1.0 / rd;
+    vec3 a = (bmin - ro) * inv;
+    vec3 b = (bmax - ro) * inv;
+    vec3 tmn = min(a, b);
+    vec3 tmx = max(a, b);
+    t0 = max(max(tmn.x, tmn.y), tmn.z);
+    t1 = min(min(tmx.x, tmx.y), tmx.z);
+    return t1 >= max(t0, 0.0);
+}
+
+void main()
+{
+    if (fog.center.w <= 0.0)
+    {
+        return;
+    }
+
+    ivec2 ipos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(int(fog.extent.x), int(fog.extent.y));
+    if (ipos.x >= size.x || ipos.y >= size.y)
+    {
+        return;
+    }
+
+    // Reconstruct the primary view ray (pixel center, no TAA jitter — this runs
+    // post-resolve). Matches trace_primary_sample() in standard_rt.rgen.
+    vec2 ndc = ((vec2(ipos) + 0.5) / vec2(size)) * 2.0 - 1.0;
+    vec4 view_target = scene.projection_inverse * vec4(ndc, 1.0, 1.0);
+    vec3 view_dir = normalize(view_target.xyz / max(view_target.w, 0.0001));
+    vec3 ro = (scene.view_inverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 rd = normalize((scene.view_inverse * vec4(view_dir, 0.0)).xyz);
+
+    float scene_dist = imageLoad(depth_image, ipos).x; // 1e30 on sky
+
+    // Intersect the bounded fog region.
+    vec3 bmin = fog.center.xyz - fog.half_size.xyz;
+    vec3 bmax = fog.center.xyz + fog.half_size.xyz;
+    float t0, t1;
+    if (!intersect_box(ro, rd, bmin, bmax, t0, t1))
+    {
+        return;
+    }
+    t0 = max(t0, 0.0);
+    t1 = min(t1, scene_dist); // never fog in front of solid geometry
+    if (t1 <= t0)
+    {
+        return;
+    }
+
+    float t = scene.animation_time_data.x;
+    float g = fog.params.x;
+    int steps = int(max(fog.params.w, 1.0));
+    float seg = (t1 - t0) / float(steps);
+    float sigma = fog.half_size.w;
+
+    // Static per-pixel dither breaks step banding without temporal shimmer
+    // (this is a post-TAA pass, so a per-frame jitter would not be averaged).
+    float dither = hash12(vec2(ipos));
+
+    // Front-to-back integration (physically equivalent to the EVL demo's
+    // back-to-front `a *= x; b = mix(...)`): transmittance accumulates as a
+    // product; in-scatter is weighted by the transmittance reaching each sample
+    // and that sample's local opacity (1 - x), with x = 1 - density*sigma*seg.
+    float transmittance = 1.0;
+    vec3 inscatter = vec3(0.0);
+
+    for (int i = 0; i < steps; ++i)
+    {
+        if (transmittance < 0.01)
+        {
+            break;
+        }
+        float tt = t0 + (float(i) + dither) * seg;
+        vec3 p = ro + rd * tt;
+
+        float density = fog_density(p, t);
+        if (density <= 0.002)
+        {
+            continue;
+        }
+
+        float x = clamp(1.0 - density * sigma * seg, 0.0, 1.0);
+        vec3 Ls = fog_inscatter(p, rd, g);
+
+        inscatter += transmittance * (1.0 - x) * Ls;
+        transmittance *= x;
+    }
+
+    if (transmittance >= 0.999 && dot(inscatter, inscatter) < 1e-8)
+    {
+        return; // ray missed all fog — leave the pixel untouched
+    }
+
+    // Composite in LINEAR HDR (the history buffer is linear), so bright in-scatter
+    // is preserved for the TAA resolve / tonemap rather than clamped here.
+    vec4 src = imageLoad(color_image, ipos);
+    vec3 outl = src.rgb * transmittance + inscatter;
+    imageStore(color_image, ipos, vec4(outl, src.a));
+
+    // When TAA is off there is no resolve pass writing the display, so emit the
+    // sRGB-encoded result directly (matches the rgen's own display write).
+    if (fog.extent.z > 0.5)
+    {
+        imageStore(display_image, ipos, vec4(linear_to_srgb(max(outl, 0.0)), src.a));
+    }
+}

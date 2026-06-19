@@ -939,6 +939,7 @@ bool RayTracing::Initialize(VulkanContext* context)
 
 void RayTracing::Shutdown()
 {
+    DestroyFogResources();
     DestroyRainWaveResources();
     DestroyTaaResources();
     DestroyOutputResources();
@@ -3197,6 +3198,159 @@ void RayTracing::DestroyRainWaveResources()
     rain_wave_history_valid_ = false;
 }
 
+// Push-constant layout for fog.comp (std430). Must match the FogPush block.
+struct FogPushConstants
+{
+    float center[4];     // xyz = region center, w = enabled
+    float half_size[4];  // xyz = region half-extent, w = density (sigma)
+    float color[4];      // rgb = scatter tint, w = scatter strength
+    float params[4];     // x = anisotropy g, y = ambient, z = height falloff, w = steps
+    float extent[4];     // x = width, y = height
+};
+
+bool RayTracing::EnsureFogResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (fog_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        // 0: TLAS (ray-query shadow), 1: HDR current-color (history_image_,
+        // storage r/w), 2: scene UBO, 3: current-frame depth (storage, read),
+        // 4: sRGB display image (storage write, used only when TAA is off).
+        std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[2] = {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &info, allocator, &fog_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create fog descriptor layout"; return false; }
+    }
+
+    if (fog_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange range = {};
+        range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        range.offset = 0;
+        range.size = sizeof(FogPushConstants);
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        info.setLayoutCount = 1;
+        info.pSetLayouts = &fog_descriptor_set_layout_;
+        info.pushConstantRangeCount = 1;
+        info.pPushConstantRanges = &range;
+        VkResult result = vkCreatePipelineLayout(device, &info, allocator, &fog_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create fog pipeline layout"; return false; }
+    }
+
+    if (fog_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule module = LoadShaderModule(device, ResolveShaderPath("fog.comp.spv"));
+        if (module == VK_NULL_HANDLE) { status_message_ = "Failed to load fog.comp"; return false; }
+        VkPipelineShaderStageCreateInfo stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";
+        VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = stage;
+        info.layout = fog_pipeline_layout_;
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &info, allocator, &fog_pipeline_);
+        vkDestroyShaderModule(device, module, allocator);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { fog_pipeline_ = VK_NULL_HANDLE; status_message_ = "Failed to create fog pipeline"; return false; }
+    }
+
+    if (fog_descriptor_set_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetAllocateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &fog_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &info, &fog_descriptor_set_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { fog_descriptor_set_ = VK_NULL_HANDLE; status_message_ = "Failed to allocate fog descriptor set"; return false; }
+    }
+
+    return true;
+}
+
+bool RayTracing::UpdateFogDescriptors()
+{
+    if (vulkan_context_ == nullptr ||
+        fog_descriptor_set_ == VK_NULL_HANDLE ||
+        history_view_ == VK_NULL_HANDLE ||
+        output_view_ == VK_NULL_HANDLE ||
+        uniform_buffer_.buffer == VK_NULL_HANDLE ||
+        depth_views_[depth_write_slot_] == VK_NULL_HANDLE ||
+        top_level_as_.handle == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    VkWriteDescriptorSetAccelerationStructureKHR as_write = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    as_write.accelerationStructureCount = 1;
+    as_write.pAccelerationStructures = &top_level_as_.handle;
+
+    // HDR current-color buffer (history_image_) — composited in place, before TAA.
+    VkDescriptorImageInfo color_info = {};
+    color_info.imageView = history_view_;
+    color_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorBufferInfo ubo = {};
+    ubo.buffer = uniform_buffer_.buffer;
+    ubo.range = sizeof(UniformBlock);
+
+    VkDescriptorImageInfo depth_info = {};
+    depth_info.imageView = depth_views_[depth_write_slot_];
+    depth_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    // sRGB display image — written directly only when TAA is disabled.
+    VkDescriptorImageInfo display_info = {};
+    display_info.imageView = output_view_;
+    display_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    std::array<VkWriteDescriptorSet, 5> writes = {};
+    for (auto& w : writes) { w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = fog_descriptor_set_; w.descriptorCount = 1; }
+    writes[0].pNext = &as_write; writes[0].dstBinding = 0; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    writes[1].dstBinding = 1; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;   writes[1].pImageInfo = &color_info;
+    writes[2].dstBinding = 2; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;  writes[2].pBufferInfo = &ubo;
+    writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;   writes[3].pImageInfo = &depth_info;
+    writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;   writes[4].pImageInfo = &display_info;
+
+    vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    return true;
+}
+
+void RayTracing::DestroyFogResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        fog_descriptor_set_ = VK_NULL_HANDLE;
+        fog_descriptor_set_layout_ = VK_NULL_HANDLE;
+        fog_pipeline_layout_ = VK_NULL_HANDLE;
+        fog_pipeline_ = VK_NULL_HANDLE;
+        return;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    if (fog_pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, fog_pipeline_, allocator); fog_pipeline_ = VK_NULL_HANDLE; }
+    if (fog_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, fog_pipeline_layout_, allocator); fog_pipeline_layout_ = VK_NULL_HANDLE; }
+    if (fog_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, fog_descriptor_set_layout_, allocator); fog_descriptor_set_layout_ = VK_NULL_HANDLE; }
+    fog_descriptor_set_ = VK_NULL_HANDLE;
+}
+
 void RayTracing::EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch)
 {
     if (!available_ ||
@@ -4259,6 +4413,76 @@ bool RayTracing::RenderFrame(
         1);
 
     // --------------------------------------------------------------
+    // Volumetric fog: composite light-interactive bounded fog into the HDR
+    // current-color buffer (history_image_) BEFORE TAA, so the temporal resolve
+    // stabilizes the fog exactly like it does the clouds — fixing the silhouette
+    // shimmer that a post-TAA pass produced (the depth used to clamp the march
+    // flips hit/miss at jittered edges, and post-TAA nothing smooths that flip).
+    // When TAA is off there is no resolve pass, so the fog also writes the sRGB
+    // display image directly.
+    // --------------------------------------------------------------
+    if (fog_settings_.enabled && EnsureFogResources() && UpdateFogDescriptors())
+    {
+        // Make the ray-gen writes to the HDR color + depth visible to compute.
+        VkMemoryBarrier rt_to_fog = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        rt_to_fog.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rt_to_fog.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &rt_to_fog,
+            0, nullptr,
+            0, nullptr);
+
+        FogPushConstants pc{};
+        pc.center[0] = fog_settings_.center[0];
+        pc.center[1] = fog_settings_.center[1];
+        pc.center[2] = fog_settings_.center[2];
+        pc.center[3] = 1.0f; // enabled (gated already on the host)
+        pc.half_size[0] = (std::max)(fog_settings_.half_extent[0], 0.01f);
+        pc.half_size[1] = (std::max)(fog_settings_.half_extent[1], 0.01f);
+        pc.half_size[2] = (std::max)(fog_settings_.half_extent[2], 0.01f);
+        pc.half_size[3] = (std::max)(fog_settings_.density, 0.0f);
+        pc.color[0] = fog_settings_.color[0];
+        pc.color[1] = fog_settings_.color[1];
+        pc.color[2] = fog_settings_.color[2];
+        pc.color[3] = (std::max)(fog_settings_.scatter, 0.0f);
+        pc.params[0] = std::clamp(fog_settings_.anisotropy, -0.95f, 0.95f);
+        pc.params[1] = (std::max)(fog_settings_.ambient, 0.0f);
+        pc.params[2] = (std::max)(fog_settings_.height_falloff, 0.0f);
+        pc.params[3] = static_cast<float>(std::clamp(fog_settings_.steps, 1, 256));
+        pc.extent[0] = static_cast<float>(output_width_);
+        pc.extent[1] = static_cast<float>(output_height_);
+        // .z = write the sRGB display image directly (only when TAA won't run).
+        pc.extent[2] = taa_enabled_ ? 0.0f : 1.0f;
+
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, fog_pipeline_);
+        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                fog_pipeline_layout_, 0, 1, &fog_descriptor_set_, 0, nullptr);
+        vkCmdPushConstants(command_buffer_, fog_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(pc), &pc);
+        const std::uint32_t gx = (output_width_ + 15u) / 16u;
+        const std::uint32_t gy = (output_height_ + 15u) / 16u;
+        vkCmdDispatch(command_buffer_, gx, gy, 1);
+
+        // Make the fog's HDR-color write visible to the TAA compute pass that
+        // samples history_image_ as its current-frame input.
+        VkMemoryBarrier fog_to_taa = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        fog_to_taa.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        fog_to_taa.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            1, &fog_to_taa,
+            0, nullptr,
+            0, nullptr);
+    }
+
+    // --------------------------------------------------------------
     // TAA post-pass: temporally accumulate the freshly traced frame.
     // --------------------------------------------------------------
     bool taa_dispatched = false;
@@ -4347,7 +4571,6 @@ bool RayTracing::RenderFrame(
             taa_dispatched = true;
         }
     }
-
     accumulation_reference_uniforms_ = accumulation_reference;
     accumulation_reference_uniforms_valid_ = true;
 

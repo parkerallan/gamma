@@ -649,6 +649,7 @@ bool IsAttributePropertyLine(std::string_view line)
     StartsWith(line, "AttributeShaderDropScale:") ||
     StartsWith(line, "AttributeShaderDropSpeed:") ||
     StartsWith(line, "AttributeShaderColor:") ||
+    StartsWith(line, "AttributeShaderFogDensity:") ||
     StartsWith(line, "AttributeShape3DPath:");
 }
 
@@ -2377,6 +2378,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
                 {
                     current_attribute->shader.type = SceneObjectShaderType::RainParticles;
                 }
+                else if (type_name == "Fog")
+                {
+                    current_attribute->shader.type = SceneObjectShaderType::Fog;
+                }
                 else
                 {
                     current_attribute->shader.type = SceneObjectShaderType::None;
@@ -2393,6 +2398,10 @@ SceneMetadata LoadSceneMetadata(const std::filesystem::path& scene_path)
             else if (StartsWith(trimmed, "AttributeShaderColor:"))
             {
                 ParseColor3(ExtractValue(trimmed, "AttributeShaderColor:"), current_attribute->shader.color);
+            }
+            else if (StartsWith(trimmed, "AttributeShaderFogDensity:"))
+            {
+                ParseScalar(ExtractValue(trimmed, "AttributeShaderFogDensity:"), current_attribute->shader.fog_density);
             }
         }
         else if (StartsWith(trimmed, "AttributeShape3DPath:") && current_attribute != nullptr)
@@ -3677,6 +3686,7 @@ bool SetSceneObjectAttributeShaderType(const std::filesystem::path& scene_path, 
     case SceneObjectShaderType::Rain:  value = "Rain";  break;
     case SceneObjectShaderType::Puddle:     value = "Puddle";     break;
     case SceneObjectShaderType::RainParticles: value = "RainParticles"; break;
+    case SceneObjectShaderType::Fog:   value = "Fog";   break;
     default:                           value = "None";  break;
     }
     return SetSceneObjectAttributeStringValue("AttributeShaderType", scene_path, object_name, attribute_index, value);
@@ -3695,6 +3705,11 @@ bool SetSceneObjectAttributeShaderDropSpeed(const std::filesystem::path& scene_p
 bool SetSceneObjectAttributeShaderColor(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const SceneColor3& color)
 {
     return SetSceneObjectAttributeColorValue("AttributeShaderColor", scene_path, object_name, attribute_index, color);
+}
+
+bool SetSceneObjectAttributeShaderFogDensity(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, float fog_density)
+{
+    return SetSceneObjectAttributeScalar("AttributeShaderFogDensity", scene_path, object_name, attribute_index, fog_density);
 }
 
 bool SetSceneObjectAttributeShape3DPath(const std::filesystem::path& scene_path, const std::string& object_name, std::size_t attribute_index, const std::string& shape_path)

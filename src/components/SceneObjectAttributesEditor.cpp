@@ -2240,6 +2240,7 @@ bool RenderAttributeSection(
                 {"Rain", SceneObjectShaderType::Rain},
                 {"Puddle", SceneObjectShaderType::Puddle},
                 {"Rain Particles", SceneObjectShaderType::RainParticles},
+                {"Fog", SceneObjectShaderType::Fog},
             };
 
             int selected_shader_index = 0;
@@ -2339,6 +2340,19 @@ bool RenderAttributeSection(
                     changed = SaveSceneObjectAttributeEdit(state, object, "puddle drop speed", [&]()
                     {
                         return SetSceneObjectAttributeShaderDropSpeed(state.selected_item_path, object.name, attribute_index, drop_speed);
+                    }) || changed;
+                }
+            }
+
+            // Fog-only: volume density / opacity. Higher = thicker, more opaque fog.
+            if (attribute.shader.type == SceneObjectShaderType::Fog)
+            {
+                float fog_density = attribute.shader.fog_density;
+                if (ImGui::DragFloat("Density", &fog_density, 0.005f, 0.0f, 2.0f, "%.3f"))
+                {
+                    changed = SaveSceneObjectAttributeEdit(state, object, "fog density", [&]()
+                    {
+                        return SetSceneObjectAttributeShaderFogDensity(state.selected_item_path, object.name, attribute_index, fog_density);
                     }) || changed;
                 }
             }
