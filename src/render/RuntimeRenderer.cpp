@@ -172,6 +172,25 @@ float GetFogDensity(const SceneObjectMetadata& object)
     return 0.15f;
 }
 
+// Rain glass BOX from a placed object's transform (column-major): the thinnest
+// world axis is the glass normal + half-thickness, the other two are the pane
+// U/V half-extents. A real box volume (post-process intersects it for true
+// thickness) — NOT a rendered proxy mesh.
+void BuildRainWindowFromMatrix(const std::array<float, 16>& m, RayTracing::RainWindowSettings& rw)
+{
+    rw.enabled = true;
+    rw.center = {m[12], m[13], m[14]};
+    float l0 = std::max(std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]), 1e-5f);
+    float l1 = std::max(std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]), 1e-5f);
+    float l2 = std::max(std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]), 1e-5f);
+    std::array<float, 3> c0 = {m[0] / l0, m[1] / l0, m[2] / l0};
+    std::array<float, 3> c1 = {m[4] / l1, m[5] / l1, m[6] / l1};
+    std::array<float, 3> c2 = {m[8] / l2, m[9] / l2, m[10] / l2};
+    if (l1 <= l0 && l1 <= l2)      { rw.normal = c1; rw.half_thickness = l1; rw.axis_u = c0; rw.half_u = l0; rw.axis_v = c2; rw.half_v = l2; }
+    else if (l0 <= l1 && l0 <= l2) { rw.normal = c0; rw.half_thickness = l0; rw.axis_u = c1; rw.half_u = l1; rw.axis_v = c2; rw.half_v = l2; }
+    else                           { rw.normal = c2; rw.half_thickness = l2; rw.axis_u = c0; rw.half_u = l0; rw.axis_v = c1; rw.half_v = l1; }
+}
+
 float GetPuddleDropScale(const SceneObjectMetadata& object)
 {
     for (const SceneObjectAttribute& attribute : object.attributes)
@@ -6614,7 +6633,10 @@ bool RuntimeRenderer::BuildQueuedScene(
             queued_object.script_paths.empty() &&
             queued_object.graph_paths.empty() &&
             !queued_object.is_cloud &&
-            !queued_object.is_fog)
+            !queued_object.is_fog &&
+            !queued_object.is_fire &&
+            !queued_object.is_puddle &&
+            !queued_object.is_rain)
         {
             continue;
         }
@@ -7077,6 +7099,63 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         ray_tracing_.SetFogSettings(fog_volume);
     }
 
+    // Volumetric fire region from the first Fire-tagged object's transform
+    // (proxy-free; the object is not rendered, its box bounds the flame pass).
+    {
+        RayTracing::FireSettings fire_volume{};
+        fire_volume.enabled = false;
+        for (const QueuedSceneObject& fobj : queued_objects_)
+        {
+            if (!fobj.is_fire) continue;
+            const auto& m = fobj.model_matrix;
+            fire_volume.enabled = true;
+            fire_volume.center = {m[12], m[13], m[14]};
+            float sx = std::sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+            float sy = std::sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6]);
+            float sz = std::sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10]);
+            fire_volume.half_extent = {std::max(sx, 0.1f), std::max(sy, 0.1f), std::max(sz, 0.1f)};
+            break;
+        }
+        ray_tracing_.SetFireSettings(fire_volume);
+    }
+
+    // Rain puddle region from the first Puddle-tagged object's transform
+    // (proxy-free; the water plane sits at the object's center Y).
+    {
+        RayTracing::PuddleSettings puddle_volume{};
+        puddle_volume.enabled = false;
+        for (const QueuedSceneObject& fobj : queued_objects_)
+        {
+            if (!fobj.is_puddle) continue;
+            const auto& m = fobj.model_matrix;
+            puddle_volume.enabled = true;
+            puddle_volume.center = {m[12], m[13], m[14]};
+            float sx = std::sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+            float sy = std::sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6]);
+            float sz = std::sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10]);
+            puddle_volume.half_extent = {std::max(sx, 0.1f), std::max(sy, 0.1f), std::max(sz, 0.1f)};
+            puddle_volume.drop_scale = fobj.puddle_drop_scale;
+            puddle_volume.drop_speed = fobj.puddle_drop_speed;
+            break;
+        }
+        ray_tracing_.SetPuddleSettings(puddle_volume);
+    }
+
+    // Rain-on-glass box from the first Rain-tagged object's transform (proxy-free;
+    // the post pass intersects the real box volume for true glass thickness).
+    {
+        RayTracing::RainWindowSettings rain_window{};
+        rain_window.enabled = false;
+        for (const QueuedSceneObject& fobj : queued_objects_)
+        {
+            if (!fobj.is_rain) continue;
+            BuildRainWindowFromMatrix(fobj.model_matrix, rain_window);
+            break;
+        }
+        ray_tracing_.SetRainWindowSettings(rain_window);
+    }
+
+
     // Rebuild the animated bone-collider set from this frame's poses. Each
     // UpdateAnimatedMeshForObject appends the object's Collision-modifier
     // colliders; the physics block (next frame) consumes these.
@@ -7099,9 +7178,9 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
             continue;
         }
 
-        // Fog volume objects are bounds only (consumed above as the fog region) —
-        // skip the instance so the object is invisible in the scene.
-        if (object.is_fog)
+        // Fog / fire / puddle / rain volume objects are bounds only (consumed
+        // above as their regions) — skip the instance so the object is invisible.
+        if (object.is_fog || object.is_fire || object.is_puddle || object.is_rain)
         {
             continue;
         }
@@ -7178,7 +7257,7 @@ bool RuntimeRenderer::SyncRayTracingScene(std::string* error_message, float* out
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
         instance_input.transform = object.model_matrix;
-        instance_input.shader_type = object.is_puddle ? 5u : (object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u))));
+        instance_input.shader_type = object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u);
         instance_input.puddle_drop_scale = object.puddle_drop_scale;
         instance_input.puddle_drop_speed = object.puddle_drop_speed;
         instance_input.water_color = object.water_color;

@@ -232,6 +232,56 @@ public:
     void SetFogSettings(const FogSettings& settings) { fog_settings_ = settings; }
     const FogSettings& GetFogSettings() const { return fog_settings_; }
 
+    // Volumetric fire (post-process pass). Proxy-free: the flame is raymarched in
+    // a world-space box region from a placed Fire object's transform and
+    // composited (emissive) into the image. No proxy mesh / hit material.
+    struct FireSettings
+    {
+        bool  enabled     = false;
+        std::array<float, 3> center = {0.0f, 1.0f, 0.0f};
+        std::array<float, 3> half_extent = {1.0f, 1.0f, 1.0f};
+        float intensity   = 1.0f;  // overall coverage/brightness multiplier
+        float emission    = 1.0f;  // emissive strength added over the scene
+        int   steps       = 96;    // march samples
+    };
+    void SetFireSettings(const FireSettings& settings) { fire_settings_ = settings; }
+    const FireSettings& GetFireSettings() const { return fire_settings_; }
+
+    // Rain puddle (post-process pass). Proxy-free: an analytic water plane bounded
+    // by a placed Puddle object's box region, with screen-space reflections and
+    // the wave-ripple field. No proxy plane / hit material. The region also drives
+    // the rain wave-sim (rain_wave.comp) footprint.
+    struct PuddleSettings
+    {
+        bool  enabled    = false;
+        std::array<float, 3> center = {0.0f, 0.0f, 0.0f};       // water plane at center.y
+        std::array<float, 3> half_extent = {2.0f, 0.1f, 2.0f};  // XZ footprint
+        float drop_scale = 1.0f;
+        float drop_speed = 1.0f;
+    };
+    void SetPuddleSettings(const PuddleSettings& settings) { puddle_settings_ = settings; }
+    const PuddleSettings& GetPuddleSettings() const { return puddle_settings_; }
+
+    // Rain on glass — a WORLD-SPACE pane (proxy-free). A placed Rain object's
+    // transform defines the quad: center + two in-plane axes (with half-extents)
+    // + normal. The post pass renders rain-on-glass on that pane, refracting the
+    // scene behind it. No hit material.
+    struct RainWindowSettings
+    {
+        bool  enabled = false;
+        std::array<float, 3> center = {0.0f, 0.0f, 0.0f};
+        std::array<float, 3> axis_u = {1.0f, 0.0f, 0.0f};
+        float half_u = 1.0f;
+        std::array<float, 3> axis_v = {0.0f, 1.0f, 0.0f};
+        float half_v = 1.0f;
+        std::array<float, 3> normal = {0.0f, 0.0f, 1.0f};
+        float half_thickness = 0.05f; // glass depth (the box's thin axis) for refraction displacement
+        float bump = 1.5f;    // drop normal bump strength
+        float tiling = 0.5f;  // drop density per world unit on the pane
+    };
+    void SetRainWindowSettings(const RainWindowSettings& settings) { rain_window_settings_ = settings; }
+    const RainWindowSettings& GetRainWindowSettings() const { return rain_window_settings_; }
+
     bool IsAvailable() const { return available_; }
     const std::string& GetStatusMessage() const { return status_message_; }
 
@@ -432,6 +482,10 @@ private:
         // shaders that declare only a prefix of SceneUniforms stay
         // layout-compatible.
         std::array<float, 4> prev_camera_position = {0.0f, 0.0f, 0.0f, 0.0f};
+        // Planar reflection: .x = this is the mirrored-camera reflection trace
+        // (1), .y = reflection plane Y (rays clip to above it). 0 for the main
+        // render.
+        std::array<float, 4> reflection_params = {0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     // CPU-side parameters fed into the rain wave-sim (Buffer A) compute UBO.
@@ -465,6 +519,7 @@ private:
     void DestroyPipelineResources();
     bool EnsurePipelineResources();
     bool UpdateDescriptors();
+    bool UpdateDescriptorsInto(VkDescriptorSet target_set, VkImageView output_view_param, VkBuffer ubo_buffer);
 
     // ---- TAA helpers ----
     bool EnsureTaaResources();
@@ -475,6 +530,21 @@ private:
     bool EnsureFogResources();
     bool UpdateFogDescriptors();
     void DestroyFogResources();
+
+    // ---- Volumetric fire (post-process) helpers ----
+    bool EnsureFireResources();
+    bool UpdateFireDescriptors();
+    void DestroyFireResources();
+
+    // ---- Rain puddle (post-process) helpers ----
+    bool EnsurePuddleResources();
+    bool UpdatePuddleDescriptors(VkImageView wave_view);
+    void DestroyPuddleResources();
+
+    // ---- Rain on glass (full-screen post-process) helpers ----
+    bool EnsureRainWindowResources();
+    bool UpdateRainWindowDescriptors();
+    void DestroyRainWindowResources();
 
     // ---- Rain wave-sim (Buffer A) helpers ----
     // Ensure the ping-pong height images + compute pipeline exist and are sized
@@ -499,6 +569,18 @@ private:
     VkImage history_image_ = VK_NULL_HANDLE;
     VkDeviceMemory history_memory_ = VK_NULL_HANDLE;
     VkImageView history_view_ = VK_NULL_HANDLE;
+    // Planar reflection: the scene re-traced from a mirror-flipped camera (sRGB
+    // display color, like output_image_). Sampled by the puddle pass so its
+    // reflections are complete (off-screen geometry included) with no SSR
+    // cutoff. Written by a second cmd_trace_rays using reflection_descriptor_set_
+    // + reflection_uniform_buffer_ (mirrored matrices); shares all other RT
+    // bindings with the main set.
+    VkImage reflection_output_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory reflection_output_memory_ = VK_NULL_HANDLE;
+    VkImageView reflection_output_view_ = VK_NULL_HANDLE;
+    VkImageLayout reflection_output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    GpuBuffer reflection_uniform_buffer_{};
+    VkDescriptorSet reflection_descriptor_set_ = VK_NULL_HANDLE;
     VkSampler output_sampler_ = VK_NULL_HANDLE;
     VkDescriptorSet output_descriptor_set_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
@@ -681,6 +763,30 @@ private:
     VkPipelineLayout fog_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline fog_pipeline_ = VK_NULL_HANDLE;
     VkDescriptorSet fog_descriptor_set_ = VK_NULL_HANDLE;
+
+    // ---- Volumetric fire (post-process) state ----
+    // Proxy-free flame: a compute pass run before TAA on the HDR color, bounded
+    // by a world-space box region (no proxy mesh / hit material).
+    FireSettings fire_settings_{};
+    VkDescriptorSetLayout fire_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout fire_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline fire_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet fire_descriptor_set_ = VK_NULL_HANDLE;
+
+    // ---- Rain on glass (full-screen post-process) state ----
+    RainWindowSettings rain_window_settings_{};
+    VkDescriptorSetLayout rain_window_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout rain_window_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline rain_window_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet rain_window_descriptor_set_ = VK_NULL_HANDLE;
+
+    // ---- Rain puddle (post-process) state ----
+    // Reuses rain_wave_sampler_ for the wave field; no owned sampler.
+    PuddleSettings puddle_settings_{};
+    VkDescriptorSetLayout puddle_descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout puddle_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline puddle_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet puddle_descriptor_set_ = VK_NULL_HANDLE;
 
     // ---- Rain wave-sim (Buffer A) state ----
     // Ping-pong RG16F height field (R = current, G = previous). Sized to the

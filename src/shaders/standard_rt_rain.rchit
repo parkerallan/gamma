@@ -94,8 +94,8 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
 // Thickness itself is REAL geometry now — it comes from the box's depth/scale, not
 // a constant. Larger = more tinted/darker through the same pane.
 #define RAIN_ABSORB        0.5
-// Glass colour the volume absorbs toward (subtle green like real glass edges).
-#define RAIN_TINT          vec3(0.80, 0.94, 0.86)
+// Glass colour the volume absorbs toward. Neutral/clear (no colour tint).
+#define RAIN_TINT          vec3(1.0, 1.0, 1.0)
 // Continuation recursion guard (matches the other transparent RT materials).
 #define RAIN_MAX_DEPTH     8u
 

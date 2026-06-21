@@ -939,6 +939,9 @@ bool RayTracing::Initialize(VulkanContext* context)
 
 void RayTracing::Shutdown()
 {
+    DestroyRainWindowResources();
+    DestroyPuddleResources();
+    DestroyFireResources();
     DestroyFogResources();
     DestroyRainWaveResources();
     DestroyTaaResources();
@@ -1098,6 +1101,28 @@ bool RayTracing::EnsureViewportOutput(std::uint32_t width, std::uint32_t height)
         return false;
     }
     motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Planar reflection output (sRGB display color, same format as output_image_).
+    // The rgen writes it (storage) during the mirrored-camera trace; the puddle
+    // samples it (sampled).
+    if (!CreateVulkanImage(
+            vulkan_context_->GetPhysicalDevice(),
+            device,
+            allocator,
+            width,
+            height,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            reflection_output_image_,
+            reflection_output_memory_,
+            reflection_output_view_))
+    {
+        status_message_ = "Failed to create viewport RT reflection image";
+        DestroyOutputResources();
+        return false;
+    }
+    reflection_output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Linear-depth ping-pong (R32G32_SFLOAT: .r = current hit distance,
     // .g = expected previous-frame depth written by the rgen). Created here
@@ -1584,23 +1609,34 @@ bool RayTracing::UpdateScene(const std::vector<MeshInput>& meshes, const std::ve
                                 0.0f, 0.0f, 1.0f, 0.0f,
                                 0.0f, 0.0f, 0.0f, 1.0f};
 
-    // Puddle footprint: world size = 2 * local-half * |basis| along local X/Z.
-    // Transform is column-major (col0 = [0,1,2], col2 = [8,9,10]).
-    has_puddle_ = found_puddle;
-    puddle_object_to_world_ = puddle_transform;
-    puddle_drop_scale_ = found_puddle ? puddle_drop_scale_val : 1.0f;
-    puddle_drop_speed_ = found_puddle ? puddle_drop_speed_val : 1.0f;
-    if (found_puddle)
+    // Puddle is now PROXY-FREE: its footprint comes from the placed Puddle
+    // object's box region (puddle_settings_, set by the renderer before this
+    // call), NOT from a shader_type==5 instance. The wave-sim (rain_wave.comp)
+    // still runs here using a transform synthesized from the region: it maps the
+    // local plane ([-1,1] XZ, y=0) onto the world box [center +/- half].
+    (void)found_puddle;
+    (void)puddle_drop_scale_val;
+    (void)puddle_drop_speed_val;
+    has_puddle_ = puddle_settings_.enabled;
+    if (puddle_settings_.enabled)
     {
-        const float kHalf = 1.0f; // matches PUDDLE_HALF in the puddle/wave shaders
-        const float sx = std::sqrt(puddle_transform[0] * puddle_transform[0] +
-                                   puddle_transform[1] * puddle_transform[1] +
-                                   puddle_transform[2] * puddle_transform[2]);
-        const float sz = std::sqrt(puddle_transform[8] * puddle_transform[8] +
-                                   puddle_transform[9] * puddle_transform[9] +
-                                   puddle_transform[10] * puddle_transform[10]);
-        puddle_world_size_x_ = 2.0f * kHalf * sx;
-        puddle_world_size_z_ = 2.0f * kHalf * sz;
+        const float hx = (std::max)(puddle_settings_.half_extent[0], 0.01f);
+        const float hz = (std::max)(puddle_settings_.half_extent[2], 0.01f);
+        // Column-major: col0 = X basis, col1 = Y, col2 = Z, col3 = translation.
+        puddle_object_to_world_ = {
+            hx,  0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, hz,  0.0f,
+            puddle_settings_.center[0], puddle_settings_.center[1], puddle_settings_.center[2], 1.0f};
+        puddle_drop_scale_ = puddle_settings_.drop_scale;
+        puddle_drop_speed_ = puddle_settings_.drop_speed;
+        puddle_world_size_x_ = 2.0f * hx;
+        puddle_world_size_z_ = 2.0f * hz;
+    }
+    else
+    {
+        puddle_drop_scale_ = 1.0f;
+        puddle_drop_speed_ = 1.0f;
     }
 
     // Topology signature hashes BLAS device-addresses and instance count.
@@ -1690,6 +1726,7 @@ void RayTracing::DestroyOutputResources()
     output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     history_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     motion_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    reflection_output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     ResetAccumulationState();
     taa_history_valid_ = false;
 
@@ -1713,6 +1750,9 @@ void RayTracing::DestroyOutputResources()
         motion_image_ = VK_NULL_HANDLE;
         motion_memory_ = VK_NULL_HANDLE;
         motion_view_ = VK_NULL_HANDLE;
+        reflection_output_image_ = VK_NULL_HANDLE;
+        reflection_output_memory_ = VK_NULL_HANDLE;
+        reflection_output_view_ = VK_NULL_HANDLE;
         for (int i = 0; i < 2; ++i)
         {
             depth_images_[i] = VK_NULL_HANDLE;
@@ -1739,6 +1779,21 @@ void RayTracing::DestroyOutputResources()
     {
         vkFreeMemory(device, output_memory_, allocator);
         output_memory_ = VK_NULL_HANDLE;
+    }
+    if (reflection_output_view_ != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, reflection_output_view_, allocator);
+        reflection_output_view_ = VK_NULL_HANDLE;
+    }
+    if (reflection_output_image_ != VK_NULL_HANDLE)
+    {
+        vkDestroyImage(device, reflection_output_image_, allocator);
+        reflection_output_image_ = VK_NULL_HANDLE;
+    }
+    if (reflection_output_memory_ != VK_NULL_HANDLE)
+    {
+        vkFreeMemory(device, reflection_output_memory_, allocator);
+        reflection_output_memory_ = VK_NULL_HANDLE;
     }
     if (history_view_ != VK_NULL_HANDLE)
     {
@@ -1844,6 +1899,7 @@ void RayTracing::DestroySceneResources()
     latest_instance_transforms_.clear();
     DestroyGpuBuffer(vulkan_context_, tlas_scratch_buffer_);
     DestroyGpuBuffer(vulkan_context_, uniform_buffer_);
+    DestroyGpuBuffer(vulkan_context_, reflection_uniform_buffer_);
     DestroyGpuBuffer(vulkan_context_, mesh_record_buffer_);
     DestroyGpuBuffer(vulkan_context_, section_record_buffer_);
     DestroyGpuBuffer(vulkan_context_, material_record_buffer_);
@@ -1961,6 +2017,21 @@ bool RayTracing::EnsurePipelineResources()
                 uniform_buffer_))
         {
             status_message_ = "Failed to create viewport RT uniform buffer";
+            return false;
+        }
+    }
+
+    // Separate UBO for the planar-reflection trace (mirrored-camera matrices).
+    if (reflection_uniform_buffer_.buffer == VK_NULL_HANDLE)
+    {
+        if (!CreateGpuBuffer(
+                *vulkan_context_,
+                sizeof(UniformBlock),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                reflection_uniform_buffer_))
+        {
+            status_message_ = "Failed to create viewport RT reflection uniform buffer";
             return false;
         }
     }
@@ -2110,6 +2181,24 @@ bool RayTracing::EnsurePipelineResources()
             return false;
         }
         descriptors_dirty_ = true;
+    }
+
+    // Parallel descriptor set for the planar-reflection trace (same layout).
+    if (reflection_descriptor_set_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetAllocateInfo allocate_info = {};
+        allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocate_info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        allocate_info.descriptorSetCount = 1;
+        allocate_info.pSetLayouts = &descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &allocate_info, &reflection_descriptor_set_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS)
+        {
+            status_message_ = "Failed to allocate viewport RT reflection descriptor set";
+            reflection_descriptor_set_ = VK_NULL_HANDLE;
+            return false;
+        }
     }
 
     if (pipeline_layout_ == VK_NULL_HANDLE)
@@ -2415,12 +2504,22 @@ bool RayTracing::EnsurePipelineResources()
 
 bool RayTracing::UpdateDescriptors()
 {
-    if (vulkan_context_ == nullptr || descriptor_set_ == VK_NULL_HANDLE || descriptor_set_layout_ == VK_NULL_HANDLE)
+    return UpdateDescriptorsInto(descriptor_set_, output_view_, uniform_buffer_.buffer);
+}
+
+// Populates an RT descriptor set with all 13 bindings. Parameterized over the
+// target set, the output image view (binding 1) and the camera UBO (binding 2)
+// so the same wiring drives the main render AND the planar-reflection trace
+// (which uses its own output image + mirrored-camera UBO). Everything else
+// (TLAS, mesh/material buffers, textures, history/motion/depth, wave) is shared.
+bool RayTracing::UpdateDescriptorsInto(VkDescriptorSet target_set, VkImageView output_view_param, VkBuffer ubo_buffer)
+{
+    if (vulkan_context_ == nullptr || target_set == VK_NULL_HANDLE || descriptor_set_layout_ == VK_NULL_HANDLE)
     {
         return false;
     }
 
-    if (output_view_ == VK_NULL_HANDLE || history_view_ == VK_NULL_HANDLE || motion_view_ == VK_NULL_HANDLE || uniform_buffer_.buffer == VK_NULL_HANDLE || fallback_texture_view_ == VK_NULL_HANDLE)
+    if (output_view_param == VK_NULL_HANDLE || history_view_ == VK_NULL_HANDLE || motion_view_ == VK_NULL_HANDLE || ubo_buffer == VK_NULL_HANDLE || fallback_texture_view_ == VK_NULL_HANDLE)
     {
         return false;
     }
@@ -2448,7 +2547,7 @@ bool RayTracing::UpdateDescriptors()
     acceleration_write.pAccelerationStructures = &top_level_as_.handle;
 
     VkDescriptorImageInfo output_image_info = {};
-    output_image_info.imageView = output_view_;
+    output_image_info.imageView = output_view_param;
     output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkDescriptorImageInfo history_image_info = {};
@@ -2461,7 +2560,7 @@ bool RayTracing::UpdateDescriptors()
     skybox_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorBufferInfo uniform_info = {};
-    uniform_info.buffer = uniform_buffer_.buffer;
+    uniform_info.buffer = ubo_buffer;
     uniform_info.range = sizeof(UniformBlock);
 
     VkDescriptorBufferInfo mesh_info = {};
@@ -2505,90 +2604,90 @@ bool RayTracing::UpdateDescriptors()
     std::array<VkWriteDescriptorSet, 13> writes = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     writes[0].pNext = &acceleration_write;
-    writes[0].dstSet = descriptor_set_;
+    writes[0].dstSet = target_set;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[1].dstSet = descriptor_set_;
+    writes[1].dstSet = target_set;
     writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[1].pImageInfo = &output_image_info;
 
     writes[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[2].dstSet = descriptor_set_;
+    writes[2].dstSet = target_set;
     writes[2].dstBinding = 2;
     writes[2].descriptorCount = 1;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[2].pBufferInfo = &uniform_info;
 
     writes[3] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[3].dstSet = descriptor_set_;
+    writes[3].dstSet = target_set;
     writes[3].dstBinding = 3;
     writes[3].descriptorCount = 1;
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[3].pBufferInfo = &mesh_info;
 
     writes[4] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[4].dstSet = descriptor_set_;
+    writes[4].dstSet = target_set;
     writes[4].dstBinding = 4;
     writes[4].descriptorCount = 1;
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[4].pBufferInfo = &section_info;
 
     writes[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[5].dstSet = descriptor_set_;
+    writes[5].dstSet = target_set;
     writes[5].dstBinding = 5;
     writes[5].descriptorCount = 1;
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[5].pBufferInfo = &material_info;
 
     writes[6] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[6].dstSet = descriptor_set_;
+    writes[6].dstSet = target_set;
     writes[6].dstBinding = 6;
     writes[6].descriptorCount = kMaxTextures;
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[6].pImageInfo = texture_infos.data();
 
     writes[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[7].dstSet = descriptor_set_;
+    writes[7].dstSet = target_set;
     writes[7].dstBinding = 7;
     writes[7].descriptorCount = 1;
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[7].pImageInfo = &history_image_info;
 
     writes[8] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[8].dstSet = descriptor_set_;
+    writes[8].dstSet = target_set;
     writes[8].dstBinding = 8;
     writes[8].descriptorCount = 1;
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[8].pImageInfo = &skybox_image_info;
 
     writes[9] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[9].dstSet = descriptor_set_;
+    writes[9].dstSet = target_set;
     writes[9].dstBinding = 9;
     writes[9].descriptorCount = 1;
     writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[9].pImageInfo = &motion_image_info;
 
     writes[10] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[10].dstSet = descriptor_set_;
+    writes[10].dstSet = target_set;
     writes[10].dstBinding = 10;
     writes[10].descriptorCount = 1;
     writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[10].pBufferInfo = &instance_record_info;
 
     writes[11] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[11].dstSet = descriptor_set_;
+    writes[11].dstSet = target_set;
     writes[11].dstBinding = 11;
     writes[11].descriptorCount = 1;
     writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[11].pImageInfo = &depth_image_info;
 
     writes[12] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[12].dstSet = descriptor_set_;
+    writes[12].dstSet = target_set;
     writes[12].dstBinding = 12;
     writes[12].descriptorCount = 1;
     writes[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -3349,6 +3448,462 @@ void RayTracing::DestroyFogResources()
     if (fog_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, fog_pipeline_layout_, allocator); fog_pipeline_layout_ = VK_NULL_HANDLE; }
     if (fog_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, fog_descriptor_set_layout_, allocator); fog_descriptor_set_layout_ = VK_NULL_HANDLE; }
     fog_descriptor_set_ = VK_NULL_HANDLE;
+}
+
+// Push-constant layout for fire.comp (std430). Must match the FirePush block.
+struct FirePushConstants
+{
+    float center[4];     // xyz = region center, w = enabled
+    float half_size[4];  // xyz = region half-extent
+    float params[4];     // x = steps, y = intensity, z = emission, w = write_display
+    float extent[4];     // x = width, y = height
+};
+
+bool RayTracing::EnsureFireResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (fire_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        // 0: HDR color (storage r/w), 1: scene UBO, 2: depth (storage read),
+        // 3: sRGB display (storage write, TAA-off only). No TLAS (fire is
+        // emissive, no shadow rays).
+        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[1] = {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &info, allocator, &fire_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create fire descriptor layout"; return false; }
+    }
+
+    if (fire_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange range = {};
+        range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        range.offset = 0;
+        range.size = sizeof(FirePushConstants);
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        info.setLayoutCount = 1;
+        info.pSetLayouts = &fire_descriptor_set_layout_;
+        info.pushConstantRangeCount = 1;
+        info.pPushConstantRanges = &range;
+        VkResult result = vkCreatePipelineLayout(device, &info, allocator, &fire_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create fire pipeline layout"; return false; }
+    }
+
+    if (fire_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule module = LoadShaderModule(device, ResolveShaderPath("fire.comp.spv"));
+        if (module == VK_NULL_HANDLE) { status_message_ = "Failed to load fire.comp"; return false; }
+        VkPipelineShaderStageCreateInfo stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";
+        VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = stage;
+        info.layout = fire_pipeline_layout_;
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &info, allocator, &fire_pipeline_);
+        vkDestroyShaderModule(device, module, allocator);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { fire_pipeline_ = VK_NULL_HANDLE; status_message_ = "Failed to create fire pipeline"; return false; }
+    }
+
+    if (fire_descriptor_set_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetAllocateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &fire_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &info, &fire_descriptor_set_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { fire_descriptor_set_ = VK_NULL_HANDLE; status_message_ = "Failed to allocate fire descriptor set"; return false; }
+    }
+
+    return true;
+}
+
+bool RayTracing::UpdateFireDescriptors()
+{
+    if (vulkan_context_ == nullptr ||
+        fire_descriptor_set_ == VK_NULL_HANDLE ||
+        history_view_ == VK_NULL_HANDLE ||
+        output_view_ == VK_NULL_HANDLE ||
+        uniform_buffer_.buffer == VK_NULL_HANDLE ||
+        depth_views_[depth_write_slot_] == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    VkDescriptorImageInfo color_info = {};
+    color_info.imageView = history_view_;
+    color_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorBufferInfo ubo = {};
+    ubo.buffer = uniform_buffer_.buffer;
+    ubo.range = sizeof(UniformBlock);
+
+    VkDescriptorImageInfo depth_info = {};
+    depth_info.imageView = depth_views_[depth_write_slot_];
+    depth_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo display_info = {};
+    display_info.imageView = output_view_;
+    display_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    std::array<VkWriteDescriptorSet, 4> writes = {};
+    for (auto& w : writes) { w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = fire_descriptor_set_; w.descriptorCount = 1; }
+    writes[0].dstBinding = 0; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  writes[0].pImageInfo = &color_info;
+    writes[1].dstBinding = 1; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; writes[1].pBufferInfo = &ubo;
+    writes[2].dstBinding = 2; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  writes[2].pImageInfo = &depth_info;
+    writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  writes[3].pImageInfo = &display_info;
+
+    vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    return true;
+}
+
+void RayTracing::DestroyFireResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        fire_descriptor_set_ = VK_NULL_HANDLE;
+        fire_descriptor_set_layout_ = VK_NULL_HANDLE;
+        fire_pipeline_layout_ = VK_NULL_HANDLE;
+        fire_pipeline_ = VK_NULL_HANDLE;
+        return;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    if (fire_pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, fire_pipeline_, allocator); fire_pipeline_ = VK_NULL_HANDLE; }
+    if (fire_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, fire_pipeline_layout_, allocator); fire_pipeline_layout_ = VK_NULL_HANDLE; }
+    if (fire_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, fire_descriptor_set_layout_, allocator); fire_descriptor_set_layout_ = VK_NULL_HANDLE; }
+    fire_descriptor_set_ = VK_NULL_HANDLE;
+}
+
+// Push-constant layout for puddle.comp (std430). Must match the PuddlePush block.
+struct PuddlePushConstants
+{
+    float center[4];      // xyz = region center (water plane at center.y), w = enabled
+    float half_size[4];   // xyz = region half-extent
+    float extent[4];      // x = width, y = height, z = write_display
+};
+
+bool RayTracing::EnsurePuddleResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (puddle_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        // 0: HDR color (r/w), 1: scene UBO, 2: depth (read), 3: display (write),
+        // 4: wave height field (sampler), 5: skybox (sampler, fallback),
+        // 6: planar reflection render (sampler).
+        std::array<VkDescriptorSetLayoutBinding, 7> bindings{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[1] = {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[4] = {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[5] = {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[6] = {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &info, allocator, &puddle_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create puddle descriptor layout"; return false; }
+    }
+
+    if (puddle_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange range = {};
+        range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        range.offset = 0;
+        range.size = sizeof(PuddlePushConstants);
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        info.setLayoutCount = 1;
+        info.pSetLayouts = &puddle_descriptor_set_layout_;
+        info.pushConstantRangeCount = 1;
+        info.pPushConstantRanges = &range;
+        VkResult result = vkCreatePipelineLayout(device, &info, allocator, &puddle_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create puddle pipeline layout"; return false; }
+    }
+
+    if (puddle_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule module = LoadShaderModule(device, ResolveShaderPath("puddle.comp.spv"));
+        if (module == VK_NULL_HANDLE) { status_message_ = "Failed to load puddle.comp"; return false; }
+        VkPipelineShaderStageCreateInfo stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";
+        VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = stage;
+        info.layout = puddle_pipeline_layout_;
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &info, allocator, &puddle_pipeline_);
+        vkDestroyShaderModule(device, module, allocator);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { puddle_pipeline_ = VK_NULL_HANDLE; status_message_ = "Failed to create puddle pipeline"; return false; }
+    }
+
+    if (puddle_descriptor_set_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetAllocateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &puddle_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &info, &puddle_descriptor_set_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { puddle_descriptor_set_ = VK_NULL_HANDLE; status_message_ = "Failed to allocate puddle descriptor set"; return false; }
+    }
+
+    return true;
+}
+
+bool RayTracing::UpdatePuddleDescriptors(VkImageView wave_view)
+{
+    if (vulkan_context_ == nullptr ||
+        puddle_descriptor_set_ == VK_NULL_HANDLE ||
+        history_view_ == VK_NULL_HANDLE ||
+        output_view_ == VK_NULL_HANDLE ||
+        uniform_buffer_.buffer == VK_NULL_HANDLE ||
+        depth_views_[depth_write_slot_] == VK_NULL_HANDLE ||
+        wave_view == VK_NULL_HANDLE ||
+        rain_wave_sampler_ == VK_NULL_HANDLE ||
+        reflection_output_view_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    VkDescriptorImageInfo color_info = {};
+    color_info.imageView = history_view_;
+    color_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorBufferInfo ubo = {};
+    ubo.buffer = uniform_buffer_.buffer;
+    ubo.range = sizeof(UniformBlock);
+
+    VkDescriptorImageInfo depth_info = {};
+    depth_info.imageView = depth_views_[depth_write_slot_];
+    depth_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo display_info = {};
+    display_info.imageView = output_view_;
+    display_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo wave_info = {};
+    wave_info.sampler = rain_wave_sampler_;
+    wave_info.imageView = wave_view;
+    wave_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    // Skybox/environment for the clean reflection fallback. Bind the fallback
+    // texture when no skybox is set (evaluate_sky then ignores the sample).
+    VkDescriptorImageInfo sky_info = {};
+    sky_info.sampler = rain_wave_sampler_;
+    sky_info.imageView = (skybox_texture_view_ != VK_NULL_HANDLE) ? skybox_texture_view_ : fallback_texture_view_;
+    sky_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (sky_info.imageView == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    VkDescriptorImageInfo refl_info = {};
+    refl_info.sampler = rain_wave_sampler_;
+    refl_info.imageView = reflection_output_view_;
+    refl_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 7> writes = {};
+    for (auto& w : writes) { w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = puddle_descriptor_set_; w.descriptorCount = 1; }
+    writes[0].dstBinding = 0; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[0].pImageInfo = &color_info;
+    writes[1].dstBinding = 1; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         writes[1].pBufferInfo = &ubo;
+    writes[2].dstBinding = 2; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[2].pImageInfo = &depth_info;
+    writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[3].pImageInfo = &display_info;
+    writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[4].pImageInfo = &wave_info;
+    writes[5].dstBinding = 5; writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[5].pImageInfo = &sky_info;
+    writes[6].dstBinding = 6; writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[6].pImageInfo = &refl_info;
+
+    vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    return true;
+}
+
+void RayTracing::DestroyPuddleResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        puddle_descriptor_set_ = VK_NULL_HANDLE;
+        puddle_descriptor_set_layout_ = VK_NULL_HANDLE;
+        puddle_pipeline_layout_ = VK_NULL_HANDLE;
+        puddle_pipeline_ = VK_NULL_HANDLE;
+        return;
+    }
+
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    if (puddle_pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, puddle_pipeline_, allocator); puddle_pipeline_ = VK_NULL_HANDLE; }
+    if (puddle_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, puddle_pipeline_layout_, allocator); puddle_pipeline_layout_ = VK_NULL_HANDLE; }
+    if (puddle_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, puddle_descriptor_set_layout_, allocator); puddle_descriptor_set_layout_ = VK_NULL_HANDLE; }
+    puddle_descriptor_set_ = VK_NULL_HANDLE;
+}
+
+// Push-constant layout for rain_window.comp (std430).
+struct RainWindowPushConstants
+{
+    float center[4];  // xyz = pane center, w = enabled
+    float axis_u[4];  // xyz = U axis, w = half U
+    float axis_v[4];  // xyz = V axis, w = half V
+    float normal[4];  // xyz = normal, w = bump
+    float params[4];  // x = time, y = tiling, z = width, w = height
+    float params2[4]; // x = write_display
+};
+
+bool RayTracing::EnsureRainWindowResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        return false;
+    }
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+
+    if (rain_window_descriptor_set_layout_ == VK_NULL_HANDLE)
+    {
+        // 0: HDR colour (r/w), 1: scene UBO (camera), 2: depth (read),
+        // 3: sRGB display (write, TAA off only), 4: skybox/environment (sampler).
+        std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+        bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[1] = {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        bindings[4] = {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        info.pBindings = bindings.data();
+        VkResult result = vkCreateDescriptorSetLayout(device, &info, allocator, &rain_window_descriptor_set_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create rain-window descriptor layout"; return false; }
+    }
+
+    if (rain_window_pipeline_layout_ == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RainWindowPushConstants)};
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        info.setLayoutCount = 1;
+        info.pSetLayouts = &rain_window_descriptor_set_layout_;
+        info.pushConstantRangeCount = 1;
+        info.pPushConstantRanges = &range;
+        VkResult result = vkCreatePipelineLayout(device, &info, allocator, &rain_window_pipeline_layout_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { status_message_ = "Failed to create rain-window pipeline layout"; return false; }
+    }
+
+    if (rain_window_pipeline_ == VK_NULL_HANDLE)
+    {
+        VkShaderModule module = LoadShaderModule(device, ResolveShaderPath("rain_window.comp.spv"));
+        if (module == VK_NULL_HANDLE) { status_message_ = "Failed to load rain_window.comp"; return false; }
+        VkPipelineShaderStageCreateInfo stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";
+        VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = stage;
+        info.layout = rain_window_pipeline_layout_;
+        VkResult result = vkCreateComputePipelines(device, vulkan_context_->GetPipelineCache(), 1, &info, allocator, &rain_window_pipeline_);
+        vkDestroyShaderModule(device, module, allocator);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { rain_window_pipeline_ = VK_NULL_HANDLE; status_message_ = "Failed to create rain-window pipeline"; return false; }
+    }
+
+    if (rain_window_descriptor_set_ == VK_NULL_HANDLE)
+    {
+        VkDescriptorSetAllocateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = vulkan_context_->GetDescriptorPool();
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &rain_window_descriptor_set_layout_;
+        VkResult result = vkAllocateDescriptorSets(device, &info, &rain_window_descriptor_set_);
+        VulkanContext::CheckVkResult(result);
+        if (result != VK_SUCCESS) { rain_window_descriptor_set_ = VK_NULL_HANDLE; status_message_ = "Failed to allocate rain-window descriptor set"; return false; }
+    }
+    return true;
+}
+
+bool RayTracing::UpdateRainWindowDescriptors()
+{
+    if (vulkan_context_ == nullptr || rain_window_descriptor_set_ == VK_NULL_HANDLE ||
+        history_view_ == VK_NULL_HANDLE || output_view_ == VK_NULL_HANDLE ||
+        uniform_buffer_.buffer == VK_NULL_HANDLE || depth_views_[depth_write_slot_] == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+    VkDescriptorImageInfo color_info = {};
+    color_info.imageView = history_view_;
+    color_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorBufferInfo ubo = {};
+    ubo.buffer = uniform_buffer_.buffer;
+    ubo.range = sizeof(UniformBlock);
+
+    VkDescriptorImageInfo depth_info = {};
+    depth_info.imageView = depth_views_[depth_write_slot_];
+    depth_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo display_info = {};
+    display_info.imageView = output_view_;
+    display_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo sky_info = {};
+    sky_info.sampler = texture_sampler_;
+    sky_info.imageView = (skybox_texture_view_ != VK_NULL_HANDLE) ? skybox_texture_view_ : fallback_texture_view_;
+    sky_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (sky_info.imageView == VK_NULL_HANDLE || texture_sampler_ == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    std::array<VkWriteDescriptorSet, 5> writes = {};
+    for (auto& w : writes) { w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = rain_window_descriptor_set_; w.descriptorCount = 1; }
+    writes[0].dstBinding = 0; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[0].pImageInfo = &color_info;
+    writes[1].dstBinding = 1; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         writes[1].pBufferInfo = &ubo;
+    writes[2].dstBinding = 2; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[2].pImageInfo = &depth_info;
+    writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[3].pImageInfo = &display_info;
+    writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[4].pImageInfo = &sky_info;
+    vkUpdateDescriptorSets(vulkan_context_->GetDevice(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    return true;
+}
+
+void RayTracing::DestroyRainWindowResources()
+{
+    if (vulkan_context_ == nullptr)
+    {
+        rain_window_descriptor_set_ = VK_NULL_HANDLE;
+        rain_window_descriptor_set_layout_ = VK_NULL_HANDLE;
+        rain_window_pipeline_layout_ = VK_NULL_HANDLE;
+        rain_window_pipeline_ = VK_NULL_HANDLE;
+        return;
+    }
+    const VkDevice device = vulkan_context_->GetDevice();
+    const VkAllocationCallbacks* allocator = vulkan_context_->GetAllocator();
+    if (rain_window_pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, rain_window_pipeline_, allocator); rain_window_pipeline_ = VK_NULL_HANDLE; }
+    if (rain_window_pipeline_layout_ != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, rain_window_pipeline_layout_, allocator); rain_window_pipeline_layout_ = VK_NULL_HANDLE; }
+    if (rain_window_descriptor_set_layout_ != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, rain_window_descriptor_set_layout_, allocator); rain_window_descriptor_set_layout_ = VK_NULL_HANDLE; }
+    rain_window_descriptor_set_ = VK_NULL_HANDLE;
 }
 
 void RayTracing::EnqueueSkinningDispatch(const PendingSkinningDispatch& dispatch)
@@ -4319,10 +4874,12 @@ bool RayTracing::RenderFrame(
     // occlusion ray-queries need current geometry) and before the RT trace.
     // --------------------------------------------------------------
     bool wave_dispatched = false;
+    VkImageView puddle_wave_view = VK_NULL_HANDLE; // the wave field written this frame
     if (has_puddle_ && EnsureRainWaveResources())
     {
         const int curr = static_cast<int>(rain_wave_parity_);
         const int prev = 1 - curr;
+        puddle_wave_view = rain_wave_views_[curr];
 
         // Refresh wave descriptors (the TLAS handle can change on rebuilds).
         UpdateRainWaveDescriptors();
@@ -4389,6 +4946,70 @@ bool RayTracing::RenderFrame(
         wave_dispatched = true;
     }
     (void)wave_dispatched;
+
+    // --------------------------------------------------------------
+    // Planar reflection trace: re-trace the scene from a camera mirrored across
+    // the puddle plane into reflection_output_image_, so the puddle can show
+    // COMPLETE reflections (off-screen geometry included) with no screen-space
+    // cutoff. Runs before the main trace; it shares (and harmlessly clobbers)
+    // history/motion/depth, which the main trace overwrites immediately after.
+    // Gated on a puddle being present (otherwise the reflection is unused).
+    // --------------------------------------------------------------
+    if (puddle_settings_.enabled && reflection_descriptor_set_ != VK_NULL_HANDLE &&
+        reflection_output_view_ != VK_NULL_HANDLE)
+    {
+        UniformBlock refl = uniforms;
+        const float plane_y = puddle_settings_.center[1];
+        // Mirror the camera-to-world across the horizontal plane y = plane_y:
+        // negate the Y basis row and reflect the Y translation.
+        refl.view_inverse = view_inverse;
+        refl.view_inverse[1]  = -view_inverse[1];
+        refl.view_inverse[5]  = -view_inverse[5];
+        refl.view_inverse[9]  = -view_inverse[9];
+        refl.view_inverse[13] = 2.0f * plane_y - view_inverse[13];
+        // Tell the rgen to clip the reflected rays to above the puddle plane.
+        refl.reflection_params = {1.0f, plane_y, 0.0f, 0.0f};
+        UploadGpuBuffer(*vulkan_context_, reflection_uniform_buffer_, &refl, sizeof(refl));
+
+        if (UpdateDescriptorsInto(reflection_descriptor_set_, reflection_output_view_, reflection_uniform_buffer_.buffer))
+        {
+            TransitionImageLayout(
+                command_buffer_, reflection_output_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+                reflection_output_layout_, VK_IMAGE_LAYOUT_GENERAL,
+                reflection_output_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                reflection_output_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT);
+            reflection_output_layout_ = VK_IMAGE_LAYOUT_GENERAL;
+
+            vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);
+            vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                                    pipeline_layout_, 0, 1, &reflection_descriptor_set_, 0, nullptr);
+            VkStridedDeviceAddressRegionKHR refl_callable = {};
+            vulkan_context_->GetRayTracingDispatch().cmd_trace_rays(
+                command_buffer_, &raygen_sbt_.region, &miss_sbt_.region, &hit_sbt_.region,
+                &refl_callable, output_width_, output_height_, 1);
+
+            // Reflection output -> readable by the puddle compute pass.
+            TransitionImageLayout(
+                command_buffer_, reflection_output_image_, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            reflection_output_layout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            // Order the reflection's writes to the shared history/motion/depth
+            // images before the main trace re-writes them (WAW).
+            VkMemoryBarrier refl_to_main = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            refl_to_main.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            refl_to_main.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(
+                command_buffer_,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                0, 1, &refl_to_main, 0, nullptr, 0, nullptr);
+        }
+    }
 
     vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);
     vkCmdBindDescriptorSets(
@@ -4480,6 +5101,176 @@ bool RayTracing::RenderFrame(
             1, &fog_to_taa,
             0, nullptr,
             0, nullptr);
+    }
+
+    // --------------------------------------------------------------
+    // Volumetric fire: proxy-free flame raymarched in a placed box region,
+    // composited (emissive) into the HDR color before TAA — same architecture as
+    // the fog pass (region from a Fire object's transform, no proxy mesh).
+    // --------------------------------------------------------------
+    if (fire_settings_.enabled && EnsureFireResources() && UpdateFireDescriptors())
+    {
+        VkMemoryBarrier rt_to_fire = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        rt_to_fire.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rt_to_fire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &rt_to_fire,
+            0, nullptr,
+            0, nullptr);
+
+        FirePushConstants pc{};
+        pc.center[0] = fire_settings_.center[0];
+        pc.center[1] = fire_settings_.center[1];
+        pc.center[2] = fire_settings_.center[2];
+        pc.center[3] = 1.0f; // enabled
+        pc.half_size[0] = (std::max)(fire_settings_.half_extent[0], 0.01f);
+        pc.half_size[1] = (std::max)(fire_settings_.half_extent[1], 0.01f);
+        pc.half_size[2] = (std::max)(fire_settings_.half_extent[2], 0.01f);
+        pc.params[0] = static_cast<float>(std::clamp(fire_settings_.steps, 1, 256));
+        pc.params[1] = (std::max)(fire_settings_.intensity, 0.0f);
+        pc.params[2] = (std::max)(fire_settings_.emission, 0.0f);
+        pc.params[3] = taa_enabled_ ? 0.0f : 1.0f; // write display when TAA off
+        pc.extent[0] = static_cast<float>(output_width_);
+        pc.extent[1] = static_cast<float>(output_height_);
+
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, fire_pipeline_);
+        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                fire_pipeline_layout_, 0, 1, &fire_descriptor_set_, 0, nullptr);
+        vkCmdPushConstants(command_buffer_, fire_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(pc), &pc);
+        const std::uint32_t gx = (output_width_ + 15u) / 16u;
+        const std::uint32_t gy = (output_height_ + 15u) / 16u;
+        vkCmdDispatch(command_buffer_, gx, gy, 1);
+
+        VkMemoryBarrier fire_to_taa = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        fire_to_taa.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        fire_to_taa.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            1, &fire_to_taa,
+            0, nullptr,
+            0, nullptr);
+    }
+
+    // --------------------------------------------------------------
+    // Rain puddle: proxy-free water surface (analytic plane in a placed box
+    // region) with screen-space reflections + the wave-ripple field. Composited
+    // into the HDR color before TAA — same architecture as fog/fire.
+    // --------------------------------------------------------------
+    if (puddle_settings_.enabled && puddle_wave_view != VK_NULL_HANDLE &&
+        EnsurePuddleResources() && UpdatePuddleDescriptors(puddle_wave_view))
+    {
+        VkMemoryBarrier rt_to_puddle = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        rt_to_puddle.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rt_to_puddle.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &rt_to_puddle,
+            0, nullptr,
+            0, nullptr);
+
+        PuddlePushConstants pc{};
+        pc.center[0] = puddle_settings_.center[0];
+        pc.center[1] = puddle_settings_.center[1];
+        pc.center[2] = puddle_settings_.center[2];
+        pc.center[3] = 1.0f; // enabled
+        pc.half_size[0] = (std::max)(puddle_settings_.half_extent[0], 0.01f);
+        pc.half_size[1] = (std::max)(puddle_settings_.half_extent[1], 0.01f);
+        pc.half_size[2] = (std::max)(puddle_settings_.half_extent[2], 0.01f);
+        pc.extent[0] = static_cast<float>(output_width_);
+        pc.extent[1] = static_cast<float>(output_height_);
+        pc.extent[2] = taa_enabled_ ? 0.0f : 1.0f; // write display when TAA off
+
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, puddle_pipeline_);
+        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                puddle_pipeline_layout_, 0, 1, &puddle_descriptor_set_, 0, nullptr);
+        vkCmdPushConstants(command_buffer_, puddle_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(pc), &pc);
+        const std::uint32_t gx = (output_width_ + 15u) / 16u;
+        const std::uint32_t gy = (output_height_ + 15u) / 16u;
+        vkCmdDispatch(command_buffer_, gx, gy, 1);
+
+        VkMemoryBarrier puddle_to_taa = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        puddle_to_taa.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        puddle_to_taa.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            1, &puddle_to_taa,
+            0, nullptr,
+            0, nullptr);
+    }
+
+    // --------------------------------------------------------------
+    // Rain on glass: a world-space glass BOX (from a placed Rain object's
+    // transform). The post pass intersects the real box VOLUME and refracts
+    // through its true depth (real thickness) — no proxy mesh. Composited into
+    // the HDR color before TAA so the world-locked window is temporally stable.
+    // --------------------------------------------------------------
+    if (rain_window_settings_.enabled && EnsureRainWindowResources() && UpdateRainWindowDescriptors())
+    {
+        VkMemoryBarrier rt_to_rain = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        rt_to_rain.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rt_to_rain.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &rt_to_rain, 0, nullptr, 0, nullptr);
+
+        RainWindowPushConstants pc{};
+        pc.center[0] = rain_window_settings_.center[0];
+        pc.center[1] = rain_window_settings_.center[1];
+        pc.center[2] = rain_window_settings_.center[2];
+        pc.center[3] = 1.0f; // enabled
+        pc.axis_u[0] = rain_window_settings_.axis_u[0];
+        pc.axis_u[1] = rain_window_settings_.axis_u[1];
+        pc.axis_u[2] = rain_window_settings_.axis_u[2];
+        pc.axis_u[3] = (std::max)(rain_window_settings_.half_u, 0.01f);
+        pc.axis_v[0] = rain_window_settings_.axis_v[0];
+        pc.axis_v[1] = rain_window_settings_.axis_v[1];
+        pc.axis_v[2] = rain_window_settings_.axis_v[2];
+        pc.axis_v[3] = (std::max)(rain_window_settings_.half_v, 0.01f);
+        pc.normal[0] = rain_window_settings_.normal[0];
+        pc.normal[1] = rain_window_settings_.normal[1];
+        pc.normal[2] = rain_window_settings_.normal[2];
+        pc.normal[3] = (std::max)(rain_window_settings_.bump, 0.0f);
+        pc.params[0] = elapsed_seconds;
+        pc.params[1] = (std::max)(rain_window_settings_.tiling, 0.001f);
+        pc.params[2] = static_cast<float>(output_width_);
+        pc.params[3] = static_cast<float>(output_height_);
+        pc.params2[0] = taa_enabled_ ? 0.0f : 1.0f;
+        pc.params2[1] = (std::max)(rain_window_settings_.half_thickness, 0.0f);
+
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, rain_window_pipeline_);
+        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                rain_window_pipeline_layout_, 0, 1, &rain_window_descriptor_set_, 0, nullptr);
+        vkCmdPushConstants(command_buffer_, rain_window_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(pc), &pc);
+        const std::uint32_t gx = (output_width_ + 15u) / 16u;
+        const std::uint32_t gy = (output_height_ + 15u) / 16u;
+        vkCmdDispatch(command_buffer_, gx, gy, 1);
+
+        VkMemoryBarrier rain_to_taa = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        rain_to_taa.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rain_to_taa.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_buffer_,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 1, &rain_to_taa, 0, nullptr, 0, nullptr);
     }
 
     // --------------------------------------------------------------

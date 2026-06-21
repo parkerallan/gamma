@@ -151,6 +151,25 @@ float GetFogDensity(const SceneObjectMetadata& object)
     return 0.15f;
 }
 
+// Rain glass BOX from a placed object's transform (column-major). The thinnest
+// world axis is the glass normal + half-thickness; the other two are the pane's
+// in-plane U/V half-extents. A real box volume (post-process intersects it for
+// true thickness) — NOT a rendered proxy mesh.
+void BuildRainWindowFromMatrix(const std::array<float, 16>& m, RayTracing::RainWindowSettings& rw)
+{
+    rw.enabled = true;
+    rw.center = {m[12], m[13], m[14]};
+    float l0 = std::max(std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]), 1e-5f);
+    float l1 = std::max(std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]), 1e-5f);
+    float l2 = std::max(std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]), 1e-5f);
+    std::array<float, 3> c0 = {m[0] / l0, m[1] / l0, m[2] / l0};
+    std::array<float, 3> c1 = {m[4] / l1, m[5] / l1, m[6] / l1};
+    std::array<float, 3> c2 = {m[8] / l2, m[9] / l2, m[10] / l2};
+    if (l1 <= l0 && l1 <= l2)      { rw.normal = c1; rw.half_thickness = l1; rw.axis_u = c0; rw.half_u = l0; rw.axis_v = c2; rw.half_v = l2; }
+    else if (l0 <= l1 && l0 <= l2) { rw.normal = c0; rw.half_thickness = l0; rw.axis_u = c1; rw.half_u = l1; rw.axis_v = c2; rw.half_v = l2; }
+    else                           { rw.normal = c2; rw.half_thickness = l2; rw.axis_u = c0; rw.half_u = l0; rw.axis_v = c1; rw.half_v = l1; }
+}
+
 float GetPuddleDropScale(const SceneObjectMetadata& object)
 {
     for (const SceneObjectAttribute& attribute : object.attributes)
@@ -2857,8 +2876,21 @@ void SceneViewportRenderer::SyncRayTracingScene()
     RayTracing::FogSettings fog_volume{};
     fog_volume.enabled = false;
 
+    // Volumetric fire region, from a placed Fire object's transform (proxy-free).
+    RayTracing::FireSettings fire_volume{};
+    fire_volume.enabled = false;
+
+    // Rain puddle region, from a placed Puddle object's transform (proxy-free).
+    RayTracing::PuddleSettings puddle_volume{};
+    puddle_volume.enabled = false;
+
+    // Rain-on-glass box, from a placed Rain object's transform (proxy-free).
+    RayTracing::RainWindowSettings rain_window{};
+    rain_window.enabled = false;
+
     for (const QueuedSceneObject& object : queued_objects_)
     {
+
         // Rain particle emitters are not ray-traced geometry — capture the proxy
         // plane's transform/params for the raster overlay and skip the instance
         // so the plane itself is invisible in the scene.
@@ -2886,6 +2918,54 @@ void SceneViewportRenderer::SyncRayTracingScene()
                 float sz = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
                 fog_volume.half_extent = {std::max(sx, 0.1f), std::max(sy, 0.1f), std::max(sz, 0.1f)};
                 fog_volume.density = object.fog_density;
+            }
+            continue;
+        }
+
+        // Fire volume: capture the object's world box and skip the instance — the
+        // flame is rendered proxy-free as a region post-process pass.
+        if (object.is_fire)
+        {
+            if (!fire_volume.enabled)
+            {
+                const auto& m = object.model_matrix;
+                fire_volume.enabled = true;
+                fire_volume.center = {m[12], m[13], m[14]};
+                float sx = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+                float sy = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+                float sz = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+                fire_volume.half_extent = {std::max(sx, 0.1f), std::max(sy, 0.1f), std::max(sz, 0.1f)};
+            }
+            continue;
+        }
+
+        // Puddle: capture the object's world box (water plane at center.y) and
+        // skip the instance — the water is rendered proxy-free as a region pass.
+        if (object.is_puddle)
+        {
+            if (!puddle_volume.enabled)
+            {
+                const auto& m = object.model_matrix;
+                puddle_volume.enabled = true;
+                puddle_volume.center = {m[12], m[13], m[14]};
+                float sx = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+                float sy = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+                float sz = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+                puddle_volume.half_extent = {std::max(sx, 0.1f), std::max(sy, 0.1f), std::max(sz, 0.1f)};
+                puddle_volume.drop_scale = object.puddle_drop_scale;
+                puddle_volume.drop_speed = object.puddle_drop_speed;
+            }
+            continue;
+        }
+
+        // Rain on glass: capture the object's world BOX (the glass volume the post
+        // pass refracts through for real thickness) and skip the instance — no
+        // proxy mesh is rendered.
+        if (object.is_rain)
+        {
+            if (!rain_window.enabled)
+            {
+                BuildRainWindowFromMatrix(object.model_matrix, rain_window);
             }
             continue;
         }
@@ -2933,7 +3013,7 @@ void SceneViewportRenderer::SyncRayTracingScene()
         RayTracing::InstanceInput instance_input;
         instance_input.key = object.name;
         instance_input.mesh_key = mesh_key;
-        instance_input.shader_type = object.is_puddle ? 5u : (object.is_rain ? 4u : (object.is_fire ? 3u : (object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u))));
+        instance_input.shader_type = object.is_cloud ? 2u : (object.is_water_surface ? 1u : 0u);
         instance_input.puddle_drop_scale = object.puddle_drop_scale;
         instance_input.puddle_drop_speed = object.puddle_drop_speed;
         instance_input.water_color = object.water_color;
@@ -2942,6 +3022,9 @@ void SceneViewportRenderer::SyncRayTracingScene()
     }
 
     ray_tracing_.SetFogSettings(fog_volume);
+    ray_tracing_.SetFireSettings(fire_volume);
+    ray_tracing_.SetPuddleSettings(puddle_volume);
+    ray_tracing_.SetRainWindowSettings(rain_window);
 
     if (!ray_tracing_.UpdateScene(mesh_inputs, instance_inputs))
     {

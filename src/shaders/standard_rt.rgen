@@ -63,6 +63,7 @@ layout(set = 0, binding = 2, std140) uniform SceneUniforms
     uvec4 cloud_count;       // .x = number of active clouds
     vec4 cloud_params[8];    // xyz=center, w=radius per cloud
     vec4 prev_camera_position; // .xyz = previous frame's camera world position (TAA depth disocclusion)
+    vec4 reflection_params;    // .x = planar-reflection trace (1) , .y = reflection plane Y (clip below it)
 } scene_uniforms;
 
 layout(location = 0) rayPayloadEXT PrimaryPayload primary_payload;
@@ -396,6 +397,22 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
     vec3 world_origin = (scene_uniforms.view_inverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 world_direction = normalize((scene_uniforms.view_inverse * vec4(view_direction, 0.0)).xyz);
 
+    // Planar-reflection clip: this is the mirror-flipped camera (below the puddle
+    // plane). Without clipping, its rays immediately hit the underside of the
+    // ground/floor at the plane and the reflection just shows the floor. Start
+    // the ray where it crosses the plane so only geometry ABOVE the plane (the
+    // actual reflection) is traced.
+    float ray_tmin = 0.001;
+    if (scene_uniforms.reflection_params.x > 0.5)
+    {
+        float plane_y = scene_uniforms.reflection_params.y;
+        if (abs(world_direction.y) > 1e-5)
+        {
+            float t_plane = (plane_y - world_origin.y) / world_direction.y;
+            if (t_plane > ray_tmin) ray_tmin = t_plane + 0.01;
+        }
+    }
+
     primary_payload.color = vec4(0.08, 0.09, 0.11, 1.0);
     primary_payload.hit_distance = 1e30;
     primary_payload.depth = 0;
@@ -410,7 +427,7 @@ vec3 trace_primary_sample(vec2 pixel_sample, vec2 launch_size)
         1,
         0,
         world_origin,
-        0.001,
+        ray_tmin,
         world_direction,
         10000.0,
         0);

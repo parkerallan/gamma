@@ -1,0 +1,326 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+// ============================================================================
+// Rain on glass — PROXY-FREE but WORLD-SPACE physical window.
+//
+// No hit-tested proxy material. A placed Rain object's transform defines a
+// world-space quad (the glass pane): center, two in-plane axes (with half-
+// extents) and a normal. This post pass intersects the view ray with that quad
+// and, where it hits (and the pane is in front of the scene behind it), renders
+// rain-on-glass: the Heartfelt drop field on the pane's world-locked UV refracts
+// the scene visible behind the glass. So the window sits in the world at the
+// object's location/orientation/size, not on the camera.
+//
+// Drop-field functions (N13, N, Saw, DropLayer2, StaticDrops, Drops) are ported
+// VERBATIM from Martijn Steinrucken's "Heartfelt" Shadertoy. Drops only.
+//
+// Runs before TAA on the HDR colour buffer (the scene + other effects), so the
+// world-locked pane is temporally stable; writes the sRGB display when TAA off.
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D color_image; // HDR current color (r/w)
+layout(set = 0, binding = 1, std140) uniform SceneUniforms
+{
+    mat4 view_inverse;
+    mat4 projection_inverse;
+    vec4 ambient_light;
+    vec4 directional_light_color;
+    vec4 directional_light_direction;
+    vec4 directional_light_data;
+    vec4 point_light_color;
+    vec4 point_light_position;
+    vec4 point_light_data;
+    vec4 spot_light_color;
+    vec4 spot_light_direction;
+    vec4 spot_light_position;
+    vec4 spot_light_data;
+    vec4 grid_data;
+    vec4 grid_origin_extent;
+    vec4 skybox_data;
+    uvec4 counts;
+    uvec4 accumulation_data;
+    vec4 animation_time_data;
+    mat4 prev_view_projection;
+    mat4 current_view_projection;   // project world hit points to screen
+    vec4 taa_params;                // .x = enabled, ...
+    vec4 jitter_offset;             // .xy = current sub-pixel jitter (px) — lock-step with the trace
+} scene;
+layout(set = 0, binding = 2, rg32f) uniform readonly image2D depth_image; // .x = hit distance
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D display_image;
+layout(set = 0, binding = 4) uniform sampler2D skybox_texture;            // environment (glass reflection)
+
+// ---- Glass-window material (matches the old standard_rt_rain.rchit) --------
+#define RAIN_IOR     1.45
+#define RAIN_REFLECT 1.0
+#define RAIN_TINT    vec3(1.0, 1.0, 1.0)   // clear glass (no colour tint)
+#define RAIN_DROP_BUMP 1.5   // how much drops bump the glass normal
+
+layout(push_constant, std430) uniform RainPush
+{
+    vec4 center;  // xyz = pane center (world), w = enabled
+    vec4 axis_u;  // xyz = in-plane U axis (normalized), w = half extent along U
+    vec4 axis_v;  // xyz = in-plane V axis (normalized), w = half extent along V
+    vec4 normal;  // xyz = pane normal, w = drop bump (refraction strength)
+    vec4 params;  // x = time, y = tiling, z = width, w = height
+    vec4 params2; // x = write_display, y = half thickness (glass depth)
+} rain;
+
+#define S(a, b, t) smoothstep(a, b, t)
+
+// Project a world point to a screen pixel; false if off-screen.
+bool project_to_screen(vec3 p, ivec2 size, out ivec2 sp)
+{
+    vec4 clip = scene.current_view_projection * vec4(p, 1.0);
+    if (clip.w <= 1e-4) return false;
+    vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return false;
+    sp = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+    return true;
+}
+
+vec3 linear_to_srgb(vec3 c)
+{
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+const float kPI    = 3.14159265358979323846;
+const float kTwoPI = 6.28318530717958647692;
+vec3 evaluate_sky(vec3 dir)
+{
+    if (scene.skybox_data.x > 0.5)
+    {
+        vec3 d = normalize(dir);
+        float u = atan(d.z, d.x) / kTwoPI + 0.5 + scene.skybox_data.y / kTwoPI;
+        float v = acos(clamp(d.y, -1.0, 1.0)) / kPI;
+        return texture(skybox_texture, vec2(fract(u), clamp(v, 0.0, 1.0))).rgb;
+    }
+    vec3 ambient = scene.ambient_light.rgb * max(scene.ambient_light.a, 0.35);
+    vec3 horizon = max(vec3(0.10, 0.11, 0.13), ambient * 0.7 + vec3(0.05, 0.05, 0.06));
+    vec3 zenith  = max(vec3(0.18, 0.22, 0.30), ambient * 1.3 + vec3(0.08, 0.10, 0.14));
+    float tt = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 color = mix(horizon, zenith, smoothstep(0.0, 1.0, tt));
+    if (scene.directional_light_color.a > 0.0)
+    {
+        vec3 sun = normalize(-scene.directional_light_direction.xyz);
+        float s = pow(max(dot(dir, sun), 0.0), 256.0);
+        color += scene.directional_light_color.rgb * scene.directional_light_color.a * s;
+    }
+    return color;
+}
+
+// ---- Heartfelt drop field (verbatim) --------------------------------------
+vec3 N13(float p)
+{
+    vec3 p3 = fract(vec3(p) * vec3(.1031, .11369, .13787));
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract(vec3((p3.x + p3.y) * p3.z, (p3.x + p3.z) * p3.y, (p3.y + p3.z) * p3.x));
+}
+float N(float t) { return fract(sin(t * 12345.564) * 7658.76); }
+float Saw(float b, float t) { return S(0., b, t) * S(1., b, t); }
+
+vec2 DropLayer2(vec2 uv, float t)
+{
+    vec2 UV = uv;
+    uv.y += t * 0.75;
+    vec2 a = vec2(6., 1.);
+    vec2 grid = a * 2.;
+    vec2 id = floor(uv * grid);
+    float colShift = N(id.x);
+    uv.y += colShift;
+
+    id = floor(uv * grid);
+    vec3 n = N13(id.x * 35.2 + id.y * 2376.1);
+    vec2 st = fract(uv * grid) - vec2(.5, 0);
+
+    float x = n.x - .5;
+    float y = UV.y * 20.;
+    float wiggle = sin(y + sin(y));
+    x += wiggle * (.5 - abs(x)) * (n.z - .5);
+    x *= .7;
+    float ti = fract(t + n.z);
+    y = (Saw(.85, ti) - .5) * .9 + .5;
+    vec2 p = vec2(x, y);
+
+    float d = length((st - p) * a.yx);
+    float mainDrop = S(.4, .0, d);
+
+    float r = sqrt(S(1., y, st.y));
+    float cd = abs(st.x - x);
+    float trail = S(.23 * r, .15 * r * r, cd);
+    float trailFront = S(-.02, .02, st.y - y);
+    trail *= trailFront * r * r;
+
+    y = UV.y;
+    float trail2 = S(.2 * r, .0, cd);
+    float droplets = max(0., (sin(y * (1. - y) * 120.) - st.y)) * trail2 * trailFront * n.z;
+    y = fract(y * 10.) + (st.y - .5);
+    float dd = length(st - vec2(x, y));
+    droplets = S(.3, 0., dd);
+    float m = mainDrop + droplets * r * trailFront;
+
+    return vec2(m, trail);
+}
+
+float StaticDrops(vec2 uv, float t)
+{
+    uv *= 40.;
+    vec2 id = floor(uv);
+    uv = fract(uv) - .5;
+    vec3 n = N13(id.x * 107.45 + id.y * 3543.654);
+    vec2 p = (n.xy - .5) * .7;
+    float d = length(uv - p);
+    float fade = Saw(.025, fract(t + n.z));
+    float c = S(.3, 0., d) * fract(n.z * 10.) * fade;
+    return c;
+}
+
+vec2 Drops(vec2 uv, float t, float l0, float l1, float l2)
+{
+    float s = StaticDrops(uv, t) * l0;
+    vec2 m1 = DropLayer2(uv, t) * l1;
+    vec2 m2 = DropLayer2(uv * 1.85, t) * l2;
+    float c = s + m1.x + m2.x;
+    c = S(.3, 1., c);
+    return vec2(c, max(m1.y * l0, m2.y * l1));
+}
+
+// Slab intersection of a ray with the oriented box (U,V,W axes, half-extents).
+// Returns entry/exit distances along rd and the world normal of the entry face
+// (already facing the viewer) — this is what gives the glass REAL thickness:
+// at grazing angles the ray enters through the thin side faces, so the depth of
+// the glass is visible, and the refraction traverses the true box volume.
+bool intersect_obb(vec3 ro, vec3 rd, vec3 U, vec3 V, vec3 W, vec3 C, vec3 half_ext,
+                   out float t0, out float t1, out vec3 n_enter)
+{
+    vec3 rel = ro - C;
+    vec3 o = vec3(dot(rel, U), dot(rel, V), dot(rel, W));
+    vec3 d = vec3(dot(rd, U), dot(rd, V), dot(rd, W));
+    vec3 sgn = vec3(d.x < 0.0 ? -1.0 : 1.0, d.y < 0.0 ? -1.0 : 1.0, d.z < 0.0 ? -1.0 : 1.0);
+    d = sgn * max(abs(d), vec3(1e-6));
+    vec3 invd = 1.0 / d;
+    vec3 tA = (-half_ext - o) * invd;
+    vec3 tB = ( half_ext - o) * invd;
+    vec3 tmn = min(tA, tB);
+    vec3 tmx = max(tA, tB);
+    t0 = max(max(tmn.x, tmn.y), tmn.z);
+    t1 = min(min(tmx.x, tmx.y), tmx.z);
+    if (t1 < max(t0, 0.0)) return false;
+    if (tmn.x >= tmn.y && tmn.x >= tmn.z)  n_enter = U * -sgn.x;
+    else if (tmn.y >= tmn.z)               n_enter = V * -sgn.y;
+    else                                   n_enter = W * -sgn.z;
+    return true;
+}
+
+void main()
+{
+    if (rain.center.w <= 0.0)
+    {
+        return;
+    }
+
+    ivec2 ipos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(int(rain.params.z), int(rain.params.w));
+    if (ipos.x >= size.x || ipos.y >= size.y)
+    {
+        return;
+    }
+
+    // Reconstruct the primary view ray. Apply the SAME sub-pixel jitter the main
+    // trace uses (host writes (0,0) when TAA is off) so the hard box-silhouette
+    // edge dances in lock-step with the scene and TAA resolves it (otherwise the
+    // edge sits on a fixed sub-pixel position every frame and stays jagged).
+    vec2 ndc = ((vec2(ipos) + 0.5 + scene.jitter_offset.xy) / vec2(size)) * 2.0 - 1.0;
+    vec4 view_target = scene.projection_inverse * vec4(ndc, 1.0, 1.0);
+    vec3 view_dir = normalize(view_target.xyz / max(view_target.w, 0.0001));
+    vec3 ro = (scene.view_inverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 rd = normalize((scene.view_inverse * vec4(view_dir, 0.0)).xyz);
+
+    // ---- Intersect the view ray with the glass BOX VOLUME (real thickness) --
+    vec3 U = normalize(rain.axis_u.xyz);
+    vec3 V = normalize(rain.axis_v.xyz);
+    vec3 W = normalize(rain.normal.xyz);
+    vec3 C = rain.center.xyz;
+    vec3 half_ext = vec3(max(rain.axis_u.w, 1e-4),
+                         max(rain.axis_v.w, 1e-4),
+                         max(rain.params2.y, 1e-4));   // .z = half thickness (thin axis)
+
+    float t0, t1;
+    vec3 n_enter;
+    if (!intersect_obb(ro, rd, U, V, W, C, half_ext, t0, t1, n_enter)) return;
+    t0 = max(t0, 0.0);
+    if (t1 <= t0) return;
+
+    // Occlusion: skip where solid geometry is in front of the glass.
+    float scene_dist = imageLoad(depth_image, ipos).x;
+    if (scene_dist <= t0) return;
+
+    vec3 entry = ro + rd * t0;                       // where the ray enters the glass
+
+    // Drop field — only on the wide front/back faces (the W faces), over the
+    // world-locked U/V so the drop size is constant. Side faces are clear edges.
+    vec3 rel_e = entry - C;
+    float lu = dot(rel_e, U);
+    float lv = dot(rel_e, V);
+    bool main_face = abs(dot(n_enter, W)) > 0.5;
+
+    vec2 drop_n = vec2(0.0);
+    if (main_face)
+    {
+        float T = rain.params.x;
+        float tiling = max(rain.params.y, 0.001);
+        vec2 uv = vec2(lu, lv) * tiling;
+        float t = T * 0.2;
+        float rainAmount = sin(T * 0.05) * 0.3 + 0.7;
+        float staticDrops = S(-.5, 1., rainAmount) * 2.;
+        float layer1 = S(.25, .75, rainAmount);
+        float layer2 = S(.0, .5, rainAmount);
+        vec2 cc = Drops(uv, t, staticDrops, layer1, layer2);
+        vec2 e = vec2(.001, 0.);
+        float cx = Drops(uv + e, t, staticDrops, layer1, layer2).x;
+        float cy = Drops(uv + e.yx, t, staticDrops, layer1, layer2).x;
+        drop_n = vec2(cx - cc.x, cy - cc.x);
+    }
+
+    // Entry-face normal (faces the viewer already), bumped by the drops.
+    vec3 Ng = n_enter;
+    vec3 Nn = normalize(Ng - (drop_n.x * U + drop_n.y * V) * RAIN_DROP_BUMP);
+
+    // Schlick Fresnel from the IOR: reflect vs transmit.
+    float F0 = (1.0 - RAIN_IOR) / (1.0 + RAIN_IOR);
+    F0 *= F0;
+    float cos_i = clamp(dot(Nn, -rd), 0.0, 1.0);
+    float fresnel = F0 + (1.0 - F0) * pow(1.0 - cos_i, 5.0);
+
+    // ---- Transmission: CLEAR see-through. No refraction/displacement — you look
+    // straight through the glass at the scene behind, undistorted. The glass
+    // thickness still reads at the EDGES: looking toward the side, the ray enters
+    // through the thin side faces at a grazing angle, where Fresnel is high, so the
+    // edge shows as a sheen line while the flat face stays see-through.
+    vec3 behind = imageLoad(color_image, ipos).rgb;
+    vec3 transmitted = behind * RAIN_TINT;
+
+    // ---- Reflection: environment sheen, NEVER a procedural blue sky. ---------
+    vec3 rd_refl = reflect(rd, Nn);
+    vec3 reflected;
+    if (scene.skybox_data.x > 0.5)
+    {
+        reflected = evaluate_sky(rd_refl) * RAIN_REFLECT;
+    }
+    else
+    {
+        float amb = dot(scene.ambient_light.rgb * max(scene.ambient_light.a, 0.25), vec3(0.3333));
+        reflected = vec3(max(amb, 0.12)) * RAIN_REFLECT; // neutral sheen, not blue
+    }
+
+    // Composite as glass: transmit, blend in the Fresnel reflection.
+    vec3 col = mix(transmitted, reflected, fresnel);
+    imageStore(color_image, ipos, vec4(col, 1.0));
+
+    if (rain.params2.x > 0.5)
+    {
+        imageStore(display_image, ipos, vec4(linear_to_srgb(max(col, 0.0)), 1.0));
+    }
+}

@@ -1,0 +1,226 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+// ============================================================================
+// Volumetric fire — PROXY-FREE compute pass (same architecture as fog.comp).
+//
+// The flame is no longer a closest-hit material on a cube proxy; it is rendered
+// here as a post pass over the HDR image, bounded by a world-space box region
+// taken from a placed Fire object's transform (center +/- half-extent). The
+// flame is marched in NORMALIZED box space so scaling the region scales the
+// flame exactly like the old cube proxy did.
+//
+// The flame DENSITY FIELD + COLOUR are ported VERBATIM from the old
+// standard_rt_fire.rchit (Dave Hoskins' "Campfire" DE_Fire / FlameColour) — the
+// look is intentionally preserved. Only the host (proxy material -> compute pass)
+// changed. Composited additively (fire is emissive), clamped to the depth buffer
+// so solid geometry in front occludes it. Runs BEFORE TAA on the HDR
+// history buffer so the temporal resolve stabilizes it (and writes the sRGB
+// display directly when TAA is off), exactly like the fog pass.
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D color_image;     // HDR current color (history_image_)
+layout(set = 0, binding = 1, std140) uniform SceneUniforms
+{
+    mat4 view_inverse;
+    mat4 projection_inverse;
+    vec4 ambient_light;
+    vec4 directional_light_color;
+    vec4 directional_light_direction;
+    vec4 directional_light_data;
+    vec4 point_light_color;
+    vec4 point_light_position;
+    vec4 point_light_data;
+    vec4 spot_light_color;
+    vec4 spot_light_direction;
+    vec4 spot_light_position;
+    vec4 spot_light_data;
+    vec4 grid_data;
+    vec4 grid_origin_extent;
+    vec4 skybox_data;
+    uvec4 counts;
+    uvec4 accumulation_data;
+    vec4 animation_time_data;
+} scene;
+layout(set = 0, binding = 2, rg32f) uniform readonly image2D depth_image;   // .x = hit distance (1e30 sky)
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D display_image; // sRGB display (TAA off only)
+
+layout(push_constant, std430) uniform FirePush
+{
+    vec4 center;     // xyz = region center, w = enabled
+    vec4 half_size;  // xyz = region half-extent (world)
+    vec4 params;     // x = steps, y = intensity, z = emission, w = write_display
+    vec4 extent;     // x = width, y = height
+} fire;
+
+// ---- Tunables (match the old standard_rt_fire.rchit) -----------------------
+#define FIRE_FILL_SCALE  7.0
+#define FIRE_RISE_SPEED  4.0
+#define FIRE_EDGE_SAFETY 0.92
+
+// ---- Procedural 3D value noise (verbatim from standard_rt_fire.rchit) -------
+float fire_hash(vec3 p)
+{
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float fire_value_noise(vec3 x)
+{
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(mix(fire_hash(p + vec3(0, 0, 0)), fire_hash(p + vec3(1, 0, 0)), f.x),
+            mix(fire_hash(p + vec3(0, 1, 0)), fire_hash(p + vec3(1, 1, 0)), f.x), f.y),
+        mix(mix(fire_hash(p + vec3(0, 0, 1)), fire_hash(p + vec3(1, 0, 1)), f.x),
+            mix(fire_hash(p + vec3(0, 1, 1)), fire_hash(p + vec3(1, 1, 1)), f.x), f.y),
+        f.z);
+}
+
+float fire_noise(vec3 x, float t)
+{
+    x.y -= t * FIRE_RISE_SPEED;
+    return fire_value_noise(x);
+}
+
+float fire_de(vec3 p, float t)
+{
+    p.xz += (fire_noise(p * 0.8, t)) * p.y * 0.3;
+    vec3 shape = p * vec3(1.5, 0.35, 1.5);
+    if (dot(shape, shape) > 70.0) return 1.0;
+
+    p += 2.5 * (fire_noise(shape * 1.5, t)
+              - fire_noise(-shape * 0.945, t) * 0.5
+              + fire_noise(shape * 9.6, t) * 0.3);
+    float f = (length(shape) - (1.0 + fire_noise(p, t) * 10.0));
+
+    f -= max(3.4 - p.y, 0.0) * 3.0;
+    f -= pow(abs(fire_noise(shape * 3.9, t)), 45.0) * 300.0
+       * pow(abs(fire_noise(shape * 1.1, t)), 5.0);
+    return f;
+}
+
+vec3 fire_colour(float f)
+{
+    f = f * f * (3.0 - 2.0 * f);
+    return min(vec3(f + 0.8, f * f * 1.4 + 0.1, f * f * f * 0.7) * f, 1.0);
+}
+
+vec3 linear_to_srgb(vec3 c)
+{
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+// Intersect ray with the local [-1,1] cube (ray already in normalized box space).
+bool fire_hit_box(vec3 ro, vec3 rd, out float t0, out float t1)
+{
+    vec3 inv = 1.0 / rd;
+    vec3 a = (vec3(-1.0) - ro) * inv;
+    vec3 b = (vec3( 1.0) - ro) * inv;
+    vec3 tmin = min(a, b);
+    vec3 tmax = max(a, b);
+    t0 = max(max(tmin.x, tmin.y), tmin.z);
+    t1 = min(min(tmax.x, tmax.y), tmax.z);
+    return t1 >= max(t0, 0.0);
+}
+
+void main()
+{
+    if (fire.center.w <= 0.0)
+    {
+        return;
+    }
+
+    ivec2 ipos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(int(fire.extent.x), int(fire.extent.y));
+    if (ipos.x >= size.x || ipos.y >= size.y)
+    {
+        return;
+    }
+
+    float t = scene.animation_time_data.x;
+
+    // Reconstruct the primary view ray (pixel center). Matches the rgen.
+    vec2 ndc = ((vec2(ipos) + 0.5) / vec2(size)) * 2.0 - 1.0;
+    vec4 view_target = scene.projection_inverse * vec4(ndc, 1.0, 1.0);
+    vec3 view_dir = normalize(view_target.xyz / max(view_target.w, 0.0001));
+    vec3 ro = (scene.view_inverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 rd = normalize((scene.view_inverse * vec4(view_dir, 0.0)).xyz);
+
+    float scene_dist = imageLoad(depth_image, ipos).x; // 1e30 on sky
+
+    // Transform the ray into normalized box space (box = [-1,1]); marching here
+    // makes the flame scale with the region just like the old cube proxy.
+    vec3 half_e = max(fire.half_size.xyz, vec3(1e-3));
+    vec3 ro_n = (ro - fire.center.xyz) / half_e;
+    vec3 rd_n = (rd) / half_e;
+    float rd_n_len = length(rd_n);
+    rd_n /= rd_n_len; // normalized direction in box space
+
+    float t0, t1;
+    if (!fire_hit_box(ro_n, rd_n, t0, t1))
+    {
+        return;
+    }
+    t0 = max(t0, 0.0);
+
+    // Clamp the march to solid geometry in front (convert the world hit distance
+    // to the box-space ray parameter). scene_dist is along the normalized world
+    // ray; one world unit == rd_n_len box-units along rd_n.
+    if (scene_dist < 1e29)
+    {
+        float t_hit_box = scene_dist * rd_n_len;
+        t1 = min(t1, t_hit_box);
+    }
+    if (t1 <= t0)
+    {
+        return;
+    }
+
+    int steps = int(max(fire.params.x, 1.0));
+    float seg = (t1 - t0) / float(steps);
+    float intensity = max(fire.params.y, 0.0);
+    float per_step = 0.00187 * (seg * FIRE_FILL_SCALE / 0.1) * intensity;
+
+    float sum = 0.0;
+    for (int i = 0; i < steps; ++i)
+    {
+        float tt = t0 + (float(i) + 0.5) * seg;
+        vec3 u = ro_n + tt * rd_n;   // normalized box coord, [-1,1]
+
+        vec3 ref = vec3(u.x * FIRE_FILL_SCALE,
+                        (u.y + 1.0) * FIRE_FILL_SCALE,
+                        u.z * FIRE_FILL_SCALE);
+        float v = max(1.0 - fire_de(ref, t), 0.0);
+
+        vec3 au = abs(u);
+        float side = (1.0 - smoothstep(FIRE_EDGE_SAFETY, 1.0, au.x))
+                   * (1.0 - smoothstep(FIRE_EDGE_SAFETY, 1.0, au.z));
+        float top  = 1.0 - smoothstep(FIRE_EDGE_SAFETY, 1.0, u.y);
+        v *= side * clamp(top, 0.0, 1.0);
+
+        sum += v * per_step;
+    }
+
+    float flame = clamp(sum * sum * sum, 0.0, 1.0);
+    if (flame <= 0.0)
+    {
+        return; // no flame on this pixel — leave it untouched
+    }
+
+    vec3 col = fire_colour(flame) * max(fire.params.z, 0.0);
+
+    // Emissive: add the flame over the existing HDR color.
+    vec4 src = imageLoad(color_image, ipos);
+    vec3 outl = src.rgb + col;
+    imageStore(color_image, ipos, vec4(outl, src.a));
+
+    if (fire.params.w > 0.5) // TAA off: write the sRGB display directly
+    {
+        imageStore(display_image, ipos, vec4(linear_to_srgb(max(outl, 0.0)), src.a));
+    }
+}
