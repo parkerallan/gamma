@@ -30,6 +30,16 @@ struct ModelMeshAsset
     ModelBounds bounds;
 };
 
+// How ModelTextureAsset::pixels is encoded. Rgba8 is the stb decode path;
+// Bc7 comes from ETEX blobs produced by the game build's texture transcode
+// (pixels then holds raw BC7 blocks, uploaded directly as
+// VK_FORMAT_BC7_{SRGB,UNORM}_BLOCK — never seen in the editor).
+enum class ModelTextureEncoding
+{
+    Rgba8,
+    Bc7,
+};
+
 struct ModelTextureAsset
 {
     bool valid = false;
@@ -39,6 +49,7 @@ struct ModelTextureAsset
     bool has_transparency = false;
     float alpha_min = 1.0f;
     float alpha_max = 1.0f;
+    ModelTextureEncoding encoding = ModelTextureEncoding::Rgba8;
     std::vector<std::uint8_t> pixels;
 };
 

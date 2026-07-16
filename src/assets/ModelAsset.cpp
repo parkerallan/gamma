@@ -1,4 +1,5 @@
 #include "assets/ModelAsset.h"
+#include "assets/TextureCodec.h"
 #include "vfs/AssetVFS.h"
 
 #include <assimp/GltfMaterial.h>
@@ -829,6 +830,22 @@ bool LoadTextureFromFile(const std::filesystem::path& texture_path, ModelTexture
         const auto bytes = g_asset_reader->ReadFile(texture_path.generic_string());
         if (!bytes.empty())
         {
+            // Game builds transcode loose textures to BC7 (ETEX) under the
+            // original pak key; the blocks upload directly without decode.
+            texcodec::EtexView etex;
+            if (texcodec::ParseEtex(bytes.data(), bytes.size(), etex))
+            {
+                texture_asset.valid = true;
+                texture_asset.width = static_cast<int>(etex.width);
+                texture_asset.height = static_cast<int>(etex.height);
+                texture_asset.encoding = ModelTextureEncoding::Bc7;
+                texture_asset.pixels.assign(etex.block_data, etex.block_data + etex.block_size);
+                texture_asset.has_transparency = etex.has_alpha;
+                texture_asset.alpha_min = etex.has_alpha ? 0.0f : 1.0f;
+                texture_asset.alpha_max = 1.0f;
+                return true;
+            }
+
             int width = 0;
             int height = 0;
             int channels = 0;

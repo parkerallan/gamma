@@ -1,5 +1,6 @@
 #include "render/Scene2DRenderer.h"
 #include "render/VideoPlaybackManager.h"
+#include "assets/TextureCodec.h"
 #include "vfs/AssetVFS.h"
 
 #include <SDL3/SDL.h>
@@ -1514,6 +1515,23 @@ Scene2DRenderer::GpuTexture* Scene2DRenderer::GetOrLoadImage(const std::filesyst
         const std::vector<std::uint8_t> image_bytes = ReadAssetFileAsBytes(path.generic_string());
         if (!image_bytes.empty())
         {
+            // Safety net: scene-referenced Image2D textures are excluded from
+            // the game build's BC7 transcode, but a script can point this at
+            // any packed image — decode ETEX blobs on the CPU when one shows
+            // up under an image key.
+            std::vector<std::uint8_t> etex_rgba;
+            if (texcodec::DecodeEtexToRgba8(image_bytes.data(), image_bytes.size(),
+                                            etex_rgba, width, height))
+            {
+                GpuTexture etex_tex{};
+                if (!UploadTexture(etex_rgba.data(), width, height, false, etex_tex))
+                {
+                    return nullptr;
+                }
+                image_cache_[key] = etex_tex;
+                return &image_cache_[key];
+            }
+
             pixels = stbi_load_from_memory(
                 image_bytes.data(),
                 static_cast<int>(image_bytes.size()),

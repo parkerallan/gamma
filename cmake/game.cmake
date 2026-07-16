@@ -138,6 +138,7 @@ add_executable(game
     src/assets/AnimatorControllerAsset.cpp
     src/assets/FaceClipAsset.cpp
     src/assets/ModelAsset.cpp
+    src/assets/TextureCodec.cpp
     src/assets/ModelMetadata.cpp
     src/assets/SceneMetadata.cpp
     src/assets/PrefabAsset.cpp
@@ -169,6 +170,7 @@ target_include_directories(game PRIVATE
     ${stb_SOURCE_DIR}
     ${assimp_SOURCE_DIR}/include
     ${assimp_BINARY_DIR}/include
+    ${zstd_SOURCE_DIR}/lib
 )
 
 target_compile_definitions(game PRIVATE
@@ -184,6 +186,8 @@ target_link_libraries(game PRIVATE
     lua_runtime
     joltphysics
     miniaudio
+    libzstd_static
+    bc7enc_rdo
     FFmpeg::avformat
     FFmpeg::avcodec
     FFmpeg::avutil

@@ -1732,6 +1732,30 @@ struct PreparedTextureUpload
     std::uint32_t height = 0;
 };
 
+// Mirrors the helpers in RuntimeRenderer.cpp: BC7 assets (ETEX blobs from
+// game-build paks) carry raw 4x4 blocks in pixels and upload as-is; the
+// per-slot srgb flag stays a view-format decision.
+VkFormat TextureAssetFormat(const ModelTextureAsset& texture_asset)
+{
+    if (texture_asset.encoding == ModelTextureEncoding::Bc7)
+    {
+        return texture_asset.srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+    }
+    return texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+VkDeviceSize TextureAssetUploadSize(const ModelTextureAsset& texture_asset)
+{
+    if (texture_asset.encoding == ModelTextureEncoding::Bc7)
+    {
+        const VkDeviceSize blocks_x = (static_cast<VkDeviceSize>(texture_asset.width) + 3) / 4;
+        const VkDeviceSize blocks_y = (static_cast<VkDeviceSize>(texture_asset.height) + 3) / 4;
+        return blocks_x * blocks_y * 16u;
+    }
+    return static_cast<VkDeviceSize>(texture_asset.width) *
+        static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+}
+
 bool PrepareTextureUpload(
     VulkanContext& context,
     const ModelTextureAsset& texture_asset,
@@ -1748,9 +1772,12 @@ bool PrepareTextureUpload(
 
     const VkDevice device = context.GetDevice();
     const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
-    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) *
-        static_cast<VkDeviceSize>(texture_asset.height) * 4u;
-    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkDeviceSize upload_size = TextureAssetUploadSize(texture_asset);
+    const VkFormat texture_format = TextureAssetFormat(texture_asset);
+    if (upload_size != static_cast<VkDeviceSize>(texture_asset.pixels.size()))
+    {
+        return false;
+    }
 
     if (!CreateVulkanBuffer(
             context,
@@ -1901,8 +1928,12 @@ bool CreateTextureFromAsset(
 
     const VkDevice device = context.GetDevice();
     const VkPhysicalDevice physical_device = context.GetPhysicalDevice();
-    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) * static_cast<VkDeviceSize>(texture_asset.height) * 4u;
-    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkDeviceSize upload_size = TextureAssetUploadSize(texture_asset);
+    const VkFormat texture_format = TextureAssetFormat(texture_asset);
+    if (upload_size != static_cast<VkDeviceSize>(texture_asset.pixels.size()))
+    {
+        return false;
+    }
 
     SceneViewportRenderer::GpuBuffer staging_buffer{};
     if (!CreateVulkanBuffer(

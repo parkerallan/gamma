@@ -5,11 +5,16 @@
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
 #include "components/graph/GraphTranspiler.h"
+#include "assets/TextureCodec.h"
 #include "vfs/PakArchive.h"
 #include "ui/Codicons.h"
 
+#include <zstd.h>
+
+#include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -601,6 +606,119 @@ std::string ToLowerCopy(std::string value)
         return static_cast<char>(std::tolower(c));
     });
     return value;
+}
+
+std::vector<std::uint8_t> ReadAllFileBytes(const std::filesystem::path& file_path)
+{
+    std::ifstream input(file_path, std::ios::binary);
+    if (!input)
+    {
+        return {};
+    }
+    input.seekg(0, std::ios::end);
+    const auto file_size = static_cast<std::size_t>(input.tellg());
+    input.seekg(0, std::ios::beg);
+    std::vector<std::uint8_t> bytes(file_size);
+    if (file_size > 0 && !input.read(reinterpret_cast<char*>(bytes.data()),
+                                     static_cast<std::streamsize>(file_size)))
+    {
+        return {};
+    }
+    return bytes;
+}
+
+bool WriteAllFileBytes(const std::filesystem::path& file_path,
+                       const std::vector<std::uint8_t>& bytes)
+{
+    std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        return false;
+    }
+    if (!bytes.empty())
+    {
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+    }
+    return output.good();
+}
+
+// Estimate an entry's pak footprint. A fast zstd level keeps the build loop
+// cheap and stays conservative: the pak writer recompresses kept entries at
+// its higher level, which only shrinks them further.
+std::uint64_t EstimateZstdPakSize(const std::vector<std::uint8_t>& data)
+{
+    if (data.empty())
+    {
+        return 0;
+    }
+    std::vector<std::uint8_t> zstd_scratch(ZSTD_compressBound(data.size()));
+    const std::size_t compressed = ZSTD_compress(zstd_scratch.data(), zstd_scratch.size(),
+                                                 data.data(), data.size(), 3);
+    return ZSTD_isError(compressed)
+        ? static_cast<std::uint64_t>(data.size())
+        : static_cast<std::uint64_t>(std::min(compressed, data.size()));
+}
+
+// Transcode-cache key: source content hash (size + two independent FNV-1a
+// hashes, matching the pak dedup scheme) mixed with the encoder settings
+// version so parameter changes invalidate the cache automatically.
+std::string TextureCacheKey(const std::vector<std::uint8_t>& bytes)
+{
+    std::uint64_t h1 = 14695981039346656037ull;
+    std::uint64_t h2 = 0x9e3779b97f4a7c15ull;
+    for (const std::uint8_t b : bytes)
+    {
+        h1 = (h1 ^ b) * 1099511628211ull;
+        h2 = (h2 ^ b) * 1099511628211ull;
+    }
+    char key[64];
+    std::snprintf(key, sizeof(key), "%016llx%016llx%012llx_v%u",
+                  static_cast<unsigned long long>(h1),
+                  static_cast<unsigned long long>(h2),
+                  static_cast<unsigned long long>(bytes.size()),
+                  texcodec::kEtexEncoderSettingsVersion);
+    return key;
+}
+
+// Decode a loose texture's bytes and re-encode them as a BC7 ETEX blob.
+bool TranscodeTextureToEtex(const std::vector<std::uint8_t>& file_bytes,
+                            std::vector<std::uint8_t>& out_etex)
+{
+    if (file_bytes.empty())
+    {
+        return false;
+    }
+
+    // Early rejection before the expensive decode+encode: BC7 is a fixed
+    // 1 byte/texel and zstd rarely shrinks BC7 blocks beyond ~2x, so if the
+    // raw block size already exceeds twice the source file (typical for
+    // high-resolution JPEGs at ~1-2 bpp), transcoding cannot win.
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    if (!stbi_info_from_memory(file_bytes.data(), static_cast<int>(file_bytes.size()),
+                               &width, &height, &channels) ||
+        width <= 0 || height <= 0)
+    {
+        return false;
+    }
+    if (static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) >
+        2ull * file_bytes.size())
+    {
+        return false;
+    }
+
+    stbi_uc* pixels = stbi_load_from_memory(file_bytes.data(), static_cast<int>(file_bytes.size()),
+                                            &width, &height, &channels, 4);
+    if (pixels == nullptr)
+    {
+        return false;
+    }
+
+    const bool encoded = texcodec::EncodeBc7Etex(pixels, width, height, out_etex);
+    stbi_image_free(pixels);
+    return encoded;
 }
 
 bool ShouldSkipStagedProjectEntry(
@@ -1868,10 +1986,129 @@ bool EngineApplication::StageBuiltGame(
     log("[Build] Packing project content into assets.pak...");
     PakArchive pak;
 
+    // Parse every scene up front. The metadata drives two things: the builtin
+    // shape packing further down, and the BC7 transcode exclusion set —
+    // skybox and Image2D textures are consumed by stb-based loaders, so they
+    // ship as their original files rather than as ETEX.
+    std::vector<SceneMetadata> packed_scene_metas;
+    std::unordered_set<std::string> transcode_exclusions;
+    {
+        // Mirrors the candidate normalization the runtime VFS applies
+        // (AssetVFS BuildPathCandidates): the exclusion set must match the
+        // pak key a reference will resolve to, whatever prefix style the
+        // scene stored ("./", drive-absolute, "Content/").
+        const auto insert_exclusion_keys = [&transcode_exclusions](const std::string& raw) {
+            std::string path = ToLowerCopy(raw);
+            std::replace(path.begin(), path.end(), '\\', '/');
+            while (path.rfind("./", 0) == 0)
+            {
+                path.erase(0, 2);
+            }
+            while (!path.empty() && path.front() == '/')
+            {
+                path.erase(path.begin());
+            }
+            if (path.size() > 3 && std::isalpha(static_cast<unsigned char>(path[0])) != 0 &&
+                path[1] == ':' && path[2] == '/')
+            {
+                path.erase(0, 3);
+            }
+            if (path.empty())
+            {
+                return;
+            }
+            transcode_exclusions.insert(path);
+            const std::string marker = "content/";
+            if (path.rfind(marker, 0) == 0)
+            {
+                transcode_exclusions.insert(path.substr(marker.size()));
+            }
+            const std::size_t marker_pos = path.find("/" + marker);
+            if (marker_pos != std::string::npos)
+            {
+                transcode_exclusions.insert(path.substr(marker_pos + 1 + marker.size()));
+            }
+        };
+
+        std::vector<std::filesystem::path> scan_dirs;
+        scan_dirs.push_back(content_root);
+        while (!scan_dirs.empty())
+        {
+            const std::filesystem::path scan_dir = scan_dirs.back();
+            scan_dirs.pop_back();
+            std::error_code scan_err;
+            std::filesystem::directory_iterator it(scan_dir,
+                std::filesystem::directory_options::skip_permission_denied, scan_err);
+            for (; it != std::filesystem::directory_iterator(); it.increment(scan_err))
+            {
+                if (scan_err) { break; }
+                const std::filesystem::path p = it->path();
+                if (it->is_directory(scan_err))
+                {
+                    if (!ShouldSkipStagedProjectEntry(p, stage_directory, external_build_directory))
+                    {
+                        scan_dirs.push_back(p);
+                    }
+                }
+                else if (it->is_regular_file(scan_err))
+                {
+                    if (ToLowerCopy(p.extension().string()) == ".scene")
+                    {
+                        SceneMetadata scene_meta = LoadSceneMetadata(p);
+                        if (scene_meta.parsed)
+                        {
+                            packed_scene_metas.push_back(std::move(scene_meta));
+                        }
+                    }
+                }
+            }
+        }
+
+        for (const SceneMetadata& scene_meta : packed_scene_metas)
+        {
+            for (const SceneObjectMetadata& obj : scene_meta.objects)
+            {
+                for (const SceneObjectAttribute& attr : obj.attributes)
+                {
+                    if (attr.kind == SceneObjectAttributeKind::Image2D &&
+                        !attr.image_2d.image_path.empty())
+                    {
+                        insert_exclusion_keys(attr.image_2d.image_path);
+                    }
+                    else if (attr.kind == SceneObjectAttributeKind::Skybox &&
+                             !attr.skybox.image_path.empty())
+                    {
+                        insert_exclusion_keys(attr.skybox.image_path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Texture transcode cache, retained across builds in the external build
+    // directory alongside the compile cache. Keyed by source content hash, it
+    // stores either the encoded ETEX blob (<key>.etex) or a keep-the-original
+    // decision (<key>.skip), so incremental builds re-encode only textures
+    // whose bytes actually changed. Delete the directory to force a re-encode.
+    std::filesystem::path texture_cache_dir;
+    {
+        std::error_code cache_ec;
+        const std::filesystem::path candidate = external_build_directory / "texcache";
+        std::filesystem::create_directories(candidate, cache_ec);
+        if (!cache_ec)
+        {
+            texture_cache_dir = candidate;
+        }
+    }
+
     std::vector<std::filesystem::path> pending_directories;
     pending_directories.push_back(content_root);
     std::size_t packed_file_count = 0;
     std::size_t packed_script_count = 0;
+    std::size_t transcoded_texture_count = 0;
+    std::size_t transcoded_cached_count = 0;
+    std::uint64_t transcoded_in_bytes = 0;
+    std::uint64_t transcoded_out_bytes = 0;
     std::string app_icon_rel_path;
 
     while (!pending_directories.empty())
@@ -1986,6 +2223,96 @@ bool EngineApplication::StageBuiltGame(
                 continue;
             }
 
+            // Loose textures are transcoded to BC7 (ETEX container) under the
+            // SAME pak key, so every reference string keeps working; runtime
+            // loaders sniff the ETEX magic before falling back to stb. The
+            // BC7 form is kept only when its zstd-compressed size does not
+            // exceed the original file (high-res JPEGs usually stay JPEG).
+            // Skybox/Image2D textures are excluded — they are consumed by
+            // stb-based RGBA8 loaders.
+            const std::string lower_ext = ToLowerCopy(file_path.extension().string());
+            const bool is_transcodable_texture =
+                lower_ext == ".png" || lower_ext == ".jpg" || lower_ext == ".jpeg";
+            if (is_transcodable_texture &&
+                transcode_exclusions.count(ToLowerCopy(rel_generic)) == 0)
+            {
+                const std::vector<std::uint8_t> file_bytes = ReadAllFileBytes(file_path);
+                std::filesystem::path etex_cache_path;
+                std::filesystem::path skip_cache_path;
+                if (!file_bytes.empty() && !texture_cache_dir.empty())
+                {
+                    const std::string cache_key = TextureCacheKey(file_bytes);
+                    etex_cache_path = texture_cache_dir / (cache_key + ".etex");
+                    skip_cache_path = texture_cache_dir / (cache_key + ".skip");
+                }
+
+                std::error_code cache_ec;
+                bool cached_skip = !skip_cache_path.empty() &&
+                    std::filesystem::exists(skip_cache_path, cache_ec);
+
+                if (!file_bytes.empty() && !cached_skip)
+                {
+                    // Cache hit: reuse the encoded blob (validated — a
+                    // truncated entry from an interrupted build re-encodes).
+                    std::vector<std::uint8_t> etex_bytes;
+                    bool from_cache = false;
+                    if (!etex_cache_path.empty() &&
+                        std::filesystem::exists(etex_cache_path, cache_ec))
+                    {
+                        etex_bytes = ReadAllFileBytes(etex_cache_path);
+                        texcodec::EtexView cached_view;
+                        from_cache = texcodec::ParseEtex(etex_bytes.data(), etex_bytes.size(),
+                                                         cached_view);
+                        if (!from_cache)
+                        {
+                            etex_bytes.clear();
+                        }
+                    }
+
+                    const bool have_etex =
+                        from_cache || TranscodeTextureToEtex(file_bytes, etex_bytes);
+                    const std::uint64_t source_size = file_bytes.size();
+                    const std::uint64_t etex_pak_size =
+                        have_etex ? EstimateZstdPakSize(etex_bytes) : 0;
+
+                    if (have_etex && etex_pak_size <= source_size)
+                    {
+                        log(std::string("[Build] BC7") + (from_cache ? " (cached): " : ": ")
+                            + rel_generic + " (" + std::to_string(source_size / 1024)
+                            + " KB -> ~" + std::to_string(etex_pak_size / 1024) + " KB in pak)");
+                        if (!pak.AddBuffer(rel_generic, etex_bytes))
+                        {
+                            out_error = "Failed to add transcoded texture to pak: " + rel_generic;
+                            return false;
+                        }
+                        if (!from_cache && !etex_cache_path.empty())
+                        {
+                            WriteAllFileBytes(etex_cache_path, etex_bytes);
+                        }
+                        ++transcoded_texture_count;
+                        if (from_cache)
+                        {
+                            ++transcoded_cached_count;
+                        }
+                        transcoded_in_bytes += source_size;
+                        transcoded_out_bytes += etex_pak_size;
+                        ++packed_file_count;
+                        continue;
+                    }
+
+                    // BC7 lost (or the source is not transcodable): remember
+                    // the decision so future builds skip the attempt outright.
+                    if (!skip_cache_path.empty())
+                    {
+                        WriteAllFileBytes(skip_cache_path, {});
+                    }
+                    if (have_etex)
+                    {
+                        log("[Build] BC7 skipped (kept original, smaller): " + rel_generic);
+                    }
+                }
+            }
+
             if (!pak.AddFile(rel_generic, file_path))
             {
                 out_error = "Failed to add file to pak: " + file_path.generic_string();
@@ -2020,47 +2347,10 @@ bool EngineApplication::StageBuiltGame(
 
         std::unordered_set<std::string> seen_shape_files;
 
-        // Collect every .scene file that was just packed.
-        std::vector<std::filesystem::path> packed_scene_files;
+        // Scenes were already collected and parsed before the content walk
+        // (packed_scene_metas), shared with the texture transcode exclusions.
+        for (const SceneMetadata& scene_meta : packed_scene_metas)
         {
-            std::vector<std::filesystem::path> scan_dirs;
-            scan_dirs.push_back(content_root);
-            while (!scan_dirs.empty())
-            {
-                const std::filesystem::path scan_dir = scan_dirs.back();
-                scan_dirs.pop_back();
-                std::error_code scan_err;
-                std::filesystem::directory_iterator it(scan_dir,
-                    std::filesystem::directory_options::skip_permission_denied, scan_err);
-                for (; it != std::filesystem::directory_iterator(); it.increment(scan_err))
-                {
-                    if (scan_err) { break; }
-                    const std::filesystem::path p = it->path();
-                    if (it->is_directory(scan_err))
-                    {
-                        if (!ShouldSkipStagedProjectEntry(p, stage_directory, external_build_directory))
-                        {
-                            scan_dirs.push_back(p);
-                        }
-                    }
-                    else if (it->is_regular_file(scan_err))
-                    {
-                        if (ToLowerCopy(p.extension().string()) == ".scene")
-                        {
-                            packed_scene_files.push_back(p);
-                        }
-                    }
-                }
-            }
-        }
-
-        for (const std::filesystem::path& scene_file : packed_scene_files)
-        {
-            const SceneMetadata scene_meta = LoadSceneMetadata(scene_file);
-            if (!scene_meta.parsed)
-            {
-                continue;
-            }
             for (const SceneObjectMetadata& obj : scene_meta.objects)
             {
                 // Determine the shape filename: prefer the explicit attribute field,
@@ -2135,9 +2425,28 @@ bool EngineApplication::StageBuiltGame(
         log("[Build] Added app icon for streaming: " + app_icon_rel_path);
     }
 
-    if (!pak.Write(assets_pak_path))
+    log("[Build] Compressing and writing assets.pak...");
+    PakWriteStats pak_stats;
+    const bool pak_written = pak.Write(
+        assets_pak_path,
+        [&](const PakEntryResult& p)
+        {
+            // Keep the log alive through the zstd pass: tick every 25 entries
+            // and after every large file so the pack step never looks hung.
+            if (p.completed &&
+                (p.entry_index % 25 == 0 || p.uncompressed_size >= (16ull << 20)))
+            {
+                log("[Build] Packing " + std::to_string(p.entry_index + 1) + "/"
+                    + std::to_string(p.entry_count) + ": " + p.rel_path);
+            }
+            return !was_cancelled();
+        },
+        &pak_stats);
+    if (!pak_written)
     {
-        out_error = "Failed to write assets.pak: " + assets_pak_path.generic_string();
+        out_error = was_cancelled()
+            ? "Game build cancelled"
+            : "Failed to write assets.pak: " + assets_pak_path.generic_string();
         return false;
     }
 
@@ -2150,6 +2459,51 @@ bool EngineApplication::StageBuiltGame(
     log("[Build] Packed " + std::to_string(packed_file_count) + " files into assets.pak");
     log("[Build] Included script assets: " + std::to_string(packed_script_count)
         + " (includes transpiled graphs)");
+
+    // Compression summary
+    {
+        const auto to_mb = [](std::uint64_t bytes) {
+            char buffer[32];
+            std::snprintf(buffer, sizeof(buffer), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+            return std::string(buffer);
+        };
+        const double saved_percent = pak_stats.total_uncompressed > 0
+            ? 100.0 * (1.0 - static_cast<double>(pak_stats.total_written) /
+                                 static_cast<double>(pak_stats.total_uncompressed))
+            : 0.0;
+        char summary[128];
+        std::snprintf(summary, sizeof(summary), "%.1f%% saved", saved_percent);
+        log("[Build] Pak compression: " + to_mb(pak_stats.total_uncompressed) + " -> "
+            + to_mb(pak_stats.total_written) + " (" + summary + "), "
+            + std::to_string(pak_stats.compressed_count) + " compressed, "
+            + std::to_string(pak_stats.stored_count) + " stored, "
+            + std::to_string(pak_stats.deduped_count) + " deduplicated");
+        if (transcoded_texture_count > 0)
+        {
+            log("[Build] Textures transcoded to BC7: " + std::to_string(transcoded_texture_count)
+                + " (" + std::to_string(transcoded_cached_count) + " from cache, "
+                + to_mb(transcoded_in_bytes) + " on disk -> ~" + to_mb(transcoded_out_bytes)
+                + " in pak)");
+        }
+
+        // Per-extension savings, largest first.
+        std::vector<std::pair<std::string, std::pair<std::uint64_t, std::uint64_t>>> by_ext(
+            pak_stats.per_extension.begin(), pak_stats.per_extension.end());
+        std::sort(by_ext.begin(), by_ext.end(), [](const auto& a, const auto& b) {
+            const std::uint64_t saved_a = a.second.first - std::min(a.second.first, a.second.second);
+            const std::uint64_t saved_b = b.second.first - std::min(b.second.first, b.second.second);
+            return saved_a > saved_b;
+        });
+        for (const auto& [ext, totals] : by_ext)
+        {
+            if (totals.first < (1u << 20))
+            {
+                continue; // skip sub-MB noise in the log
+            }
+            log("[Build]   " + (ext.empty() ? std::string("(none)") : ext) + ": "
+                + to_mb(totals.first) + " -> " + to_mb(totals.second));
+        }
+    }
 
     // -----------------------------------------------------------------
     // Game executable

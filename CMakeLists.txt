@@ -14,6 +14,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Set by the engine's build dialog: cmake -DENGINE_BUILD_GAME=ON ...
 # The default cmake --build build command leaves this OFF and builds only the engine.
 option(ENGINE_BUILD_GAME "Build the standalone game target instead of the engine app" OFF)
+option(ENGINE_BUILD_PAK_TOOL "Build the pak_tool archive inspector" OFF)
 
 # Windows engine executable branding (ENGINE target only).
 # This does not affect the standalone game target when ENGINE_BUILD_GAME=ON.
@@ -219,6 +220,65 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+# zstd — PAK archive compression (static lib only, no programs/tests)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.7
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+)
+FetchContent_MakeAvailable(zstd)
+
+# bc7enc_rdo — BC7 texture encoder with rate-distortion optimization (used at
+# game-build time to transcode textures) plus the bc7decomp CPU decoder (used
+# as a runtime fallback). Upstream has no tags; pinned to a master commit.
+FetchContent_Declare(
+    bc7enc_rdo
+    GIT_REPOSITORY https://github.com/richgel999/bc7enc_rdo.git
+    GIT_TAG dbe416d28a5530b4e8cc45b14bf034dc6b96bbde
+    GIT_SHALLOW FALSE
+)
+FetchContent_GetProperties(bc7enc_rdo)
+if(NOT bc7enc_rdo_POPULATED)
+    FetchContent_Populate(bc7enc_rdo)
+endif()
+add_library(bc7enc_rdo STATIC
+    ${bc7enc_rdo_SOURCE_DIR}/bc7enc.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/bc7decomp.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/bc7decomp_ref.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/lodepng.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/rgbcx.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/utils.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/ert.cpp
+    ${bc7enc_rdo_SOURCE_DIR}/rdo_bc_encoder.cpp
+)
+target_include_directories(bc7enc_rdo PUBLIC ${bc7enc_rdo_SOURCE_DIR})
+# bc7enc_rdo bundles its own copy of miniz inside utils.cpp; tinyexr already
+# links a miniz implementation with the same mz_*/tdefl_* symbols. Keep this
+# copy header-only so the two never collide at link time — the couple of
+# functions utils.cpp calls resolve against tinyexr's miniz.
+target_compile_definitions(bc7enc_rdo PRIVATE MINIZ_HEADER_FILE_ONLY)
+target_link_libraries(bc7enc_rdo PRIVATE tinyexr)
+# The encoder's parallelism is OpenMP-based. Only the editor encodes; the
+# game pulls just the bc7decomp objects (no OpenMP), so the shipped exe does
+# not depend on the vcomp runtime.
+if(MSVC)
+    target_compile_options(bc7enc_rdo PRIVATE /W0 /openmp)
+else()
+    target_compile_options(bc7enc_rdo PRIVATE -w)
+    find_package(OpenMP QUIET)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(bc7enc_rdo PUBLIC OpenMP::OpenMP_CXX)
+    endif()
+endif()
 
 FetchContent_Declare(
     lua_runtime
@@ -557,6 +617,7 @@ add_executable(engine
     src/assets/FaceClipAsset.cpp
     src/assets/LipSyncBake.cpp
     src/assets/ModelAsset.cpp
+    src/assets/TextureCodec.cpp
     src/app/EngineApplication.cpp
     src/assets/ModelMetadata.cpp
     src/assets/PrefabAsset.cpp
@@ -610,6 +671,7 @@ add_executable(engine
 
 target_include_directories(engine PRIVATE
     src
+    ${zstd_SOURCE_DIR}/lib
 )
 
 target_compile_definitions(engine PRIVATE
@@ -627,6 +689,8 @@ target_link_libraries(engine PRIVATE
     lua_runtime
     joltphysics
     miniaudio
+    libzstd_static
+    bc7enc_rdo
     FFmpeg::avformat
     FFmpeg::avcodec
     FFmpeg::avutil
@@ -699,3 +763,17 @@ set_target_properties(engine PROPERTIES
 )
 
 endif() # ENGINE_BUILD_GAME
+
+if(ENGINE_BUILD_PAK_TOOL)
+    add_executable(pak_tool
+        tools/pak_tool.cpp
+        src/vfs/PakArchive.cpp
+        src/assets/TextureCodec.cpp
+    )
+    target_include_directories(pak_tool PRIVATE
+        src
+        ${zstd_SOURCE_DIR}/lib
+        ${stb_SOURCE_DIR}
+    )
+    target_link_libraries(pak_tool PRIVATE libzstd_static bc7enc_rdo)
+endif()

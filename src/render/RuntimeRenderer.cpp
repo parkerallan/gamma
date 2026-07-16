@@ -1198,6 +1198,32 @@ struct PreparedTextureUpload
     std::uint32_t height = 0;
 };
 
+// Format/size selection shared by the immediate and batched texture upload
+// paths. BC7 assets come from ETEX blobs in game-build paks: pixels holds raw
+// 4x4 blocks (16 bytes each) uploaded as-is; sRGB-vs-linear stays a per-slot
+// view decision because BC7 block data is identical for both formats.
+// BC1-7 sampling support is mandatory for desktop Vulkan implementations.
+VkFormat TextureAssetFormat(const ModelTextureAsset& texture_asset)
+{
+    if (texture_asset.encoding == ModelTextureEncoding::Bc7)
+    {
+        return texture_asset.srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+    }
+    return texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+VkDeviceSize TextureAssetUploadSize(const ModelTextureAsset& texture_asset)
+{
+    if (texture_asset.encoding == ModelTextureEncoding::Bc7)
+    {
+        const VkDeviceSize blocks_x = (static_cast<VkDeviceSize>(texture_asset.width) + 3) / 4;
+        const VkDeviceSize blocks_y = (static_cast<VkDeviceSize>(texture_asset.height) + 3) / 4;
+        return blocks_x * blocks_y * 16u;
+    }
+    return static_cast<VkDeviceSize>(texture_asset.width) *
+        static_cast<VkDeviceSize>(texture_asset.height) * 4u;
+}
+
 bool PrepareTextureUpload(
     VulkanContext& context,
     const ModelTextureAsset& texture_asset,
@@ -1213,9 +1239,12 @@ bool PrepareTextureUpload(
     }
 
     const VkDevice device = context.GetDevice();
-    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) *
-        static_cast<VkDeviceSize>(texture_asset.height) * 4u;
-    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkDeviceSize upload_size = TextureAssetUploadSize(texture_asset);
+    const VkFormat texture_format = TextureAssetFormat(texture_asset);
+    if (upload_size != static_cast<VkDeviceSize>(texture_asset.pixels.size()))
+    {
+        return false;
+    }
 
     if (!CreateVulkanBuffer(
             context,
@@ -1362,8 +1391,12 @@ bool CreateTextureFromAsset(
     }
 
     const VkDevice device = context.GetDevice();
-    const VkDeviceSize upload_size = static_cast<VkDeviceSize>(texture_asset.width) * static_cast<VkDeviceSize>(texture_asset.height) * 4u;
-    const VkFormat texture_format = texture_asset.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkDeviceSize upload_size = TextureAssetUploadSize(texture_asset);
+    const VkFormat texture_format = TextureAssetFormat(texture_asset);
+    if (upload_size != static_cast<VkDeviceSize>(texture_asset.pixels.size()))
+    {
+        return false;
+    }
 
     RuntimeRenderer::GpuBuffer staging_buffer{};
     if (!CreateVulkanBuffer(
