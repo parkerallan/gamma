@@ -878,6 +878,26 @@ void EngineApplication::RunLoop()
         info_panel_.RenderSceneGpuPass();
         RenderRuntimeWindow();
         vulkan_context_.RenderFrame(window_, draw_data, ImVec4(0.08f, 0.09f, 0.11f, 1.0f));
+
+        // Pace the loop to the display refresh while playing. The presents
+        // above cannot be trusted to do it: a driver-level vsync override
+        // turns FIFO into an unthrottled present (measured: the play loop
+        // free-running at ~230 FPS on a 60 Hz display with per-frame dt
+        // swinging 2-9 ms, which is exactly the visible movement judder),
+        // and with the override off the editor + runtime FIFO swapchains
+        // serialize on one queue. An even simulation sample cadence is what
+        // makes motion read smooth, so enforce it here.
+        if (state_.is_playing && runtime_window_ != nullptr)
+        {
+            double refresh_hz = 60.0;
+            const SDL_DisplayID display = SDL_GetDisplayForWindow(runtime_window_);
+            const SDL_DisplayMode* mode = display != 0 ? SDL_GetCurrentDisplayMode(display) : nullptr;
+            if (mode != nullptr && mode->refresh_rate > 0.0f)
+            {
+                refresh_hz = static_cast<double>(mode->refresh_rate);
+            }
+            frame_pacer_.WaitForNextFrame(refresh_hz);
+        }
     }
 }
 

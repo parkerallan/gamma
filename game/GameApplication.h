@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/FramePacer.h"
 #include "app/VulkanContext.h"
 #include "vfs/PakArchive.h"
 #include "render/RuntimeRenderer.h"
@@ -22,6 +23,7 @@ private:
     VulkanContext vulkan_context_{};
     VulkanWindowContext window_context_{};
     RuntimeRenderer renderer_{};
+    FramePacer frame_pacer_{};
     bool running_ = false;
 
     std::string window_title_;

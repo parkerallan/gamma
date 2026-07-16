@@ -9148,29 +9148,6 @@ void RuntimeRenderer::UpdateAudioSourcesForFrame(
             const std::array<float, 3> world_position = ResolveAudioSourceWorldPosition(object.name, resolved_poses);
 
             AudioEngine::PlayParams params;
-            // Resolve clip data: prefer the global asset reader (packed game
-            // .pak) so built games can stream audio without a sidecar; fall
-            // back to the project root on disk for editor playback.
-            if (!audio_attr.clip_path.empty())
-            {
-                std::vector<std::uint8_t> bytes;
-                if (g_asset_reader)
-                {
-                    bytes = g_asset_reader->ReadFile(audio_attr.clip_path);
-                }
-                if (!bytes.empty())
-                {
-                    params.clip_bytes = std::move(bytes);
-                    params.clip_path = audio_attr.clip_path;
-                }
-                else
-                {
-                    const std::filesystem::path stored(audio_attr.clip_path);
-                    params.clip_path = stored.is_absolute()
-                        ? stored.generic_string()
-                        : (project_root_ / stored).generic_string();
-                }
-            }
             params.volume = audio_attr.volume;
             params.pitch = audio_attr.pitch;
             params.loop = audio_attr.loop;
@@ -9206,6 +9183,34 @@ void RuntimeRenderer::UpdateAudioSourcesForFrame(
                 && (mode_changed || clip_changed || audio_attr.loop);
             if (should_start)
             {
+                // Resolve clip data only when starting playback: prefer the
+                // global asset reader (packed game .pak) so built games can
+                // play audio without a sidecar; fall back to the project
+                // root on disk for editor playback. This must not run every
+                // frame — reading through the pak decompresses the whole
+                // clip, which cost 6-17 ms per frame in built games and blew
+                // the vblank budget (a visible movement hitch on every
+                // affected frame). UpdateSound below never reads clip data.
+                if (!audio_attr.clip_path.empty())
+                {
+                    std::vector<std::uint8_t> bytes;
+                    if (g_asset_reader)
+                    {
+                        bytes = g_asset_reader->ReadFile(audio_attr.clip_path);
+                    }
+                    if (!bytes.empty())
+                    {
+                        params.clip_bytes = std::move(bytes);
+                        params.clip_path = audio_attr.clip_path;
+                    }
+                    else
+                    {
+                        const std::filesystem::path stored(audio_attr.clip_path);
+                        params.clip_path = stored.is_absolute()
+                            ? stored.generic_string()
+                            : (project_root_ / stored).generic_string();
+                    }
+                }
                 source.handle = audio_engine_.PlaySound(params);
                 source.clip_path = audio_attr.clip_path;
             }

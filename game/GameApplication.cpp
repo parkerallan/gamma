@@ -487,15 +487,86 @@ bool GameApplication::Init(int argc, char* argv[])
 
 void GameApplication::RunLoop()
 {
-    // Frame pacing is owned by the swapchain present mode (MAILBOX — see
-    // Initialize). Adding a software SDL_DelayNS deadline on top makes the
-    // submission phase drift across the hardware vblank because the sleep has
-    // ~1 ms of OS scheduler jitter, which is what produced the slow-rotating
-    // "smooth → stuttery → smooth" motion users reported. Run the loop free
-    // and let MAILBOX present the freshest image at each vblank.
+    // Frame pacing: FIFO (see Initialize) normally blocks the loop at the
+    // hardware vblank, but a driver control-panel vsync override silently
+    // turns FIFO into an unthrottled present — the loop then free-runs with
+    // erratic per-frame dt while the display still refreshes at a fixed
+    // rate, which reads as constant movement judder. FramePacer enforces a
+    // display-rate deadline on the CPU as a backstop: when FIFO genuinely
+    // blocks, the deadline has already passed and the pacer is a no-op.
+    // (A plain SDL_DelayNS deadline was tried before and reverted: ~1 ms of
+    // scheduler jitter drifted the submission phase across the vblank and
+    // produced slow-cycling stutter. FramePacer sleeps on a high-resolution
+    // waitable timer and spin-finishes, so its jitter is <0.1 ms.)
+
+    // Frame-pacing diagnostics: every ~5 s, log the loop dt distribution and
+    // the renderer's CPU/GPU times. Judder debugging needs these numbers —
+    // an even ~refresh-rate dt with GPU inside the frame budget means pacing
+    // is healthy and any remaining stutter is content-side.
+    std::uint64_t diag_prev_ticks = 0;
+    double diag_sum_ms = 0.0;
+    double diag_max_ms = 0.0;
+    double diag_min_ms = 1.0e9;
+    double diag_gpu_max_ms = 0.0;
+    int diag_frames = 0;
+    int diag_slow_frames = 0;
 
     while (running_)
     {
+        {
+            const std::uint64_t diag_now = static_cast<std::uint64_t>(SDL_GetPerformanceCounter());
+            const std::uint64_t diag_freq = static_cast<std::uint64_t>(SDL_GetPerformanceFrequency());
+            if (diag_prev_ticks != 0 && diag_freq != 0)
+            {
+                const double dt_ms = static_cast<double>(diag_now - diag_prev_ticks) * 1000.0 / static_cast<double>(diag_freq);
+                diag_sum_ms += dt_ms;
+                diag_max_ms = (std::max)(diag_max_ms, dt_ms);
+                diag_min_ms = (std::min)(diag_min_ms, dt_ms);
+                ++diag_frames;
+                const RuntimeRenderer::RuntimePerformanceStats& stats = renderer_.GetPerformanceStats();
+                if (dt_ms > 25.0)
+                {
+                    ++diag_slow_frames;
+                    // Slow frame: log the subsystem breakdown of the frame
+                    // that just rendered so the phase that blew the vblank
+                    // budget is identifiable.
+                    SDL_Log(
+                        "[pacing] SLOW frame dt=%.2fms physics=%.2f scripts=%.2f render=%.2f anim=%.2f audio=%.2f video=%.2f 2d=%.2f gpu=%.2f cpu=%.2f",
+                        dt_ms,
+                        static_cast<double>(stats.physics_time_ms),
+                        static_cast<double>(stats.scripts_time_ms),
+                        static_cast<double>(stats.render_time_ms),
+                        static_cast<double>(stats.animation_time_ms),
+                        static_cast<double>(stats.audio_time_ms),
+                        static_cast<double>(stats.video_time_ms),
+                        static_cast<double>(stats.overlay_2d_time_ms),
+                        static_cast<double>(stats.gpu_time_ms),
+                        static_cast<double>(stats.cpu_time_ms));
+                }
+                diag_gpu_max_ms = (std::max)(diag_gpu_max_ms, static_cast<double>(stats.gpu_time_ms));
+                if (diag_sum_ms >= 5000.0)
+                {
+                    SDL_Log(
+                        "[pacing] frames=%d mean=%.2fms min=%.2f max=%.2f slow(>25ms)=%d gpu_last=%.2fms gpu_max=%.2fms cpu_last=%.2fms",
+                        diag_frames,
+                        diag_sum_ms / (std::max)(diag_frames, 1),
+                        diag_min_ms,
+                        diag_max_ms,
+                        diag_slow_frames,
+                        static_cast<double>(stats.gpu_time_ms),
+                        diag_gpu_max_ms,
+                        static_cast<double>(stats.cpu_time_ms));
+                    diag_sum_ms = 0.0;
+                    diag_max_ms = 0.0;
+                    diag_min_ms = 1.0e9;
+                    diag_gpu_max_ms = 0.0;
+                    diag_frames = 0;
+                    diag_slow_frames = 0;
+                }
+            }
+            diag_prev_ticks = diag_now;
+        }
+
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
@@ -552,6 +623,15 @@ void GameApplication::RunLoop()
         {
             SDL_Log("PresentImageToMainWindow failed");
         }
+
+        double refresh_hz = 60.0;
+        const SDL_DisplayID display = SDL_GetDisplayForWindow(window_);
+        const SDL_DisplayMode* mode = display != 0 ? SDL_GetCurrentDisplayMode(display) : nullptr;
+        if (mode != nullptr && mode->refresh_rate > 0.0f)
+        {
+            refresh_hz = static_cast<double>(mode->refresh_rate);
+        }
+        frame_pacer_.WaitForNextFrame(refresh_hz);
     }
 }
 

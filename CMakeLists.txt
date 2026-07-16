@@ -611,6 +611,7 @@ endif()
 add_executable(engine
     ${ENGINE_ICON_RC}
     src/app/main.cpp
+    src/app/FramePacer.cpp
     src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
     src/assets/AnimatorControllerAsset.cpp
@@ -713,7 +714,7 @@ endif()
 add_dependencies(engine engine_scene_shaders)
 
 if(WIN32)
-    target_link_libraries(engine PRIVATE Ole32 Shell32)
+    target_link_libraries(engine PRIVATE Ole32 Shell32 Dwmapi)
 
     # Apply Windows executable branding only to the engine target.
     # The logical CMake target name stays "engine"; only the produced .exe name changes.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/FramePacer.h"
 #include "app/VulkanContext.h"
 #include "state/EngineState.h"
 #include "panels/AnimatorPanel.h"
@@ -37,6 +38,7 @@ private:
     VulkanContext vulkan_context_{};
     VulkanWindowContext runtime_window_context_{};
     RuntimeRenderer runtime_renderer_{};
+    FramePacer frame_pacer_{};
     float display_scale_ = 1.0f;
     bool running_ = false;
     bool focus_log_panel_next_frame_ = true;

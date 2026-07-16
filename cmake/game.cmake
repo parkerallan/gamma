@@ -133,6 +133,7 @@ add_executable(game
     ${GAME_ICON_RC}
     game/main.cpp
     game/GameApplication.cpp
+    src/app/FramePacer.cpp
     src/app/VulkanContext.cpp
     src/assets/AssetMetadata.cpp
     src/assets/AnimatorControllerAsset.cpp
@@ -196,6 +197,10 @@ target_link_libraries(game PRIVATE
     nlohmann_json::nlohmann_json
     Vulkan::Vulkan
 )
+
+if(WIN32)
+    target_link_libraries(game PRIVATE Dwmapi)
+endif()
 
 if(TARGET assimp::assimp)
     target_link_libraries(game PRIVATE assimp::assimp)
