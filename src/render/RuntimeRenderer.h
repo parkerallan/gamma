@@ -28,6 +28,7 @@
 #include <vector>
 
 struct lua_State;
+struct SDL_Window;
 
 class RuntimeRenderer
 {
@@ -49,6 +50,15 @@ public:
     };
 
     bool Initialize(VulkanContext* context);
+    // Presentation window this runtime renders into (the standalone game window,
+    // or the editor's play window). Scripts drive it through the Window.* Lua
+    // API. Every Window.* callback is null-safe if this was never set.
+    void SetPresentationWindow(SDL_Window* window) { presentation_window_ = window; }
+    SDL_Window* GetPresentationWindow() const { return presentation_window_; }
+    // When set, Window.* setters persist the corresponding config.ini key so the
+    // built game reopens with the same settings. Empty (editor play window) =
+    // apply live only, never touch disk.
+    void SetWindowSettingsPath(std::filesystem::path path) { window_settings_path_ = std::move(path); }
     void Shutdown();
     bool StartSession(
         const std::filesystem::path& project_root,
@@ -669,6 +679,28 @@ private:
     static int LuaEffectPlay(lua_State* lua_state);
     static int LuaEffectStop(lua_State* lua_state);
     static int LuaEffectIsPlaying(lua_State* lua_state);
+    // Window.* API — drives the runtime SDL window (mode, size, title, position,
+    // display/resolution queries) and persists player-facing choices to
+    // config.ini when a settings path is registered.
+    static int LuaWindowSetMode(lua_State* lua_state);
+    static int LuaWindowGetMode(lua_State* lua_state);
+    static int LuaWindowSetSize(lua_State* lua_state);
+    static int LuaWindowGetSize(lua_State* lua_state);
+    static int LuaWindowSetPosition(lua_State* lua_state);
+    static int LuaWindowCenter(lua_State* lua_state);
+    static int LuaWindowMaximize(lua_State* lua_state);
+    static int LuaWindowMinimize(lua_State* lua_state);
+    static int LuaWindowRestore(lua_State* lua_state);
+    static int LuaWindowSetResizable(lua_State* lua_state);
+    static int LuaWindowSetTitle(lua_State* lua_state);
+    static int LuaWindowGetDesktopSize(lua_State* lua_state);
+    static int LuaWindowGetDisplayCount(lua_State* lua_state);
+    static int LuaWindowSetDisplay(lua_State* lua_state);
+    static int LuaWindowSetVsync(lua_State* lua_state);
+    static int LuaWindowGetVsync(lua_State* lua_state);
+    // Read-modify-write a single key in the registered config.ini, preserving all
+    // other keys. No-op when window_settings_path_ is empty.
+    void PersistWindowSetting(const std::string& key, const std::string& value) const;
     bool BuildQueuedScene(
         const SceneMetadata& scene_metadata,
         const SceneObjectMetadata& active_camera_object,
@@ -681,6 +713,9 @@ private:
     bool SyncRayTracingScene(std::string* error_message, float* out_skinning_ms = nullptr);
 
     VulkanContext* vulkan_context_ = nullptr;
+    // Runtime presentation window + optional persistence target for Window.*.
+    SDL_Window* presentation_window_ = nullptr;
+    std::filesystem::path window_settings_path_;
     RayTracing ray_tracing_{};
     RuntimeEffectsRenderer effects_renderer_{};
     Scene2DRenderer scene_2d_renderer_{};

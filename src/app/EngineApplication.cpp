@@ -1085,6 +1085,10 @@ bool EngineApplication::StartRuntimeSession()
         return false;
     }
 
+    // Let the Window.* Lua API drive the play window. No settings path is
+    // registered, so window changes apply live but never write to config.ini.
+    runtime_renderer_.SetPresentationWindow(runtime_window_);
+
     std::string runtime_error;
     if (!runtime_renderer_.StartSession(state_.project_root, state_.active_scene_path, active_camera, &runtime_error))
     {
@@ -2645,7 +2649,14 @@ bool EngineApplication::StageBuiltGame(
         << "contentRoot=Content\n"
         << "scriptRoot=Scripts\n"
         << "graphRoot=Graphs\n"
-        << "startupScene=" << startup_scene_relative_path.generic_string() << "\n";
+        << "startupScene=" << startup_scene_relative_path.generic_string() << "\n"
+        // Default window launch preferences. The runtime Window.* Lua API (and a
+        // player's in-game settings) rewrite these in place so the build reopens
+        // in the same state; a rebuild resets them to these editor defaults.
+        << "windowMode=windowed\n"
+        << "windowWidth=1280\n"
+        << "windowHeight=720\n"
+        << "vsync=true\n";
 
     if (!app_icon_rel_path.empty())
     {

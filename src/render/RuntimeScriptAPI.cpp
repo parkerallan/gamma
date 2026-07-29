@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <fstream>
 #include <string>
+#include <vector>
 
 extern "C"
 {
@@ -2643,5 +2645,398 @@ int RuntimeRenderer::LuaEffectIsPlaying(lua_State* lua_state)
     const SceneObjectAttribute* const attribute = renderer->FindScriptAttribute(object_name, SceneObjectAttributeKind::Effects);
     const bool playing = attribute != nullptr && attribute->effects.play_mode != SceneObjectEffectsPlayMode::Stop;
     lua_pushboolean(lua_state, playing ? 1 : 0);
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Window.* API helpers (SDL3). Free functions kept file-local; the callbacks
+// below are RuntimeRenderer members so they can touch the window/settings state.
+// ---------------------------------------------------------------------------
+namespace
+{
+std::string NormalizeWindowMode(std::string mode)
+{
+    for (char& ch : mode)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return mode;
+}
+
+std::string CurrentWindowModeName(SDL_Window* window)
+{
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    return (flags & SDL_WINDOW_FULLSCREEN) != 0 ? "borderless" : "windowed";
+}
+
+void ApplyWindowMode(SDL_Window* window, const std::string& mode)
+{
+    if (mode == "borderless")
+    {
+        // NULL fullscreen mode == borderless desktop fullscreen (stays at the
+        // desktop refresh and composited, keeping the frame pacer effective).
+        SDL_SetWindowFullscreenMode(window, nullptr);
+        SDL_SetWindowFullscreen(window, true);
+    }
+    else // "windowed"
+    {
+        SDL_SetWindowFullscreen(window, false);
+        SDL_SetWindowBordered(window, true);
+    }
+    SDL_SyncWindow(window);
+}
+
+bool ReadIniValue(const std::filesystem::path& path, const std::string& key, std::string& out_value)
+{
+    if (path.empty())
+    {
+        return false;
+    }
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line))
+    {
+        const std::size_t eq = line.find('=');
+        if (eq != std::string::npos && line.substr(0, eq) == key)
+        {
+            out_value = line.substr(eq + 1);
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+void RuntimeRenderer::PersistWindowSetting(const std::string& key, const std::string& value) const
+{
+    if (window_settings_path_.empty())
+    {
+        return;
+    }
+
+    std::vector<std::string> lines;
+    bool replaced = false;
+    {
+        std::ifstream input(window_settings_path_);
+        std::string line;
+        while (std::getline(input, line))
+        {
+            const std::size_t eq = line.find('=');
+            if (eq != std::string::npos && line.substr(0, eq) == key)
+            {
+                lines.push_back(key + "=" + value);
+                replaced = true;
+            }
+            else
+            {
+                lines.push_back(line);
+            }
+        }
+    }
+    if (!replaced)
+    {
+        lines.push_back(key + "=" + value);
+    }
+
+    std::ofstream output(window_settings_path_, std::ios::trunc);
+    if (!output)
+    {
+        SDL_Log("Window: failed to persist %s to %s", key.c_str(),
+                window_settings_path_.string().c_str());
+        return;
+    }
+    for (const std::string& out_line : lines)
+    {
+        output << out_line << '\n';
+    }
+}
+
+int RuntimeRenderer::LuaWindowSetMode(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const std::string mode = NormalizeWindowMode(luaL_checkstring(lua_state, 1));
+    if (mode != "windowed" && mode != "borderless")
+    {
+        return luaL_error(lua_state, "Window.SetMode: expected 'windowed' or 'borderless'");
+    }
+    if (renderer->presentation_window_ != nullptr)
+    {
+        ApplyWindowMode(renderer->presentation_window_, mode);
+    }
+    renderer->PersistWindowSetting("windowMode", mode);
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowGetMode(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    if (renderer->presentation_window_ == nullptr)
+    {
+        lua_pushstring(lua_state, "windowed");
+        return 1;
+    }
+    lua_pushstring(lua_state, CurrentWindowModeName(renderer->presentation_window_).c_str());
+    return 1;
+}
+
+int RuntimeRenderer::LuaWindowSetSize(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const int width = static_cast<int>(luaL_checkinteger(lua_state, 1));
+    const int height = static_cast<int>(luaL_checkinteger(lua_state, 2));
+    if (width <= 0 || height <= 0)
+    {
+        return luaL_error(lua_state, "Window.SetSize: width and height must be positive");
+    }
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_SetWindowSize(renderer->presentation_window_, width, height);
+    }
+    renderer->PersistWindowSetting("windowWidth", std::to_string(width));
+    renderer->PersistWindowSetting("windowHeight", std::to_string(height));
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowGetSize(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    if (renderer->presentation_window_ == nullptr)
+    {
+        lua_pushnil(lua_state);
+        lua_pushnil(lua_state);
+        return 2;
+    }
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSize(renderer->presentation_window_, &width, &height);
+    lua_pushinteger(lua_state, width);
+    lua_pushinteger(lua_state, height);
+    return 2;
+}
+
+int RuntimeRenderer::LuaWindowSetPosition(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const int x = static_cast<int>(luaL_checkinteger(lua_state, 1));
+    const int y = static_cast<int>(luaL_checkinteger(lua_state, 2));
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_SetWindowPosition(renderer->presentation_window_, x, y);
+    }
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowCenter(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_SetWindowPosition(renderer->presentation_window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowMaximize(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_MaximizeWindow(renderer->presentation_window_);
+    }
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowMinimize(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_MinimizeWindow(renderer->presentation_window_);
+    }
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowRestore(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_RestoreWindow(renderer->presentation_window_);
+    }
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowSetResizable(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const bool resizable = lua_toboolean(lua_state, 1) != 0;
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_SetWindowResizable(renderer->presentation_window_, resizable);
+    }
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowSetTitle(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    const char* const title = luaL_checkstring(lua_state, 1);
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_SetWindowTitle(renderer->presentation_window_, title);
+    }
+    renderer->PersistWindowSetting("windowTitle", title);
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowGetDesktopSize(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    SDL_DisplayID display = 0;
+    if (renderer->presentation_window_ != nullptr)
+    {
+        display = SDL_GetDisplayForWindow(renderer->presentation_window_);
+    }
+    if (display == 0)
+    {
+        display = SDL_GetPrimaryDisplay();
+    }
+    const SDL_DisplayMode* const desktop = display != 0 ? SDL_GetDesktopDisplayMode(display) : nullptr;
+    if (desktop == nullptr)
+    {
+        lua_pushnil(lua_state);
+        lua_pushnil(lua_state);
+        return 2;
+    }
+    lua_pushinteger(lua_state, desktop->w);
+    lua_pushinteger(lua_state, desktop->h);
+    return 2;
+}
+
+int RuntimeRenderer::LuaWindowGetDisplayCount(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    int count = 0;
+    SDL_DisplayID* const displays = SDL_GetDisplays(&count);
+    if (displays != nullptr)
+    {
+        SDL_free(displays);
+    }
+    lua_pushinteger(lua_state, count);
+    return 1;
+}
+
+int RuntimeRenderer::LuaWindowSetDisplay(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    // 1-based index to match Lua conventions.
+    const int index = static_cast<int>(luaL_checkinteger(lua_state, 1));
+    int count = 0;
+    SDL_DisplayID* const displays = SDL_GetDisplays(&count);
+    if (displays == nullptr || index < 1 || index > count)
+    {
+        if (displays != nullptr)
+        {
+            SDL_free(displays);
+        }
+        return luaL_error(lua_state, "Window.SetDisplay: display index out of range");
+    }
+    const SDL_DisplayID id = displays[index - 1];
+    if (renderer->presentation_window_ != nullptr)
+    {
+        SDL_SetWindowPosition(renderer->presentation_window_, SDL_WINDOWPOS_CENTERED_DISPLAY(id),
+                              SDL_WINDOWPOS_CENTERED_DISPLAY(id));
+    }
+    SDL_free(displays);
+    // Persist 0-based index so GameApplication can index SDL_GetDisplays directly.
+    renderer->PersistWindowSetting("displayIndex", std::to_string(index - 1));
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowSetVsync(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    // Persist-only: present mode is chosen once at swapchain init, so this takes
+    // effect on the next launch of the built game rather than live.
+    const bool vsync = lua_toboolean(lua_state, 1) != 0;
+    renderer->PersistWindowSetting("vsync", vsync ? "true" : "false");
+    return 0;
+}
+
+int RuntimeRenderer::LuaWindowGetVsync(lua_State* lua_state)
+{
+    RuntimeRenderer* const renderer = static_cast<RuntimeRenderer*>(lua_touserdata(lua_state, lua_upvalueindex(1)));
+    if (renderer == nullptr)
+    {
+        return luaL_error(lua_state, "Runtime renderer is unavailable");
+    }
+    // Reflects the persisted launch setting (defaults to on when unset).
+    std::string value;
+    bool vsync = true;
+    if (ReadIniValue(renderer->window_settings_path_, "vsync", value))
+    {
+        vsync = value != "false" && value != "0";
+    }
+    lua_pushboolean(lua_state, vsync ? 1 : 0);
     return 1;
 }

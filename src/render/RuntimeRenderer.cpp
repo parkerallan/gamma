@@ -3948,6 +3948,61 @@ bool RuntimeRenderer::InitializeScriptRuntime(std::string* error_message)
     lua_setfield(script_lua_state_, -2, "IsPlaying");
     lua_setglobal(script_lua_state_, "Effect");
 
+    // Window table — runtime-only API to configure the presentation window
+    // (mode, size, title, position, display/resolution queries). Player-facing
+    // choices persist to config.ini in the standalone game so they survive a
+    // restart; in the editor play window they apply live only.
+    lua_newtable(script_lua_state_);
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetMode, 1);
+    lua_setfield(script_lua_state_, -2, "SetMode");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowGetMode, 1);
+    lua_setfield(script_lua_state_, -2, "GetMode");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetSize, 1);
+    lua_setfield(script_lua_state_, -2, "SetSize");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowGetSize, 1);
+    lua_setfield(script_lua_state_, -2, "GetSize");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetPosition, 1);
+    lua_setfield(script_lua_state_, -2, "SetPosition");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowCenter, 1);
+    lua_setfield(script_lua_state_, -2, "Center");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowMaximize, 1);
+    lua_setfield(script_lua_state_, -2, "Maximize");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowMinimize, 1);
+    lua_setfield(script_lua_state_, -2, "Minimize");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowRestore, 1);
+    lua_setfield(script_lua_state_, -2, "Restore");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetResizable, 1);
+    lua_setfield(script_lua_state_, -2, "SetResizable");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetTitle, 1);
+    lua_setfield(script_lua_state_, -2, "SetTitle");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowGetDesktopSize, 1);
+    lua_setfield(script_lua_state_, -2, "GetDesktopSize");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowGetDisplayCount, 1);
+    lua_setfield(script_lua_state_, -2, "GetDisplayCount");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetDisplay, 1);
+    lua_setfield(script_lua_state_, -2, "SetDisplay");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowSetVsync, 1);
+    lua_setfield(script_lua_state_, -2, "SetVsync");
+    lua_pushlightuserdata(script_lua_state_, this);
+    lua_pushcclosure(script_lua_state_, &RuntimeRenderer::LuaWindowGetVsync, 1);
+    lua_setfield(script_lua_state_, -2, "GetVsync");
+    lua_setglobal(script_lua_state_, "Window");
+
     const std::uint64_t now_ms = static_cast<std::uint64_t>(SDL_GetTicks());
     script_last_tick_ms_ = now_ms;
     script_session_start_ms_ = now_ms;

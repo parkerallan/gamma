@@ -115,6 +115,45 @@ bool GameApplication::LoadConfig(const std::filesystem::path& exe_dir)
 
     const auto icon_it = config.find("appIcon");
     app_icon_path_ = icon_it != config.end() ? icon_it->second : std::string();
+
+    // Window launch preferences. All optional — defaults preserve the previous
+    // 1280x720 windowed / vsync-on behavior when a key is missing.
+    const auto parse_int = [&config](const char* key, int fallback) {
+        const auto it = config.find(key);
+        if (it == config.end())
+        {
+            return fallback;
+        }
+        try
+        {
+            return std::stoi(it->second);
+        }
+        catch (...)
+        {
+            return fallback;
+        }
+    };
+
+    const auto mode_it = config.find("windowMode");
+    if (mode_it != config.end() &&
+        (mode_it->second == "windowed" || mode_it->second == "borderless"))
+    {
+        window_mode_ = mode_it->second;
+    }
+    window_width_ = parse_int("windowWidth", window_width_);
+    window_height_ = parse_int("windowHeight", window_height_);
+    if (window_width_ <= 0 || window_height_ <= 0)
+    {
+        window_width_ = 1280;
+        window_height_ = 720;
+    }
+    display_index_ = parse_int("displayIndex", display_index_);
+
+    const auto vsync_it = config.find("vsync");
+    if (vsync_it != config.end())
+    {
+        vsync_ = vsync_it->second != "false" && vsync_it->second != "0";
+    }
     return true;
 }
 
@@ -382,7 +421,7 @@ bool GameApplication::Init(int argc, char* argv[])
 
     const SDL_WindowFlags window_flags =
         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-    window_ = SDL_CreateWindow(window_title_.c_str(), 1280, 720, window_flags);
+    window_ = SDL_CreateWindow(window_title_.c_str(), window_width_, window_height_, window_flags);
     if (window_ == nullptr)
     {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
@@ -394,14 +433,15 @@ bool GameApplication::Init(int argc, char* argv[])
         SDL_Log("Continuing without custom app icon");
     }
 
-    // Use FIFO (vsync) for the standalone game. With a single swapchain there is
-    // no editor back-pressure to worry about, and FIFO blocks at the hardware
-    // vblank, giving deterministic 60 Hz pacing that pairs cleanly with the
-    // 1/120 Hz physics fixed step (exactly 2 deterministic steps per frame, alpha
-    // near 0). Running uncapped MAILBOX at several hundred FPS cycles the TAA
-    // jitter sequence fast enough to read as shimmer trailing fast movers
-    // (especially when the camera is parented to the player).
-    if (!vulkan_context_.Initialize(window_, /*prefer_low_latency=*/false))
+    // FIFO (vsync) is the default for the standalone game. With a single
+    // swapchain there is no editor back-pressure to worry about, and FIFO blocks
+    // at the hardware vblank, giving deterministic 60 Hz pacing that pairs
+    // cleanly with the 1/120 Hz physics fixed step (exactly 2 deterministic steps
+    // per frame, alpha near 0). Running uncapped MAILBOX at several hundred FPS
+    // cycles the TAA jitter sequence fast enough to read as shimmer trailing fast
+    // movers (especially when the camera is parented to the player). Players can
+    // opt into low-latency present via config.ini (vsync=false) / Window.SetVsync.
+    if (!vulkan_context_.Initialize(window_, /*prefer_low_latency=*/!vsync_))
     {
         SDL_Log("VulkanContext::Initialize failed");
         return false;
@@ -438,6 +478,10 @@ bool GameApplication::Init(int argc, char* argv[])
         SDL_Log("RuntimeRenderer::Initialize failed");
         return false;
     }
+    // Wire the Window.* Lua API to the game window and persist player-facing
+    // window choices to config.ini so they survive a restart.
+    renderer_.SetPresentationWindow(window_);
+    renderer_.SetWindowSettingsPath(exe_dir / "config.ini");
     stage("RuntimeRenderer::Initialize", stage_mark);
 
     const std::filesystem::path scene_path = startup_scene_path_;
@@ -478,7 +522,34 @@ bool GameApplication::Init(int argc, char* argv[])
     SDL_Log("Game init: seeded %zu model(s) + %zu audio + %zu video into runtime cache",
             seeded_models, preloaded.audio_bytes.size(), preloaded.video_bytes.size());
 
-    SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    // Place the window on the configured display (default: primary), then apply
+    // the saved window mode before showing. The swapchain follows the resulting
+    // size automatically via VulkanContext::EnsureSwapchain.
+    int center_x = SDL_WINDOWPOS_CENTERED;
+    int center_y = SDL_WINDOWPOS_CENTERED;
+    if (display_index_ > 0)
+    {
+        int display_count = 0;
+        SDL_DisplayID* const displays = SDL_GetDisplays(&display_count);
+        if (displays != nullptr)
+        {
+            if (display_index_ < display_count)
+            {
+                const SDL_DisplayID id = displays[display_index_];
+                center_x = SDL_WINDOWPOS_CENTERED_DISPLAY(id);
+                center_y = SDL_WINDOWPOS_CENTERED_DISPLAY(id);
+            }
+            SDL_free(displays);
+        }
+    }
+    SDL_SetWindowPosition(window_, center_x, center_y);
+
+    if (window_mode_ == "borderless")
+    {
+        SDL_SetWindowFullscreenMode(window_, nullptr);
+        SDL_SetWindowFullscreen(window_, true);
+    }
+
     SDL_ShowWindow(window_);
     running_ = true;
     SDL_Log("Game init total: %.2f ms (window now visible; first RenderFrame next)", ms_since(init_start_ticks));

@@ -750,6 +750,122 @@ Notes:
 - `Effect.Play` switches from `"Stop"` → `"Loop"`. To start a one-shot play use `Engine.EffectsAttr.PlayMode(name, "PlayOnce")` instead.
 - Use the `EffectsAttr` attribute accessor (`Engine.EffectsAttr.EffectPath`, `Engine.EffectsAttr.PlayMode`) for full read/write access to both fields.
 
+### `Window`
+
+Runtime control over the presentation window — display mode, size, title, position, and multi-monitor placement.
+
+Two important behaviors:
+
+- **Persistence.** In the standalone game, the setters marked *(persists)* below write their value back to the game's `config.ini`, so the change survives closing and reopening the game. In the editor's play window there is no config file, so calls apply live but are not saved.
+- **Windowed and borderless only.** Exclusive fullscreen is deliberately not offered — it bypasses the compositor the frame pacer relies on and can change the monitor's refresh rate, both of which reintroduce movement judder. Use `"borderless"` for a full-screen experience; it runs at the desktop resolution and refresh rate.
+
+All functions are no-ops (or return sensible defaults) if the runtime has no window yet.
+
+#### `Window.SetMode(mode)`
+Quick summary: Sets the window mode. `mode` is `"windowed"` or `"borderless"` (borderless desktop fullscreen). *(persists `windowMode`)*
+
+```lua
+Window.SetMode("borderless")
+```
+
+#### `Window.GetMode()`
+Quick summary: Returns the current mode as `"windowed"` or `"borderless"`.
+
+```lua
+if Window.GetMode() == "windowed" then
+    Window.SetMode("borderless")
+end
+```
+
+#### `Window.SetSize(width, height)`
+Quick summary: Resizes the window (windowed mode). The render output follows automatically. *(persists `windowWidth`, `windowHeight`)*
+
+```lua
+Window.SetSize(1600, 900)
+```
+
+#### `Window.GetSize()`
+Quick summary: Returns the current window `width, height` in pixels (two values), or `nil, nil` if there is no window.
+
+```lua
+local w, h = Window.GetSize()
+```
+
+#### `Window.SetPosition(x, y)`
+Quick summary: Moves the window's top-left corner to the given screen coordinates.
+
+```lua
+Window.SetPosition(100, 100)
+```
+
+#### `Window.Center()`
+Quick summary: Centers the window on its current display.
+
+```lua
+Window.Center()
+```
+
+#### `Window.Maximize()` / `Window.Minimize()` / `Window.Restore()`
+Quick summary: Maximizes, minimizes, or restores the window.
+
+```lua
+Window.Maximize()
+```
+
+#### `Window.SetResizable(enabled)`
+Quick summary: Enables or disables interactive resizing of the window border.
+
+```lua
+Window.SetResizable(false)
+```
+
+#### `Window.SetTitle(title)`
+Quick summary: Sets the window title bar text. *(persists `windowTitle`)*
+
+```lua
+Window.SetTitle("My Game")
+```
+
+#### `Window.GetDesktopSize()`
+Quick summary: Returns the desktop resolution `width, height` of the window's display (two values), or `nil, nil` if unavailable. Useful for choosing a sensible windowed size.
+
+```lua
+local dw, dh = Window.GetDesktopSize()
+```
+
+#### `Window.GetDisplayCount()`
+Quick summary: Returns the number of connected displays.
+
+```lua
+local count = Window.GetDisplayCount()
+```
+
+#### `Window.SetDisplay(index)`
+Quick summary: Moves the window to the given display and centers it. `index` is 1-based (`1` = first display). Errors if the index is out of range. *(persists `displayIndex`)*
+
+```lua
+Window.SetDisplay(2)
+```
+
+#### `Window.SetVsync(enabled)`
+Quick summary: Sets the vsync preference. This is persisted and **takes effect on the next launch** of the built game — the present mode is chosen once at startup, so it is not a live toggle. *(persists `vsync`)*
+
+```lua
+Window.SetVsync(false) -- low-latency present next launch
+```
+
+#### `Window.GetVsync()`
+Quick summary: Returns the persisted vsync preference as a boolean (defaults to `true` when unset).
+
+```lua
+if Window.GetVsync() then
+    -- vsync is on
+end
+```
+
+Notes:
+- Config keys written to `config.ini`: `windowMode`, `windowWidth`, `windowHeight`, `windowTitle`, `displayIndex`, `vsync`. The game reads these at launch to create the window in the saved state. A rebuild from the editor resets them to defaults (`windowed`, `1280x720`, `vsync=true`).
+
 ## Callback Notes
 
 A `Script:<Name>(self, ...)` method is invoked automatically when the runtime fires the matching event. All callbacks receive `self` as the script instance table; additional parameters vary per callback. Implementing any callback is optional — missing ones are silently skipped.
