@@ -370,18 +370,32 @@ endif()
 # libavcodec, libavutil, libswscale + matching DLLs. Used by
 # VideoPlaybackManager to decode arbitrary video files for the Video2D
 # scene attribute.
+#
+# Pinned to the 8.1 release branch, not master: master bumps sonames whenever
+# it feels like it (avcodec 62 -> 63 in Aug 2026), which silently changes the
+# DLL names the build has to ship. Release branches keep them fixed.
 if(WIN32)
     set(FFMPEG_ARCHIVE_URL
-        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-10-13-17/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-shared-8.1.zip"
         CACHE STRING "URL for prebuilt FFmpeg LGPL shared archive")
+    set(FFMPEG_ARCHIVE_SHA256
+        "bf54421a41a11eafdcff3241aeba812f5ab526d4d6942a5a83a9d4588b26cb6d"
+        CACHE STRING "SHA256 of FFMPEG_ARCHIVE_URL; clear to skip the check")
+
+    if(FFMPEG_ARCHIVE_SHA256)
+        set(FFMPEG_URL_HASH URL_HASH "SHA256=${FFMPEG_ARCHIVE_SHA256}")
+    else()
+        set(FFMPEG_URL_HASH)
+    endif()
 
     FetchContent_Declare(
         ffmpeg
         URL ${FFMPEG_ARCHIVE_URL}
+        ${FFMPEG_URL_HASH}
     )
     FetchContent_GetProperties(ffmpeg)
     if(NOT ffmpeg_POPULATED)
-        message(STATUS "Downloading prebuilt FFmpeg from ${FFMPEG_ARCHIVE_URL} (~30 MB) ...")
+        message(STATUS "Downloading prebuilt FFmpeg from ${FFMPEG_ARCHIVE_URL} (~70 MB) ...")
         FetchContent_Populate(ffmpeg)
     endif()
 

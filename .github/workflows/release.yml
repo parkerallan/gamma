@@ -101,30 +101,27 @@ jobs:
               Remove-Item (Join-Path $stage $_) -Force -ErrorAction SilentlyContinue
           }
 
-          if (-not (Test-Path (Join-Path $stage 'Gamma.exe'))) {
-              throw "Gamma.exe is missing from $stage -- refusing to publish an empty archive"
-          }
-          if (-not (Get-ChildItem (Join-Path $stage 'shaders') -Filter '*.spv' -ErrorAction SilentlyContinue)) {
-              throw "No compiled shaders in $stage\shaders -- refusing to publish an engine that cannot render"
-          }
+          Write-Host "--- archive contents ---"
+          Get-ChildItem $stage -Recurse -File |
+              ForEach-Object { $_.FullName.Substring((Resolve-Path $stage).Path.Length + 1) }
 
           # Everything Gamma.exe imports that is not a Windows component. These
           # arrive via POST_BUILD, so a regression is otherwise invisible until
           # someone unzips this on a clean machine and it refuses to launch.
+          # Patterns, not exact names: assimp encodes the MSVC toolset version
+          # and the FFmpeg archive is pinned to "latest", so both change soname
+          # under us. Test-Path globs, so one match is enough.
           $required = @(
-              'SDL3.dll', 'assimp-vc143-mt.dll',
-              'avformat-62.dll', 'avcodec-62.dll', 'avutil-60.dll',
-              'swscale-9.dll', 'swresample-6.dll',
-              'MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'VCOMP140.DLL'
+              'Gamma.exe', 'shaders/*.spv',
+              'SDL3.dll', 'assimp-*.dll',
+              'avformat-*.dll', 'avcodec-*.dll', 'avutil-*.dll',
+              'swscale-*.dll', 'swresample-*.dll',
+              'MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'vcomp140.dll'
           )
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $stage $_)) }
           if ($missing) {
-              throw "Missing runtime dependencies in ${stage}: $($missing -join ', ')"
+              throw "Missing from ${stage}: $($missing -join ', ')"
           }
-
-          Write-Host "--- archive contents ---"
-          Get-ChildItem $stage -Recurse -File |
-              ForEach-Object { $_.FullName.Substring((Resolve-Path $stage).Path.Length + 1) }
 
           Compress-Archive -Path (Join-Path $stage '*') `
                            -DestinationPath "${{ steps.version.outputs.zip }}" -Force
