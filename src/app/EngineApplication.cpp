@@ -29,6 +29,11 @@
 #include <windows.h>
 #endif
 
+// Set by CMake from project(Gamma VERSION ...).
+#ifndef GAMMA_VERSION
+#define GAMMA_VERSION "0.0.0-dev"
+#endif
+
 namespace
 {
 constexpr float kBottomBarHeight = 20.0f;
@@ -1318,7 +1323,7 @@ void EngineApplication::RenderBottomBar()
     ImDrawList* draw_list = ImGui::GetForegroundDrawList(viewport);
     draw_list->AddRectFilled(bar_min, bar_max, IM_COL32(126, 185, 0, 255));
 
-    const char* version_label = "Version 0.0.1";
+    const char* version_label = "Version " GAMMA_VERSION;
     const ImVec2 text_size = ImGui::CalcTextSize(version_label);
     const float text_x = bar_min.x + 12.0f * display_scale_;
     const float text_y = bar_min.y + (bottom_bar_height - text_size.y) * 0.5f;

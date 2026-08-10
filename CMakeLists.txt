@@ -4,7 +4,12 @@ if(POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
 endif()
 
-project(Gamma LANGUAGES C CXX)
+project(Gamma VERSION 0.1.0 LANGUAGES C CXX)
+
+# Bump major.minor by hand; CI overrides the patch with the Actions run number.
+set(GAMMA_VERSION_PATCH "${PROJECT_VERSION_PATCH}" CACHE STRING "Engine version patch")
+set(GAMMA_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${GAMMA_VERSION_PATCH}")
+message(STATUS "Gamma version ${GAMMA_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -680,6 +685,7 @@ target_include_directories(engine PRIVATE
 target_compile_definitions(engine PRIVATE
     SDL_MAIN_HANDLED
     IMGUI_DEFINE_MATH_OPERATORS
+    GAMMA_VERSION="${GAMMA_VERSION}"
 )
 
 target_link_libraries(engine PRIVATE
@@ -724,6 +730,12 @@ if(WIN32)
         OUTPUT_NAME "${ENGINE_EXE_NAME}"
     )
 
+    # MSVC runtime DLLs; $<TARGET_RUNTIME_DLLS> only covers imported targets.
+    # OpenMP is on because bc7enc_rdo is compiled /openmp above.
+    set(CMAKE_INSTALL_OPENMP_LIBRARIES ON)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP ON)
+    include(InstallRequiredSystemLibraries)
+
     add_custom_command(TARGET engine POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             $<TARGET_FILE_DIR:engine>/shaders
@@ -736,10 +748,27 @@ if(WIN32)
             ${ENGINE_UI_SOURCE_DIR}/codicon.ttf
             $<TARGET_FILE_DIR:engine>/ui
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ENGINE_UI_SOURCE_DIR}/logo256.png
+            $<TARGET_FILE_DIR:engine>/ui
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_RUNTIME_DLLS:engine>
             $<TARGET_FILE_DIR:engine>
         COMMAND_EXPAND_LISTS
     )
+
+    # Guarded: copy_if_different with no sources is an error, not a no-op.
+    if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+        add_custom_command(TARGET engine POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+                $<TARGET_FILE_DIR:engine>
+            VERBATIM
+        )
+    else()
+        message(WARNING
+            "MSVC runtime DLLs were not located; a build copied off this machine "
+            "will require the Visual C++ redistributable to be installed.")
+    endif()
 endif()
 
 if(MSVC)

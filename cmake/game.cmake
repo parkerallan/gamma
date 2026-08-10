@@ -259,4 +259,25 @@ if(WIN32)
             $<TARGET_FILE_DIR:game>
         COMMAND_EXPAND_LISTS
     )
+
+    # MSVC runtime DLLs. SDL3 and assimp are static here but the CRT is not, and
+    # the stage step copies every .dll beside game.exe. OpenMP is off: the game
+    # links only bc7decomp, so game.exe has no vcomp140 import.
+    set(CMAKE_INSTALL_OPENMP_LIBRARIES OFF)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP ON)
+    include(InstallRequiredSystemLibraries)
+
+    # Guarded: copy_if_different with no sources is an error, not a no-op.
+    if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+        add_custom_command(TARGET game POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+                $<TARGET_FILE_DIR:game>
+            VERBATIM
+        )
+    else()
+        message(WARNING
+            "MSVC runtime DLLs were not located; the staged game will require the "
+            "Visual C++ redistributable to be installed on the player's machine.")
+    endif()
 endif()

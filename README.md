@@ -31,15 +31,28 @@ cmake --build build --config Debug --target clean
 
 Run:
 ```powershell
-.\build\Debug\engine.exe
+.\build\Debug\Gamma.exe
 ```
 
 Run Release:
 ```powershell
-.\build\Release\engine.exe
+.\build\Release\Gamma.exe
 ```
 
 Note: on Windows, the `engine` Release build is configured without a console window.
+The CMake target is `engine`; the produced executable is named from `ENGINE_EXE_NAME`
+(`Gamma` by default).
+
+## Releases
+
+`.github/workflows/release.yml` publishes a Windows x64 zip of the engine to the
+Releases tab on every push to `master`.
+
+The version shown in the engine's bottom bar comes from
+`project(Gamma VERSION x.y.z ...)` in `CMakeLists.txt`. Bump `major.minor` there by
+hand; CI replaces the patch with the Actions run number so each published build gets
+a unique, increasing version and a matching `vx.y.z` tag. Releases therefore start at
+`0.1.1`, and the `0.1.0` in `CMakeLists.txt` is what a local developer build reports.
 
 ## Building Your Game
 

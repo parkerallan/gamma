@@ -1,0 +1,142 @@
+name: Release
+
+# Publishes a Windows build of the engine to the Releases tab. Engine app only;
+# the game target is built locally from the engine's Build dialog.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    # A cold dependency cache builds SDL3, assimp, Jolt and Effekseer from source.
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # major.minor from CMakeLists.txt, patch from the run number, which is
+      # monotonic and never reused so two pushes cannot collide on a tag.
+      - name: Derive version
+        id: version
+        shell: pwsh
+        run: |
+          $text = Get-Content -Raw CMakeLists.txt
+          $m = [regex]::Match($text, 'project\(Gamma\s+VERSION\s+([0-9]+)\.([0-9]+)')
+          if (-not $m.Success) {
+              throw "Could not parse VERSION out of project(Gamma ...) in CMakeLists.txt"
+          }
+          $patch = $env:GITHUB_RUN_NUMBER
+          $version = "$($m.Groups[1].Value).$($m.Groups[2].Value).$patch"
+          Write-Host "version: $version"
+          "version=$version"                | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "patch=$patch"                    | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$version"                   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip=Gamma-v$version-win64.zip"   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Not on the runner image, and both find_package(Vulkan) and glslc need it.
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          # Default progress rendering costs minutes on a download this size.
+          $ProgressPreference = 'SilentlyContinue'
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan_sdk.exe'
+          Invoke-WebRequest -Uri 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe' `
+                            -OutFile $installer
+          $root = 'C:\VulkanSDK\latest'
+          $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+              '--root', $root,
+              '--accept-licenses',
+              '--default-answer',
+              '--confirm-command',
+              'install'
+          )
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $root 'Bin\glslc.exe'))) {
+              throw "glslc.exe is missing from $root -- the SDK install did not produce a usable toolchain"
+          }
+          "VULKAN_SDK=$root" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Keyed on CMakeLists.txt, which is where every FetchContent pin lives.
+      - name: Cache dependency sources and builds
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps-${{ runner.os }}-
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake --version
+          cmake -S . -B build -A x64 -DGAMMA_VERSION_PATCH=${{ steps.version.outputs.patch }}
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      # Everything the Release build produces, minus the dependency targets'
+      # static-library and linker byproducts.
+      - name: Stage and zip
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $stage = "staging"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          Copy-Item -Recurse -Force "build/Release" $stage
+
+          Get-ChildItem $stage -File |
+              Where-Object { $_.Extension -in '.lib', '.exp', '.pdb', '.ilk' } |
+              Remove-Item -Force
+
+          # Local state the engine writes beside itself. recent_projects.txt
+          # leaks workspace paths; without imgui.ini the engine builds its
+          # default dock layout, which is what a first-run user should get.
+          'settings.json', 'recent_projects.txt', 'imgui.ini' | ForEach-Object {
+              Remove-Item (Join-Path $stage $_) -Force -ErrorAction SilentlyContinue
+          }
+
+          if (-not (Test-Path (Join-Path $stage 'Gamma.exe'))) {
+              throw "Gamma.exe is missing from $stage -- refusing to publish an empty archive"
+          }
+          if (-not (Get-ChildItem (Join-Path $stage 'shaders') -Filter '*.spv' -ErrorAction SilentlyContinue)) {
+              throw "No compiled shaders in $stage\shaders -- refusing to publish an engine that cannot render"
+          }
+
+          # Everything Gamma.exe imports that is not a Windows component. These
+          # arrive via POST_BUILD, so a regression is otherwise invisible until
+          # someone unzips this on a clean machine and it refuses to launch.
+          $required = @(
+              'SDL3.dll', 'assimp-vc143-mt.dll',
+              'avformat-62.dll', 'avcodec-62.dll', 'avutil-60.dll',
+              'swscale-9.dll', 'swresample-6.dll',
+              'MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'VCOMP140.DLL'
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $stage $_)) }
+          if ($missing) {
+              throw "Missing runtime dependencies in ${stage}: $($missing -join ', ')"
+          }
+
+          Write-Host "--- archive contents ---"
+          Get-ChildItem $stage -Recurse -File |
+              ForEach-Object { $_.FullName.Substring((Resolve-Path $stage).Path.Length + 1) }
+
+          Compress-Archive -Path (Join-Path $stage '*') `
+                           -DestinationPath "${{ steps.version.outputs.zip }}" -Force
+
+      # gh creates the tag at the pushed commit, so a failed build leaves no
+      # orphaned tag behind.
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" "${{ steps.version.outputs.zip }}" `
+              --title "Gamma ${{ steps.version.outputs.tag }}" `
+              --target "$env:GITHUB_SHA" `
+              --generate-notes
