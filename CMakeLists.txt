@@ -783,6 +783,18 @@ if(MSVC)
         "/external:I${IMGUICOLORTEXTEDIT_DIR}"
     )
 
+    # Effekseer's headers are /W4-noisy (C4100) and reach engine TUs through
+    # EffekseerRendererVulkan. These are its four transitive include dirs; the
+    # target property only carries the first.
+    if(GAMMA_WITH_EFFEKSEER)
+        target_compile_options(engine PRIVATE
+            "/external:I${GAMMA_EFFEKSEER_ROOT}/src/Effekseer"
+            "/external:I${GAMMA_EFFEKSEER_ROOT}/src/EffekseerRendererCommon"
+            "/external:I${GAMMA_EFFEKSEER_ROOT}/src/EffekseerRendererLLGI"
+            "/external:I${GAMMA_EFFEKSEER_ROOT}/src/EffekseerRendererVulkan"
+        )
+    endif()
+
     # Hide console window for engine Release builds while keeping Debug
     # attached to a console for development logs.
     target_link_options(engine PRIVATE $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>)
