@@ -573,7 +573,7 @@ bool SequencerPanel::SaveSequence(EngineState& state)
     const std::filesystem::path seq_path = SequenceFilePathForScene(state, loaded_sequence_scene_path_);
     if (seq_path.empty())
     {
-        state.AddLog("Sequencer: cannot save — no scene selected");
+        state.AddWarning("Sequencer: cannot save — no scene selected");
         return false;
     }
 
@@ -585,7 +585,7 @@ bool SequencerPanel::SaveSequence(EngineState& state)
     std::ofstream output(seq_path, std::ios::binary | std::ios::trunc);
     if (!output)
     {
-        state.AddLog("Sequencer: failed to write " + seq_path.generic_string());
+        state.AddError("Sequencer: failed to write " + seq_path.generic_string());
         return false;
     }
 

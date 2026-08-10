@@ -1,5 +1,7 @@
 #include "components/CreationMenu.h"
 
+#include "ui/Codicons.h"
+
 #include "imgui.h"
 
 #include <nlohmann/json.hpp>
@@ -624,33 +626,42 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
         ImGui::OpenPopup("CreateMenu");
     }
 
+    // Everything else (folders, scripts, graphs) is created by right-clicking
+    // in the Assets panel.
     if (ImGui::BeginPopup("CreateMenu"))
     {
-        if (ImGui::MenuItem("New Folder"))
-        {
-            OpenCreateDialog(directory_path, CreateTarget::Folder);
-        }
-
-        const std::filesystem::path script_directory = directory_path == state.project_root ? state.project_root / "Scripts" : directory_path;
-        if (ImGui::MenuItem("New Script (.lua)"))
-        {
-            OpenCreateDialog(script_directory, CreateTarget::Script);
-        }
-
-        const std::filesystem::path graph_directory = directory_path == state.project_root ? state.project_root / "Graphs" : directory_path;
-        if (ImGui::MenuItem("New Graph (.graph)"))
-        {
-            OpenCreateDialog(graph_directory, CreateTarget::Graph);
-        }
-
         const std::filesystem::path scene_directory = directory_path == state.project_root ? state.project_root / "Scenes" : directory_path;
         if (ImGui::MenuItem("New Scene (.scene)"))
         {
             OpenCreateDialog(scene_directory, CreateTarget::Scene);
         }
 
-        ImGui::Separator();
+        const std::filesystem::path target_scene_path = ResolveSceneTarget(state);
+        if (ImGui::MenuItem("Add Object", nullptr, false, !target_scene_path.empty()))
+        {
+            OpenCreateDialog(directory_path, CreateTarget::Object, target_scene_path);
+        }
 
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopID();
+    return changed;
+}
+
+// Import entries for the Assets panel toolbar.
+bool CreationMenu::RenderImportButton(EngineState& state, const std::filesystem::path& directory_path, const char* label)
+{
+    bool changed = false;
+    ImGui::PushID("AssetImportMenu");
+
+    if (ImGui::Button(label))
+    {
+        ImGui::OpenPopup("ImportMenu");
+    }
+
+    if (ImGui::BeginPopup("ImportMenu"))
+    {
         if (ImGui::MenuItem("Import Model (.fbx/.glb/.gltf)..."))
         {
             changed = ImportModel(state, directory_path) || changed;
@@ -676,17 +687,35 @@ bool CreationMenu::RenderButton(EngineState& state, const std::filesystem::path&
             changed = ImportAudio(state, directory_path) || changed;
         }
 
-        const std::filesystem::path target_scene_path = ResolveSceneTarget(state);
-        if (ImGui::MenuItem("Add Object", nullptr, false, !target_scene_path.empty()))
-        {
-            OpenCreateDialog(directory_path, CreateTarget::Object, target_scene_path);
-        }
-
         ImGui::EndPopup();
     }
 
     ImGui::PopID();
     return changed;
+}
+
+// Create entries for the Assets panel's right-click menu. The "+" button holds
+// New Scene and Add Object; everything else is created from here, into
+// whichever folder is being browsed.
+void CreationMenu::RenderAssetCreateItems(EngineState& state, const std::filesystem::path& directory_path)
+{
+    const std::filesystem::path target_directory =
+        directory_path.empty() ? state.GetAssetsDirectory() : directory_path;
+
+    if (ImGui::MenuItem(ICON_CI_NEW_FOLDER " New Folder"))
+    {
+        OpenCreateDialog(target_directory, CreateTarget::Folder);
+    }
+
+    if (ImGui::MenuItem(ICON_CI_FILE_CODE " New Script (.lua)"))
+    {
+        OpenCreateDialog(target_directory, CreateTarget::Script);
+    }
+
+    if (ImGui::MenuItem(ICON_CI_GRAPH " New Graph (.graph)"))
+    {
+        OpenCreateDialog(target_directory, CreateTarget::Graph);
+    }
 }
 
 bool CreationMenu::Render(EngineState& state)
@@ -763,7 +792,7 @@ bool CreationMenu::CreateItem(EngineState& state)
     std::string item_name = SanitizeName(name_buffer_.data());
     if (item_name.empty())
     {
-        state.AddLog("Cannot create item: enter a valid name");
+        state.AddWarning("Cannot create item: enter a valid name");
         return false;
     }
 
@@ -771,27 +800,27 @@ bool CreationMenu::CreateItem(EngineState& state)
     {
         if (target_scene_path_.empty())
         {
-            state.AddLog("Cannot add object: no target scene is available");
+            state.AddWarning("Cannot add object: no target scene is available");
             return false;
         }
 
         if (state.HasOpenFile() && state.open_file_path == target_scene_path_ && state.open_file_dirty)
         {
-            state.AddLog("Cannot add object: save the open scene before editing it from the add menu");
+            state.AddWarning("Cannot add object: save the open scene before editing it from the add menu");
             return false;
         }
 
         std::ofstream output(target_scene_path_, std::ios::binary | std::ios::app);
         if (!output)
         {
-            state.AddLog("Failed to add object to scene: " + state.GetDisplayPath(target_scene_path_));
+            state.AddError("Failed to add object to scene: " + state.GetDisplayPath(target_scene_path_));
             return false;
         }
 
         output << BuildObjectStub(item_name);
         if (!output)
         {
-            state.AddLog("Failed while writing scene object: " + state.GetDisplayPath(target_scene_path_));
+            state.AddError("Failed while writing scene object: " + state.GetDisplayPath(target_scene_path_));
             return false;
         }
 
@@ -817,7 +846,7 @@ bool CreationMenu::CreateItem(EngineState& state)
 
     if (std::filesystem::exists(target_path))
     {
-        state.AddLog("Cannot create item: already exists: " + state.GetDisplayPath(target_path));
+        state.AddWarning("Cannot create item: already exists: " + state.GetDisplayPath(target_path));
         return false;
     }
 
@@ -827,7 +856,7 @@ bool CreationMenu::CreateItem(EngineState& state)
         std::filesystem::create_directory(target_path, error);
         if (error)
         {
-            state.AddLog("Failed to create folder: " + state.GetDisplayPath(target_path));
+            state.AddError("Failed to create folder: " + state.GetDisplayPath(target_path));
             return false;
         }
 
@@ -839,14 +868,14 @@ bool CreationMenu::CreateItem(EngineState& state)
     std::filesystem::create_directories(target_path.parent_path(), directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to create item directory: " + state.GetDisplayPath(target_path.parent_path()));
+        state.AddError("Failed to create item directory: " + state.GetDisplayPath(target_path.parent_path()));
         return false;
     }
 
     std::ofstream output(target_path, std::ios::binary | std::ios::trunc);
     if (!output)
     {
-        state.AddLog("Failed to create item: " + state.GetDisplayPath(target_path));
+        state.AddError("Failed to create item: " + state.GetDisplayPath(target_path));
         return false;
     }
 
@@ -865,7 +894,7 @@ bool CreationMenu::CreateItem(EngineState& state)
 
     if (!output)
     {
-        state.AddLog("Failed while writing item: " + state.GetDisplayPath(target_path));
+        state.AddError("Failed while writing item: " + state.GetDisplayPath(target_path));
         return false;
     }
 
@@ -883,7 +912,7 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import model: no project is loaded");
+        state.AddWarning("Cannot import model: no project is loaded");
         return false;
     }
 
@@ -902,7 +931,7 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare model directory: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to prepare model directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -914,7 +943,7 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
 
     if (!HasExtension(source_path, {".fbx", ".glb", ".gltf"}))
     {
-        state.AddLog("Cannot import model: only .fbx, .glb, and .gltf are supported");
+        state.AddWarning("Cannot import model: only .fbx, .glb, and .gltf are supported");
         return false;
     }
 
@@ -922,7 +951,7 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
     std::string import_failure_reason;
     if (!CopyImportedModel(source_path, destination_directory, destination_path, import_failure_reason))
     {
-        state.AddLog(import_failure_reason.empty() ? "Failed to import model" : import_failure_reason);
+        state.AddError(import_failure_reason.empty() ? "Failed to import model" : import_failure_reason);
         return false;
     }
 
@@ -930,7 +959,7 @@ bool CreationMenu::ImportModel(EngineState& state, const std::filesystem::path& 
     state.AddLog("Imported model: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Model import is only implemented on Windows");
+    state.AddWarning("Model import is only implemented on Windows");
     return false;
 #endif
 }
@@ -939,7 +968,7 @@ bool CreationMenu::ImportFont(EngineState& state, const std::filesystem::path& d
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import font: no project is loaded");
+        state.AddWarning("Cannot import font: no project is loaded");
         return false;
     }
 
@@ -955,7 +984,7 @@ bool CreationMenu::ImportFont(EngineState& state, const std::filesystem::path& d
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare font directory: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to prepare font directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -967,14 +996,14 @@ bool CreationMenu::ImportFont(EngineState& state, const std::filesystem::path& d
 
     if (!HasExtension(source_path, {".ttf", ".otf"}))
     {
-        state.AddLog("Cannot import font: only .ttf and .otf are supported");
+        state.AddWarning("Cannot import font: only .ttf and .otf are supported");
         return false;
     }
 
     const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
     if (destination_path.empty())
     {
-        state.AddLog("Cannot import font: failed to choose a destination name");
+        state.AddWarning("Cannot import font: failed to choose a destination name");
         return false;
     }
 
@@ -982,7 +1011,7 @@ bool CreationMenu::ImportFont(EngineState& state, const std::filesystem::path& d
     std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
     if (copy_error)
     {
-        state.AddLog("Failed to import font into: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to import font into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -990,7 +1019,7 @@ bool CreationMenu::ImportFont(EngineState& state, const std::filesystem::path& d
     state.AddLog("Imported font: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Font import is only implemented on Windows");
+    state.AddWarning("Font import is only implemented on Windows");
     return false;
 #endif
 }
@@ -999,7 +1028,7 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import Image: no project is loaded");
+        state.AddWarning("Cannot import Image: no project is loaded");
         return false;
     }
 
@@ -1015,7 +1044,7 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare Image directory: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to prepare Image directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -1027,14 +1056,14 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
 
     if (!HasExtension(source_path, {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".psd", ".hdr", ".exr", ".ico"}))
     {
-        state.AddLog("Cannot import Image: unsupported Image format");
+        state.AddWarning("Cannot import Image: unsupported Image format");
         return false;
     }
 
     const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
     if (destination_path.empty())
     {
-        state.AddLog("Cannot import Image: failed to choose a destination name");
+        state.AddWarning("Cannot import Image: failed to choose a destination name");
         return false;
     }
 
@@ -1042,7 +1071,7 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
     std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
     if (copy_error)
     {
-        state.AddLog("Failed to import Image into: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to import Image into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -1050,7 +1079,7 @@ bool CreationMenu::ImportImage(EngineState& state, const std::filesystem::path& 
     state.AddLog("Imported Image: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Image import is only implemented on Windows");
+    state.AddWarning("Image import is only implemented on Windows");
     return false;
 #endif
 }
@@ -1059,7 +1088,7 @@ bool CreationMenu::ImportVideo(EngineState& state, const std::filesystem::path& 
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import Video: no project is loaded");
+        state.AddWarning("Cannot import Video: no project is loaded");
         return false;
     }
 
@@ -1075,7 +1104,7 @@ bool CreationMenu::ImportVideo(EngineState& state, const std::filesystem::path& 
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare Video directory: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to prepare Video directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -1087,14 +1116,14 @@ bool CreationMenu::ImportVideo(EngineState& state, const std::filesystem::path& 
 
     if (!HasExtension(source_path, {".mp4", ".mov", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".m4v"}))
     {
-        state.AddLog("Cannot import Video: unsupported Video format");
+        state.AddWarning("Cannot import Video: unsupported Video format");
         return false;
     }
 
     const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
     if (destination_path.empty())
     {
-        state.AddLog("Cannot import Video: failed to choose a destination name");
+        state.AddWarning("Cannot import Video: failed to choose a destination name");
         return false;
     }
 
@@ -1102,7 +1131,7 @@ bool CreationMenu::ImportVideo(EngineState& state, const std::filesystem::path& 
     std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
     if (copy_error)
     {
-        state.AddLog("Failed to import Video into: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to import Video into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -1110,7 +1139,7 @@ bool CreationMenu::ImportVideo(EngineState& state, const std::filesystem::path& 
     state.AddLog("Imported Video: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Video import is only implemented on Windows");
+    state.AddWarning("Video import is only implemented on Windows");
     return false;
 #endif
 }
@@ -1119,7 +1148,7 @@ bool CreationMenu::ImportAudio(EngineState& state, const std::filesystem::path& 
 {
     if (!state.HasOpenProject())
     {
-        state.AddLog("Cannot import Audio: no project is loaded");
+        state.AddWarning("Cannot import Audio: no project is loaded");
         return false;
     }
 
@@ -1135,7 +1164,7 @@ bool CreationMenu::ImportAudio(EngineState& state, const std::filesystem::path& 
     std::filesystem::create_directories(destination_directory, directory_error);
     if (directory_error)
     {
-        state.AddLog("Failed to prepare Audio directory: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to prepare Audio directory: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -1147,14 +1176,14 @@ bool CreationMenu::ImportAudio(EngineState& state, const std::filesystem::path& 
 
     if (!HasExtension(source_path, {".wav", ".ogg", ".mp3", ".flac"}))
     {
-        state.AddLog("Cannot import Audio: unsupported Audio format");
+        state.AddWarning("Cannot import Audio: unsupported Audio format");
         return false;
     }
 
     const std::filesystem::path destination_path = GetAvailablePath(destination_directory, source_path);
     if (destination_path.empty())
     {
-        state.AddLog("Cannot import Audio: failed to choose a destination name");
+        state.AddWarning("Cannot import Audio: failed to choose a destination name");
         return false;
     }
 
@@ -1162,7 +1191,7 @@ bool CreationMenu::ImportAudio(EngineState& state, const std::filesystem::path& 
     std::filesystem::copy_file(source_path, destination_path, std::filesystem::copy_options::none, copy_error);
     if (copy_error)
     {
-        state.AddLog("Failed to import Audio into: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to import Audio into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 
@@ -1170,7 +1199,7 @@ bool CreationMenu::ImportAudio(EngineState& state, const std::filesystem::path& 
     state.AddLog("Imported Audio: " + state.GetDisplayPath(destination_path));
     return true;
 #else
-    state.AddLog("Audio import is only implemented on Windows");
+    state.AddWarning("Audio import is only implemented on Windows");
     return false;
 #endif
 }

@@ -613,6 +613,7 @@ add_executable(engine
     src/app/main.cpp
     src/app/FramePacer.cpp
     src/app/VulkanContext.cpp
+    src/core/Log.cpp
     src/assets/AssetMetadata.cpp
     src/assets/AnimatorControllerAsset.cpp
     src/assets/FaceClipAsset.cpp
@@ -640,6 +641,7 @@ add_executable(engine
     src/dialogs/NewProjectDialog.cpp
     src/dialogs/OpenProjectDialog.cpp
     src/vfs/PakArchive.cpp
+    src/panels/AssetsPanel.cpp
     src/panels/FilesPanel.cpp
     src/panels/EffectsPanel.cpp
     src/panels/AnimatorPanel.cpp

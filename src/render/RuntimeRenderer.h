@@ -73,8 +73,8 @@ public:
     void SetTAAEnabled(bool enabled) { ray_tracing_.SetTAAEnabled(enabled); }
     void SetTaaDebugSettings(const RayTracing::TaaDebugSettings& settings) { ray_tracing_.SetTaaDebugSettings(settings); }
     // When enabled, LoadGraphInstance writes the transpiled Lua source to
-    // <project>/Graphs/Transpiled/<graph_basename>.lua so it appears in the
-    // file tree. Disabling removes the directory on the next call.
+    // <project>/Assets/Graphs/Transpiled/<graph_basename>.lua so it appears in
+    // the Assets panel. Disabling removes the directory on the next call.
     void SetTranspiledLuaDumpEnabled(bool enabled) { transpiled_lua_dump_enabled_ = enabled; }
 
     // Editor->runtime hand-off: pre-populate caches so the first runtime frame

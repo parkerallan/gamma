@@ -97,7 +97,7 @@ bool SaveSceneObjectVector3Edit(
 {
     if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
     {
-        state.AddLog(std::string("Save the open scene before editing object ") + log_label);
+        state.AddWarning(std::string("Save the open scene before editing object ") + log_label);
         return false;
     }
 
@@ -519,7 +519,7 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
 
         if (state.HasOpenFile() && state.open_file_path == scene_path && state.open_file_dirty)
         {
-            state.AddLog("Save the open scene before attaching assets to an object");
+            state.AddWarning("Save the open scene before attaching assets to an object");
         }
         else if (IsSupportedModelAttachment(source_path))
         {
@@ -553,7 +553,7 @@ bool InfoPanel::HandleSceneObjectAttachmentDrop(EngineState& state, const std::f
         }
         else
         {
-            state.AddLog("Attach supported assets only: .fbx/.glb model, .lua script, or .graph graph");
+            state.AddWarning("Attach supported assets only: .fbx/.glb model, .lua script, or .graph graph");
         }
     }
 
@@ -602,7 +602,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
     {
         if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
         {
-            state.AddLog("Save the open scene before toggling object enabled state");
+            state.AddWarning("Save the open scene before toggling object enabled state");
         }
         else if (SetSceneObjectEnabled(state.selected_item_path, selected_object.name, enabled))
         {
@@ -632,7 +632,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         {
             if (state.project_root.empty())
             {
-                state.AddLog("Cannot save prefab: no project is loaded");
+                state.AddWarning("Cannot save prefab: no project is loaded");
             }
             else
             {
@@ -643,7 +643,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
                 }
                 else
                 {
-                    state.AddLog("Failed to save prefab from object: " + selected_object.name);
+                    state.AddError("Failed to save prefab from object: " + selected_object.name);
                 }
             }
         }
@@ -894,7 +894,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
         {
             if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
             {
-                state.AddLog("Save the open scene before removing the object model");
+                state.AddWarning("Save the open scene before removing the object model");
             }
             else if (ClearSceneObjectModel(state.selected_item_path, selected_object.name))
             {
@@ -925,7 +925,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
             {
                 if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
                 {
-                    state.AddLog("Save the open scene before removing an object script");
+                    state.AddWarning("Save the open scene before removing an object script");
                 }
                 else if (RemoveSceneObjectScript(state.selected_item_path, selected_object.name, state.project_root, state.project_root / script_path))
                 {
@@ -957,7 +957,7 @@ void InfoPanel::RenderSelectedSceneObject(EngineState& state)
             {
                 if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
                 {
-                    state.AddLog("Save the open scene before removing an object graph");
+                    state.AddWarning("Save the open scene before removing an object graph");
                 }
                 else if (RemoveSceneObjectGraph(state.selected_item_path, selected_object.name, state.project_root, state.project_root / graph_path))
                 {

@@ -4212,12 +4212,12 @@ bool RuntimeRenderer::LoadGraphInstance(const std::string& object_name, const st
         lua_source.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
 
-    // Optional: dump the transpiled Lua to disk so it shows up in the file tree.
-    // Controlled by the "Show Transpiled Lua" setting (SettingsPanel -> Graph).
+    // Optional: dump the transpiled Lua to disk so it shows up in the Assets
+    // panel. Controlled by the "Show Transpiled Lua" setting (SettingsPanel -> Graph).
     if (transpiled_lua_dump_enabled_ && !project_root_.empty())
     {
         std::error_code dump_ec;
-        const std::filesystem::path dump_dir = project_root_ / "Graphs" / "Transpiled";
+        const std::filesystem::path dump_dir = project_root_ / "Assets" / "Graphs" / "Transpiled";
         std::filesystem::create_directories(dump_dir, dump_ec);
         if (!dump_ec)
         {

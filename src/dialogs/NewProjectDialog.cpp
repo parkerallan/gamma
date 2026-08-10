@@ -151,7 +151,7 @@ bool NewProjectDialog::BrowseForProjectRoot(EngineState& state)
     state.AddLog("Selected new project folder: " + selected_project_root_.generic_string());
     return true;
 #else
-    state.AddLog("Native new project browsing is only implemented on Windows");
+    state.AddWarning("Native new project browsing is only implemented on Windows");
     return false;
 #endif
 }
@@ -160,26 +160,26 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
 {
     if (project_root.empty())
     {
-        state.AddLog("Cannot create project: choose a project folder in Explorer");
+        state.AddWarning("Cannot create project: choose a project folder in Explorer");
         return false;
     }
 
     if (std::filesystem::exists(project_root))
     {
-        state.AddLog("Cannot create project: folder already exists: " + state.GetDisplayPath(project_root));
+        state.AddWarning("Cannot create project: folder already exists: " + state.GetDisplayPath(project_root));
         return false;
     }
 
     const std::string project_name = project_root.filename().string();
     if (project_name.empty())
     {
-        state.AddLog("Cannot create project: invalid folder name");
+        state.AddWarning("Cannot create project: invalid folder name");
         return false;
     }
 
     const std::vector<std::filesystem::path> directories = {
         project_root / "Scenes",
-        project_root / "Graphs",
+        project_root / "Assets" / "Graphs",
         project_root / "Assets",
         project_root / "Assets" / "Models",
         project_root / "Assets" / "Images",
@@ -188,7 +188,7 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
         project_root / "Assets" / "Audio",
         project_root / "Assets" / "Effects",
         project_root / "Assets" / "Animators",
-        project_root / "Scripts",
+        project_root / "Assets" / "Scripts",
         project_root / "Config",
     };
 
@@ -198,7 +198,7 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
         std::filesystem::create_directories(directory, error);
         if (error)
         {
-            state.AddLog("Failed to create project directory: " + state.GetDisplayPath(directory));
+            state.AddError("Failed to create project directory: " + state.GetDisplayPath(directory));
             return false;
         }
     }
@@ -206,13 +206,12 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
     const std::filesystem::path manifest_path = project_root / (project_name + ".engineproj");
     const std::filesystem::path scene_path = project_root / "Scenes" / "Main.scene";
     const std::filesystem::path config_path = project_root / "Config" / "editor.ini";
-    const std::filesystem::path script_path = project_root / "Scripts" / "Game.lua";
 
     {
         std::ofstream manifest_file(manifest_path, std::ios::binary | std::ios::trunc);
         if (!manifest_file)
         {
-            state.AddLog("Failed to create project manifest: " + state.GetDisplayPath(manifest_path));
+            state.AddError("Failed to create project manifest: " + state.GetDisplayPath(manifest_path));
             return false;
         }
 
@@ -238,18 +237,6 @@ bool NewProjectDialog::CreateProjectScaffold(const std::filesystem::path& projec
     {
         std::ofstream config_file(config_path, std::ios::binary | std::ios::trunc);
         config_file << "[Editor]\nlastScene=Scenes/Main.scene\n";
-    }
-
-    {
-        std::ofstream script_file(script_path, std::ios::binary | std::ios::trunc);
-        script_file
-            << "local Game = {}\n\n"
-            << "function Game:OnCreate(entity)\n"
-            << "    -- " << project_name << " entry script\n"
-            << "end\n\n"
-            << "function Game:OnUpdate(entity, delta_time)\n"
-            << "end\n\n"
-            << "return Game\n";
     }
 
     state.AddLog("Created project scaffold: " + state.GetDisplayPath(project_root));

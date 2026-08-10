@@ -165,7 +165,7 @@ struct NodeGraphComponent::Impl
         std::string error;
         if (!graph::GraphDocument::LoadFromFile(path, doc, error))
         {
-            state.AddLog("Failed to load graph: " + error);
+            state.AddError("Failed to load graph: " + error);
             doc = graph::GraphDocument{};
         }
         loaded_path = path;
@@ -184,7 +184,7 @@ struct NodeGraphComponent::Impl
         std::string error;
         if (!doc.SaveToFile(loaded_path, error))
         {
-            state.AddLog("Failed to save graph: " + error);
+            state.AddError("Failed to save graph: " + error);
             return false;
         }
         state.open_graph_dirty = false;
@@ -247,7 +247,7 @@ void NodeGraphComponent::Render(EngineState& state)
 
     const std::filesystem::path current_graphs_dir = state.project_root.empty()
         ? std::filesystem::path()
-        : state.project_root / "Graphs";
+        : state.GetAssetsDirectory() / "Graphs";
 
     auto compute_dir_signature = [](const std::filesystem::path& dir) -> std::uint64_t
     {
@@ -360,7 +360,7 @@ void NodeGraphComponent::Render(EngineState& state)
             {
                 if (!state.project_root.empty() && new_graph_name[0] != '\0')
                 {
-                    const std::filesystem::path graphs_dir = state.project_root / "Graphs";
+                    const std::filesystem::path graphs_dir = state.GetAssetsDirectory() / "Graphs";
                     std::error_code ec;
                     std::filesystem::create_directories(graphs_dir, ec);
                     const std::filesystem::path new_path = graphs_dir / (std::string(new_graph_name) + ".graph");
@@ -379,7 +379,7 @@ void NodeGraphComponent::Render(EngineState& state)
                     }
                     else
                     {
-                        state.AddLog("Failed to create graph: " + error);
+                        state.AddError("Failed to create graph: " + error);
                     }
                 }
             }

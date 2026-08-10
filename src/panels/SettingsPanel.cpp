@@ -83,7 +83,7 @@ void SettingsPanel::Render(EngineState& state)
     if (ImGui::CollapsingHeader("Graph", ImGuiTreeNodeFlags_DefaultOpen))
     {
         settings_changed |= ImGui::Checkbox("Show Transpiled Lua", &state.show_transpiled_lua);
-        ImGui::TextDisabled("When enabled, every graph's transpiled Lua is written to\nProject/Graphs/Transpiled/ on Play so the folder appears in the file tree.\nDisabling removes the folder.");
+        ImGui::TextDisabled("When enabled, every graph's transpiled Lua is written to\nProject/Assets/Graphs/Transpiled/ on Play so the folder appears in the Assets panel.\nDisabling removes the folder.");
         ImGui::Spacing();
         if (ImGui::SmallButton("Revert to defaults##graph"))
         {
@@ -198,10 +198,15 @@ void SettingsPanel::Render(EngineState& state)
     if (ImGui::CollapsingHeader("Session", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::Text("Open file: %s", state.HasOpenFile() ? state.GetOpenFileDisplayPath().c_str() : "None");
-        ImGui::Text("Log entries: %d", static_cast<int>(state.log_messages.size()));
-        if (ImGui::Button("Add test log entry"))
+        ImGui::Text("Log entries: %d", static_cast<int>(applog::Entries().size()));
+        if (ImGui::Button("Add test log entries"))
         {
+            // One of each level, so the Log panel's filters can be checked.
             state.AddLog("Settings test message");
+            state.AddWarning("Settings test warning");
+            state.AddError("Settings test error");
+            state.AddBuildLog("Settings test build message");
+            state.AddScriptLog("Settings test script message");
         }
     }
 

@@ -106,6 +106,7 @@ private:
     bool BeginAsyncViewportLoad(const EngineState& state, const std::filesystem::path& scene_path, std::filesystem::file_time_type scene_write_time);
     bool TryConsumeAsyncViewportLoad(EngineState& state, const std::filesystem::path& scene_path, std::filesystem::file_time_type scene_write_time);
     const ModelAsset& GetModelAsset(const std::filesystem::path& path);
+    void RenderWorkspaceWindow(EngineState& state, WorkspaceTab tab, const char* title);
     void RenderSceneViewport(EngineState& state);
     void RenderGraphViewport(EngineState& state);
 };

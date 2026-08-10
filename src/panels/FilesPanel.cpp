@@ -37,6 +37,14 @@ bool ShouldSkipPath(const std::filesystem::path& path)
     return name == "build" || name == ".git" || name == ".vs";
 }
 
+// The project's Assets folder belongs to the Assets panel, so the tree skips
+// it entirely — including for change detection, since nothing it draws can be
+// affected by what happens in there.
+bool IsProjectAssetsDirectory(const std::filesystem::path& project_root, const std::filesystem::path& path)
+{
+    return !project_root.empty() && path.filename() == "Assets" && path.parent_path() == project_root;
+}
+
 bool IsPathWithin(const std::filesystem::path& parent_path, const std::filesystem::path& candidate_path)
 {
     std::error_code error;
@@ -260,7 +268,7 @@ void FilesPanel::RebuildTree(const std::filesystem::path& root)
             break;
         }
 
-        if (ShouldSkipPath(entry.path()))
+        if (ShouldSkipPath(entry.path()) || IsProjectAssetsDirectory(root, entry.path()))
         {
             continue;
         }
@@ -303,7 +311,7 @@ std::uint64_t FilesPanel::ComputeTreeSignature(const std::filesystem::path& root
         const std::filesystem::path path = entry.path();
         const std::string name = path.filename().string();
 
-        if (ShouldSkipPath(path))
+        if (ShouldSkipPath(path) || IsProjectAssetsDirectory(root, path))
         {
             if (entry.is_directory())
             {
@@ -637,7 +645,7 @@ void FilesPanel::RenderNode(
                 }
                 else
                 {
-                    state.AddLog("Failed to delete prefab: " + node.label);
+                    state.AddError("Failed to delete prefab: " + node.label);
                 }
             }
             ImGui::EndPopup();
@@ -667,7 +675,7 @@ void FilesPanel::RenderNode(
                 const std::string prefab_name(static_cast<const char*>(payload->Data));
                 if (!CanMutateSceneObject(state, node.path))
                 {
-                    state.AddLog("Save the open scene before instantiating a prefab");
+                    state.AddWarning("Save the open scene before instantiating a prefab");
                 }
                 else
                 {
@@ -682,7 +690,7 @@ void FilesPanel::RenderNode(
                     }
                     else
                     {
-                        state.AddLog("Failed to instantiate prefab: " + prefab_name);
+                        state.AddError("Failed to instantiate prefab: " + prefab_name);
                     }
                 }
             }
@@ -701,7 +709,7 @@ void FilesPanel::RenderNode(
                 {
                     if (!CanMutateSceneObject(state, node.path))
                     {
-                        state.AddLog("Save the open scene before reparenting scene objects");
+                        state.AddWarning("Save the open scene before reparenting scene objects");
                     }
                     else if (SetSceneObjectParent(node.path, source_object_name, std::string{}))
                     {
@@ -718,7 +726,7 @@ void FilesPanel::RenderNode(
                 const std::string prefab_name(static_cast<const char*>(prefab_payload->Data));
                 if (!CanMutateSceneObject(state, node.path))
                 {
-                    state.AddLog("Save the open scene before instantiating a prefab");
+                    state.AddWarning("Save the open scene before instantiating a prefab");
                 }
                 else
                 {
@@ -733,7 +741,7 @@ void FilesPanel::RenderNode(
                     }
                     else
                     {
-                        state.AddLog("Failed to instantiate prefab: " + prefab_name);
+                        state.AddError("Failed to instantiate prefab: " + prefab_name);
                     }
                 }
             }
@@ -937,7 +945,7 @@ bool FilesPanel::RenderSceneObjectMoveTarget(const FileTreeNode& node, EngineSta
         {
             if (!CanMutateSceneObject(state, node.path))
             {
-                state.AddLog("Save the open scene before reparenting scene objects");
+                state.AddWarning("Save the open scene before reparenting scene objects");
             }
             else if (SetSceneObjectParent(node.path, source_object_name, node.label))
             {
@@ -961,14 +969,14 @@ bool FilesPanel::HandleSceneObjectPaste(const std::filesystem::path& scene_path,
     }
     if (!CanMutateSceneObject(state, scene_path))
     {
-        state.AddLog("Save the open scene before duplicating scene objects");
+        state.AddWarning("Save the open scene before duplicating scene objects");
         return false;
     }
 
     std::string duplicated_name;
     if (!DuplicateSceneObject(scene_path, scene_object_clipboard_name_, &duplicated_name))
     {
-        state.AddLog("Failed to copy scene object: " + scene_object_clipboard_name_);
+        state.AddError("Failed to copy scene object: " + scene_object_clipboard_name_);
         return false;
     }
 
@@ -982,7 +990,7 @@ bool FilesPanel::HandleSceneObjectPaste(const std::filesystem::path& scene_path,
     {
         if (!SetSceneObjectParent(scene_path, duplicated_name, parent_name))
         {
-            state.AddLog("Failed to parent copied scene object: " + duplicated_name);
+            state.AddError("Failed to parent copied scene object: " + duplicated_name);
             return false;
         }
     }
@@ -997,20 +1005,20 @@ bool FilesPanel::RenameSceneObjectFromUi(EngineState& state)
 {
     if (!CanMutateSceneObject(state, scene_object_action_scene_path_))
     {
-        state.AddLog("Save the open scene before renaming scene objects");
+        state.AddWarning("Save the open scene before renaming scene objects");
         return false;
     }
 
     const std::string new_name = SanitizeSceneObjectName(scene_object_name_buffer_.data());
     if (new_name.empty())
     {
-        state.AddLog("Cannot rename object: enter a valid name");
+        state.AddWarning("Cannot rename object: enter a valid name");
         return false;
     }
 
     if (!RenameSceneObject(scene_object_action_scene_path_, scene_object_action_name_, new_name))
     {
-        state.AddLog("Failed to rename scene object: " + scene_object_action_name_);
+        state.AddError("Failed to rename scene object: " + scene_object_action_name_);
         return false;
     }
 
@@ -1024,13 +1032,13 @@ bool FilesPanel::DeleteSceneObjectFromUi(EngineState& state)
 {
     if (!CanMutateSceneObject(state, scene_object_action_scene_path_))
     {
-        state.AddLog("Save the open scene before deleting scene objects");
+        state.AddWarning("Save the open scene before deleting scene objects");
         return false;
     }
 
     if (!DeleteSceneObject(scene_object_action_scene_path_, scene_object_action_name_))
     {
-        state.AddLog("Failed to delete scene object: " + scene_object_action_name_);
+        state.AddError("Failed to delete scene object: " + scene_object_action_name_);
         return false;
     }
 
@@ -1212,7 +1220,7 @@ bool FilesPanel::MovePath(const std::filesystem::path& source_path, const std::f
 
     if (source_path == state.project_root)
     {
-        state.AddLog("Cannot move the project root folder");
+        state.AddWarning("Cannot move the project root folder");
         return false;
     }
 
@@ -1226,14 +1234,14 @@ bool FilesPanel::MovePath(const std::filesystem::path& source_path, const std::f
 
     if (std::filesystem::is_directory(normalized_source) && IsPathWithin(normalized_source, normalized_destination))
     {
-        state.AddLog("Cannot move a folder into itself");
+        state.AddWarning("Cannot move a folder into itself");
         return false;
     }
 
     const std::filesystem::path target_path = normalized_destination / normalized_source.filename();
     if (std::filesystem::exists(target_path))
     {
-        state.AddLog("Cannot move item: destination already exists: " + state.GetDisplayPath(target_path));
+        state.AddWarning("Cannot move item: destination already exists: " + state.GetDisplayPath(target_path));
         return false;
     }
 
@@ -1241,7 +1249,7 @@ bool FilesPanel::MovePath(const std::filesystem::path& source_path, const std::f
     std::filesystem::rename(normalized_source, target_path, error);
     if (error)
     {
-        state.AddLog("Failed to move item: " + state.GetDisplayPath(normalized_source));
+        state.AddError("Failed to move item: " + state.GetDisplayPath(normalized_source));
         return false;
     }
 

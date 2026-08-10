@@ -268,7 +268,7 @@ bool WorkspacePanel::TryConsumeAsyncViewportLoad(
         viewport_load_in_progress_ = false;
         pending_viewport_scene_path_.clear();
         pending_viewport_scene_write_time_ = std::filesystem::file_time_type{};
-        state.AddLog("Viewport preload failed: unexpected async loader exception");
+        state.AddError("Viewport preload failed: unexpected async loader exception");
         return false;
     }
 
@@ -371,7 +371,7 @@ void WorkspacePanel::WaitForPendingViewportLoad(EngineState& state)
 
 void WorkspacePanel::Render(EngineState& state)
 {
-    if (!state.show_workspace_panel)
+    if (!state.show_scene_panel && !state.show_graph_panel && !state.show_editor_panel)
     {
         return;
     }
@@ -396,57 +396,53 @@ void WorkspacePanel::Render(EngineState& state)
         }
     }
 
-    if (!ImGui::Begin("Workspace", &state.show_workspace_panel))
+    RenderWorkspaceWindow(state, WorkspaceTab::Scene, "Scene");
+    RenderWorkspaceWindow(state, WorkspaceTab::Graph, "Graph");
+    RenderWorkspaceWindow(state, WorkspaceTab::Editor, "Editor");
+}
+
+// Scene / Graph / Editor are siblings of the other panels in the dock node
+// rather than sub-tabs of a Workspace window, so each gets its own Begin/End.
+// active_tab still names the one the user last worked in, which is what the
+// File and Edit menus route Save / Reload through.
+void WorkspacePanel::RenderWorkspaceWindow(EngineState& state, WorkspaceTab tab, const char* title)
+{
+    bool* visible = state.GetTabVisibilityFlag(tab);
+    if (!*visible)
+    {
+        return;
+    }
+
+    if (state.ConsumeTabRequest(tab))
+    {
+        ImGui::SetNextWindowFocus();
+    }
+
+    if (!ImGui::Begin(title, visible))
     {
         ImGui::End();
         return;
     }
 
-    WorkspaceTab new_active_tab = state.active_tab;
-
-    if (ImGui::BeginTabBar("WorkspaceTabs", ImGuiTabBarFlags_None))
+    // A docked window that isn't the selected tab never gets here, so the
+    // frontmost of the three claims active_tab even before it's clicked.
+    if (state.active_tab != tab &&
+        (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) || ImGui::IsWindowAppearing()))
     {
-        if (ImGui::BeginTabItem("Scene", nullptr, state.GetTabSelectionFlags(WorkspaceTab::Scene)))
-        {
-            state.CompleteTabRequest(WorkspaceTab::Scene);
-            new_active_tab = WorkspaceTab::Scene;
-            RenderSceneViewport(state);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Graph", nullptr, state.GetTabSelectionFlags(WorkspaceTab::Graph)))
-        {
-            state.CompleteTabRequest(WorkspaceTab::Graph);
-            new_active_tab = WorkspaceTab::Graph;
-            RenderGraphViewport(state);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Editor", nullptr, state.GetTabSelectionFlags(WorkspaceTab::Editor)))
-        {
-            state.CompleteTabRequest(WorkspaceTab::Editor);
-            new_active_tab = WorkspaceTab::Editor;
-            editor_component_.Render(state);
-            ImGui::EndTabItem();
-        }
-
-        ImGui::EndTabBar();
+        state.active_tab = tab;
     }
 
-    if (new_active_tab != state.active_tab)
+    switch (tab)
     {
-        state.active_tab = new_active_tab;
-
-        const char* tab_name = "Scene";
-        if (state.active_tab == WorkspaceTab::Graph)
-        {
-            tab_name = "Graph";
-        }
-        else if (state.active_tab == WorkspaceTab::Editor)
-        {
-            tab_name = "Editor";
-        }
-        state.AddLog(std::string("Switched workspace tab: ") + tab_name);
+    case WorkspaceTab::Graph:
+        RenderGraphViewport(state);
+        break;
+    case WorkspaceTab::Editor:
+        editor_component_.Render(state);
+        break;
+    default:
+        RenderSceneViewport(state);
+        break;
     }
 
     ImGui::End();

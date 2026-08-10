@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/Log.h"
+
 #include "imgui.h"
 
 #include <algorithm>
@@ -66,8 +68,11 @@ struct EngineState
     bool request_new_project_dialog = false;
     bool request_build_game_dialog = false;
     bool show_files_panel = true;
+    bool show_assets_panel = true;
     bool show_version_control_panel = true;
-    bool show_workspace_panel = true;
+    bool show_scene_panel = true;
+    bool show_graph_panel = true;
+    bool show_editor_panel = true;
     bool show_effects_panel = true;
     bool show_animator_panel = true;
     bool show_sequencer_panel = true;
@@ -76,12 +81,19 @@ struct EngineState
     bool show_info_panel = true;
     bool show_log_panel = true;
     bool show_performance_panel = true;
+    bool log_show_info = true;
+    bool log_show_warning = true;
+    bool log_show_error = true;
+    bool log_show_build = true;
+    bool log_show_script = true;
     std::vector<std::string> key_controller_mappings;
     std::filesystem::path workspace_root;
     std::filesystem::path project_root;
     std::filesystem::path project_file_path;
     std::filesystem::path active_scene_path;
     std::filesystem::path selected_item_path;
+    // Folder the Assets panel is browsing, relative to <project>/Assets.
+    std::filesystem::path assets_cwd;
     std::string selected_scene_object_name;
     // Index of the Track camera control point currently selected for editing in
     // the viewport (-1 = none). Shared between the inspector and the viewport
@@ -186,17 +198,19 @@ struct EngineState
     bool open_file_dirty = false;
     bool open_graph_dirty = false;
     bool graph_reload_requested = false;
-    std::vector<std::string> log_messages;
     std::vector<std::filesystem::path> recent_projects;
     std::vector<std::string> project_tags;
     mutable std::vector<std::string> sorted_project_tags_cache_;
     mutable bool sorted_project_tags_dirty_ = true;
 
-    void AddLog(const std::string& message)
-    {
-        log_messages.push_back(message);
-        std::cout << message << std::endl;
-    }
+    // Log entries live in the global applog store so code that has no
+    // EngineState (the Lua bindings, for one) can log too. These stay as
+    // members because nearly every panel already logs through `state`.
+    void AddLog(const std::string& message) { applog::Info(message); }
+    void AddWarning(const std::string& message) { applog::Warn(message); }
+    void AddError(const std::string& message) { applog::Error(message); }
+    void AddBuildLog(const std::string& message) { applog::Build(message); }
+    void AddScriptLog(const std::string& message) { applog::Script(message); }
 
     void SetWorkspaceRoot(std::filesystem::path root)
     {
@@ -207,6 +221,13 @@ struct EngineState
     bool HasOpenProject() const
     {
         return !project_root.empty();
+    }
+
+    // Root of the project's imported content. The Files tree hides this folder;
+    // the Assets panel owns it.
+    std::filesystem::path GetAssetsDirectory() const
+    {
+        return project_root / "Assets";
     }
 
     bool CanBuildProject() const
@@ -311,7 +332,7 @@ struct EngineState
     void SetPlayError(std::string message)
     {
         last_play_error = std::move(message);
-        AddLog(last_play_error);
+        AddError(last_play_error);
     }
 
     bool HasSelectedItem() const
@@ -404,22 +425,34 @@ struct EngineState
         AddLog("Closed active project");
     }
 
+    // Scene, Graph and Editor are top-level dock windows, so "switching tab"
+    // means un-hiding the target window and focusing it — which is what puts
+    // it in front when it shares a dock node with the other panels.
     void RequestTab(WorkspaceTab tab)
     {
         requested_tab = tab;
         has_requested_tab = true;
+        *GetTabVisibilityFlag(tab) = true;
     }
 
-    ImGuiTabItemFlags GetTabSelectionFlags(WorkspaceTab tab) const
+    // True once, on the frame the requested window should take focus.
+    bool ConsumeTabRequest(WorkspaceTab tab)
     {
-        return has_requested_tab && requested_tab == tab ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
-    }
-
-    void CompleteTabRequest(WorkspaceTab tab)
-    {
-        if (has_requested_tab && requested_tab == tab)
+        if (!has_requested_tab || requested_tab != tab)
         {
-            has_requested_tab = false;
+            return false;
+        }
+        has_requested_tab = false;
+        return true;
+    }
+
+    bool* GetTabVisibilityFlag(WorkspaceTab tab)
+    {
+        switch (tab)
+        {
+        case WorkspaceTab::Graph:  return &show_graph_panel;
+        case WorkspaceTab::Editor: return &show_editor_panel;
+        default:                   return &show_scene_panel;
         }
     }
 

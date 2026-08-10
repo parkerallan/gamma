@@ -446,7 +446,7 @@ void AnimatorPanel::EnsureControllerLoaded(const std::filesystem::path& controll
     std::string error;
     if (!LoadAnimatorControllerAsset(controller_path, loaded, error))
     {
-        state.AddLog("Failed to load animator controller: " + state.GetDisplayPath(controller_path) + " (" + error + ")");
+        state.AddError("Failed to load animator controller: " + state.GetDisplayPath(controller_path) + " (" + error + ")");
         loaded = CreateDefaultAnimatorControllerAsset(controller_path.stem().string());
     }
 
@@ -475,7 +475,7 @@ bool AnimatorPanel::SaveCurrentController(const std::filesystem::path& controlle
     std::string error;
     if (!SaveAnimatorControllerAsset(controller_path, controller_, error))
     {
-        state.AddLog("Failed to save animator controller: " + state.GetDisplayPath(controller_path) + " (" + error + ")");
+        state.AddError("Failed to save animator controller: " + state.GetDisplayPath(controller_path) + " (" + error + ")");
         return false;
     }
 
@@ -634,7 +634,7 @@ void AnimatorPanel::Render(EngineState& state, VulkanContext* vulkan_context)
                 }
                 else
                 {
-                    state.AddLog("Controller name is required.");
+                    state.AddWarning("Controller name is required.");
                 }
             }
             else if (selected_controller_index_ >= 0 && selected_controller_index_ < static_cast<int>(controller_paths_.size()))
@@ -904,7 +904,7 @@ void AnimatorPanel::RenderFaceTab(EngineState& state)
         else
         {
             face_bake_status_ = "Bake failed: " + err;
-            state.AddLog("Lip-sync bake failed: " + err);
+            state.AddError("Lip-sync bake failed: " + err);
         }
     }
 
@@ -1318,14 +1318,14 @@ bool AnimatorPanel::ImportAnimationsFromModel(const std::filesystem::path& model
 {
     if (!ModelMetadata::IsSupportedModelPath(model_path))
     {
-        state.AddLog("Animator import skipped: unsupported model file.");
+        state.AddWarning("Animator import skipped: unsupported model file.");
         return false;
     }
 
     const ModelMetadata metadata = LoadModelMetadata(model_path);
     if (!metadata.parsed)
     {
-        state.AddLog("Animator import failed: " + metadata.error_message);
+        state.AddError("Animator import failed: " + metadata.error_message);
         return false;
     }
 
@@ -1362,11 +1362,11 @@ bool AnimatorPanel::ImportAnimationsFromModel(const std::filesystem::path& model
         if (changed)
         {
             controller_dirty_ = true;
-            state.AddLog("Animator import: no animations found; bound model as preview/source for bone physics only.");
+            state.AddWarning("Animator import: no animations found; bound model as preview/source for bone physics only.");
         }
         else
         {
-            state.AddLog("Animator import: no animations found in model.");
+            state.AddWarning("Animator import: no animations found in model.");
         }
         return changed;
     }
@@ -1465,7 +1465,7 @@ void AnimatorPanel::RenderNodeLibrary(EngineState& state)
         const std::filesystem::path selected_path = ResolveProjectPath(state, state.selected_item_path);
         if (selected_path.empty())
         {
-            state.AddLog("Select a model file in the Files panel first.");
+            state.AddWarning("Select a model file in the Files panel first.");
         }
         else
         {
@@ -1489,7 +1489,7 @@ void AnimatorPanel::RenderNodeLibrary(EngineState& state)
             }
             else
             {
-                state.AddLog("Dropped file is not a supported model for animation import.");
+                state.AddWarning("Dropped file is not a supported model for animation import.");
             }
         }
         ImGui::EndDragDropTarget();
@@ -1545,7 +1545,7 @@ void AnimatorPanel::SetPreviewModelPath(EngineState& state, const std::filesyste
     else
     {
         last_loaded_preview_path_ = normalized; // still record to avoid retry-loops; user sees error in viewport
-        state.AddLog("Animator preview failed to load model: " + preview_renderer_.LastError());
+        state.AddError("Animator preview failed to load model: " + preview_renderer_.LastError());
     }
 }
 
@@ -1577,7 +1577,7 @@ void AnimatorPanel::EnsurePreviewModelLoaded(EngineState& state)
     else
     {
         last_loaded_preview_path_ = wanted; // record to avoid a per-frame retry loop
-        state.AddLog("Animator preview failed to load model. stored=\"" + wanted +
+        state.AddError("Animator preview failed to load model. stored=\"" + wanted +
                      "\" resolved=\"" + absolute.string() +
                      "\" (" + preview_renderer_.LastError() + ")");
     }
@@ -1727,7 +1727,7 @@ void AnimatorPanel::RenderPreviewViewport(EngineState& state)
             }
             else
             {
-                state.AddLog("Drop a .fbx / .gltf / .glb model into the preview viewport.");
+                state.AddWarning("Drop a .fbx / .gltf / .glb model into the preview viewport.");
             }
         }
         ImGui::EndDragDropTarget();

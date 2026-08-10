@@ -135,6 +135,7 @@ add_executable(game
     game/GameApplication.cpp
     src/app/FramePacer.cpp
     src/app/VulkanContext.cpp
+    src/core/Log.cpp
     src/assets/AssetMetadata.cpp
     src/assets/AnimatorControllerAsset.cpp
     src/assets/FaceClipAsset.cpp

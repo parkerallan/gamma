@@ -1217,7 +1217,7 @@ void EngineApplication::RenderRuntimeWindow()
     if (!state_.show_transpiled_lua && state_.HasOpenProject())
     {
         std::error_code transpiled_ec;
-        const std::filesystem::path transpiled_dir = state_.project_root / "Graphs" / "Transpiled";
+        const std::filesystem::path transpiled_dir = state_.GetAssetsDirectory() / "Graphs" / "Transpiled";
         if (std::filesystem::exists(transpiled_dir, transpiled_ec))
         {
             std::filesystem::remove_all(transpiled_dir, transpiled_ec);
@@ -1280,6 +1280,7 @@ void EngineApplication::RenderUI()
     RenderBottomBar();
 
     files_panel_.Render(state_);
+    assets_panel_.Render(state_);
     version_control_panel_.Render(state_);
     workspace_panel_.Render(state_);
     effects_panel_.Render(state_, &vulkan_context_);
@@ -1436,21 +1437,18 @@ void EngineApplication::RenderMainMenuBar()
 
         ImGui::Separator();
 
-        if (ImGui::MenuItem("Scene Tab", nullptr, state_.active_tab == WorkspaceTab::Scene, true))
+        if (ImGui::MenuItem("Scene", nullptr, state_.active_tab == WorkspaceTab::Scene, true))
         {
-            state_.show_workspace_panel = true;
             state_.RequestTab(WorkspaceTab::Scene);
         }
 
-        if (ImGui::MenuItem("Graph Tab", nullptr, state_.active_tab == WorkspaceTab::Graph, true))
+        if (ImGui::MenuItem("Graph", nullptr, state_.active_tab == WorkspaceTab::Graph, true))
         {
-            state_.show_workspace_panel = true;
             state_.RequestTab(WorkspaceTab::Graph);
         }
 
-        if (ImGui::MenuItem("Editor Tab", nullptr, state_.active_tab == WorkspaceTab::Editor, true))
+        if (ImGui::MenuItem("Editor", nullptr, state_.active_tab == WorkspaceTab::Editor, true))
         {
-            state_.show_workspace_panel = true;
             state_.RequestTab(WorkspaceTab::Editor);
         }
 
@@ -1476,8 +1474,11 @@ void EngineApplication::RenderMainMenuBar()
     if (ImGui::BeginMenu("Panels"))
     {
         ImGui::MenuItem("Files", nullptr, &state_.show_files_panel);
+        ImGui::MenuItem("Assets", nullptr, &state_.show_assets_panel);
         ImGui::MenuItem("Version Control", nullptr, &state_.show_version_control_panel);
-        ImGui::MenuItem("Workspace", nullptr, &state_.show_workspace_panel);
+        ImGui::MenuItem("Scene", nullptr, &state_.show_scene_panel);
+        ImGui::MenuItem("Graph", nullptr, &state_.show_graph_panel);
+        ImGui::MenuItem("Editor", nullptr, &state_.show_editor_panel);
         ImGui::MenuItem("Effects", nullptr, &state_.show_effects_panel);
         ImGui::MenuItem("Animator", nullptr, &state_.show_animator_panel);
         ImGui::MenuItem("Sequencer", nullptr, &state_.show_sequencer_panel);
@@ -1602,13 +1603,16 @@ void EngineApplication::BuildDefaultDockLayout(ImGuiID dockspace_id)
 
     ImGui::DockBuilderDockWindow("Version Control", left_id);
     ImGui::DockBuilderDockWindow("Files", left_id);
-    ImGui::DockBuilderDockWindow("Workspace", center_id);
+    ImGui::DockBuilderDockWindow("Scene", center_id);
+    ImGui::DockBuilderDockWindow("Graph", center_id);
+    ImGui::DockBuilderDockWindow("Editor", center_id);
     ImGui::DockBuilderDockWindow("Effects", center_id);
     ImGui::DockBuilderDockWindow("Animator", center_id);
     ImGui::DockBuilderDockWindow("Sequencer", center_id);
     ImGui::DockBuilderDockWindow("Mapping", center_id);
     ImGui::DockBuilderDockWindow("Settings", center_id);
     ImGui::DockBuilderDockWindow("Info", right_id);
+    ImGui::DockBuilderDockWindow("Assets", bottom_id);
     ImGui::DockBuilderDockWindow("Performance", bottom_id);
     ImGui::DockBuilderDockWindow("Log", bottom_id);
     ImGui::DockBuilderFinish(dockspace_id);
@@ -1702,7 +1706,7 @@ void EngineApplication::HandleBuildRequests()
     const std::filesystem::path active_scene_path = state_.active_scene_path;
     const std::filesystem::path project_file_path = state_.project_file_path;
 
-    state_.AddLog("[Build] Starting background build for '" + request.game_name + "'...");
+    state_.AddBuildLog("[Build] Starting background build for '" + request.game_name + "'...");
 
     build_thread_ = std::thread([this, request, project_root, active_scene_path, project_file_path]()
     {
@@ -1735,7 +1739,20 @@ void EngineApplication::DrainBuildLog()
     }
     for (const std::string& line : lines)
     {
-        state_.AddLog(line);
+        // The build thread queues plain strings; recover the level from the
+        // prefix it tagged them with so failures stand out from build chatter.
+        if (line.find("ERROR") != std::string::npos)
+        {
+            state_.AddError(line);
+        }
+        else if (line.find("[Build] Warning") != std::string::npos)
+        {
+            state_.AddWarning(line);
+        }
+        else
+        {
+            state_.AddBuildLog(line);
+        }
     }
 }
 
@@ -2343,7 +2360,7 @@ bool EngineApplication::StageBuiltGame(
                 return false;
             }
 
-            if (rel_generic.rfind("Scripts/", 0) == 0)
+            if (rel_generic.rfind("Assets/Scripts/", 0) == 0)
             {
                 ++packed_script_count;
             }

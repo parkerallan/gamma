@@ -122,7 +122,7 @@ void VersionControlPanel::RenderChangesSubTab(EngineState& state)
             }
             else
             {
-                state.AddLog("Failed to initialize git repository: " + status_message_);
+                state.AddError("Failed to initialize git repository: " + status_message_);
             }
         }
         if (!status_message_.empty())
@@ -274,7 +274,7 @@ void VersionControlPanel::RenderChangesSubTab(EngineState& state)
             }
             else
             {
-                state.AddLog("Git pull failed: " + status_message_);
+                state.AddError("Git pull failed: " + status_message_);
             }
         }
 
@@ -299,12 +299,12 @@ void VersionControlPanel::RenderChangesSubTab(EngineState& state)
                     }
                     else
                     {
-                        state.AddLog("Git push failed: " + status_message_);
+                        state.AddError("Git push failed: " + status_message_);
                     }
                 }
                 else
                 {
-                    state.AddLog("Git push failed: " + status_message_);
+                    state.AddError("Git push failed: " + status_message_);
                 }
             }
         }
@@ -319,7 +319,7 @@ void VersionControlPanel::RenderChangesSubTab(EngineState& state)
             }
             else
             {
-                state.AddLog("Git fetch failed: " + status_message_);
+                state.AddError("Git fetch failed: " + status_message_);
             }
         }
 
@@ -333,7 +333,7 @@ void VersionControlPanel::RenderChangesSubTab(EngineState& state)
             }
             else
             {
-                state.AddLog("Failed to undo last commit: " + status_message_);
+                state.AddError("Failed to undo last commit: " + status_message_);
             }
         }
         else if (!can_undo_last_commit_ && ImGui::IsItemHovered())
@@ -367,7 +367,7 @@ void VersionControlPanel::RenderSettingsSubTab(EngineState& state)
             }
             else
             {
-                state.AddLog("Failed to initialize git repository: " + status_message_);
+                state.AddError("Failed to initialize git repository: " + status_message_);
             }
         }
 
@@ -831,7 +831,7 @@ bool VersionControlPanel::CommitSelectedChanges(EngineState& state)
     std::string output;
     if (!RunGitCommand(git_root_, add_arguments, output, &status_message_))
     {
-        state.AddLog("Failed to stage selected files: " + status_message_);
+        state.AddError("Failed to stage selected files: " + status_message_);
         return false;
     }
 
@@ -845,7 +845,7 @@ bool VersionControlPanel::CommitSelectedChanges(EngineState& state)
     const std::string commit_arguments = "commit -m " + QuoteForShell(commit_message);
     if (!RunGitCommand(git_root_, commit_arguments, output, &status_message_))
     {
-        state.AddLog("Git commit failed: " + status_message_);
+        state.AddError("Git commit failed: " + status_message_);
         return false;
     }
 
@@ -874,7 +874,7 @@ bool VersionControlPanel::RevertSingleChange(const GitFileChange& change, Engine
 
     if (!ok)
     {
-        state.AddLog("Failed to revert change: " + status_message_);
+        state.AddError("Failed to revert change: " + status_message_);
         return false;
     }
 
@@ -927,7 +927,7 @@ bool VersionControlPanel::CheckoutSelectedBranch(EngineState& state)
             }
         }
 
-        state.AddLog("Failed to switch branch: " + status_message_);
+        state.AddError("Failed to switch branch: " + status_message_);
         return false;
     }
 
@@ -954,14 +954,14 @@ bool VersionControlPanel::SetRemote(EngineState& state)
 
     if (!RunGitCommand(git_root_, arguments, output, &status_message_))
     {
-        state.AddLog("Failed to set remote: " + status_message_);
+        state.AddError("Failed to set remote: " + status_message_);
         return false;
     }
 
     state.version_control_remote_url = remote_url;
     if (!state.SaveProjectSettings())
     {
-        state.AddLog("Saved remote in git, but failed to persist settings.ini");
+        state.AddWarning("Saved remote in git, but failed to persist settings.ini");
     }
 
     state.AddLog(std::string(remote_exists ? "Updated remote '" : "Added remote '") + remote_name + "'");

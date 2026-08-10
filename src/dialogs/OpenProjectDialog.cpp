@@ -289,7 +289,7 @@ bool OpenProjectDialog::LoadPath(const std::filesystem::path& path, EngineState&
     const std::filesystem::path manifest_path = ResolveManifestPath(resolved);
     if (manifest_path.empty())
     {
-        state.AddLog("Cannot open project: no .engineproj file found at path");
+        state.AddWarning("Cannot open project: no .engineproj file found at path");
         return false;
     }
 
@@ -306,7 +306,7 @@ bool OpenProjectDialog::BrowseAndLoadFolder(EngineState& state)
     }
     return LoadPath(selected_path, state);
 #else
-    state.AddLog("Folder browsing is only implemented on Windows");
+    state.AddWarning("Folder browsing is only implemented on Windows");
     return false;
 #endif
 }
@@ -321,7 +321,7 @@ bool OpenProjectDialog::BrowseAndLoadFile(EngineState& state)
     }
     return LoadPath(selected_path, state);
 #else
-    state.AddLog("Project file browsing is only implemented on Windows");
+    state.AddWarning("Project file browsing is only implemented on Windows");
     return false;
 #endif
 }

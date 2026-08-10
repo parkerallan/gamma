@@ -65,6 +65,21 @@ bool FileContextMenu::RenderItemMenu(const std::filesystem::path& target_path, b
             ImGui::Separator();
         }
 
+        // Scripts and other text assets open as a tab in the Editor. Double
+        // click does the same thing; the entry makes it discoverable.
+        if (!is_directory && EngineState::IsSupportedTextFile(target_path))
+        {
+            if (ImGui::MenuItem("Open in Editor"))
+            {
+                if (state.OpenTextFile(target_path))
+                {
+                    state.RequestTab(WorkspaceTab::Editor);
+                }
+            }
+
+            ImGui::Separator();
+        }
+
         if (ImGui::MenuItem("Rename"))
         {
             QueueRename(target_path, is_directory);
@@ -179,7 +194,7 @@ bool FileContextMenu::HandleRename(EngineState& state)
     const std::string new_name = SanitizeName(name_buffer_.data());
     if (new_name.empty())
     {
-        state.AddLog("Cannot rename item: enter a valid name");
+        state.AddWarning("Cannot rename item: enter a valid name");
         return false;
     }
 
@@ -191,7 +206,7 @@ bool FileContextMenu::HandleRename(EngineState& state)
 
     if (std::filesystem::exists(new_path))
     {
-        state.AddLog("Cannot rename item: destination already exists: " + state.GetDisplayPath(new_path));
+        state.AddWarning("Cannot rename item: destination already exists: " + state.GetDisplayPath(new_path));
         return false;
     }
 
@@ -199,7 +214,7 @@ bool FileContextMenu::HandleRename(EngineState& state)
     std::filesystem::rename(action_target_path_, new_path, error);
     if (error)
     {
-        state.AddLog("Failed to rename item: " + state.GetDisplayPath(action_target_path_));
+        state.AddError("Failed to rename item: " + state.GetDisplayPath(action_target_path_));
         return false;
     }
 
@@ -222,7 +237,7 @@ bool FileContextMenu::HandleDelete(EngineState& state)
 
     if (error)
     {
-        state.AddLog("Failed to delete item: " + state.GetDisplayPath(action_target_path_));
+        state.AddError("Failed to delete item: " + state.GetDisplayPath(action_target_path_));
         return false;
     }
 
@@ -245,7 +260,7 @@ bool FileContextMenu::HandlePaste(const std::filesystem::path& destination_direc
         const std::string relative_string = relative.generic_string();
         if (!relative_error && (relative == "." || (!relative.empty() && relative_string != ".." && relative_string.rfind("../", 0) != 0)))
         {
-            state.AddLog("Cannot paste a folder into itself");
+            state.AddWarning("Cannot paste a folder into itself");
             return false;
         }
     }
@@ -264,7 +279,7 @@ bool FileContextMenu::HandlePaste(const std::filesystem::path& destination_direc
 
     if (error)
     {
-        state.AddLog("Failed to paste item into: " + state.GetDisplayPath(destination_directory));
+        state.AddError("Failed to paste item into: " + state.GetDisplayPath(destination_directory));
         return false;
     }
 

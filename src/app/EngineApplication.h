@@ -4,6 +4,7 @@
 #include "app/VulkanContext.h"
 #include "state/EngineState.h"
 #include "panels/AnimatorPanel.h"
+#include "panels/AssetsPanel.h"
 #include "panels/FilesPanel.h"
 #include "panels/EffectsPanel.h"
 #include "panels/SequencerPanel.h"
@@ -46,6 +47,7 @@ private:
 
     EngineState state_;
     FilesPanel files_panel_;
+    AssetsPanel assets_panel_;
     VersionControlPanel version_control_panel_;
     WorkspacePanel workspace_panel_;
     EffectsPanel effects_panel_;

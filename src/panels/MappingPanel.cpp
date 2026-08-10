@@ -492,7 +492,7 @@ void MappingPanel::SaveMappings(EngineState& state) const
     std::filesystem::create_directories(config_dir, ec);
     if (ec)
     {
-        state.AddLog("Failed to create Config directory for input mappings");
+        state.AddError("Failed to create Config directory for input mappings");
         return;
     }
 
@@ -502,7 +502,7 @@ void MappingPanel::SaveMappings(EngineState& state) const
     std::ofstream output(file, std::ios::binary | std::ios::trunc);
     if (!output)
     {
-        state.AddLog("Failed to write input mappings file");
+        state.AddError("Failed to write input mappings file");
         return;
     }
     output.write(contents.data(), static_cast<std::streamsize>(contents.size()));

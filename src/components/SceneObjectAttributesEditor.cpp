@@ -196,7 +196,7 @@ bool SaveSceneObjectAttributeEdit(
 {
     if (state.HasOpenFile() && state.open_file_path == state.selected_item_path && state.open_file_dirty)
     {
-        state.AddLog("Save the open scene before editing object attributes");
+        state.AddWarning("Save the open scene before editing object attributes");
         return false;
     }
 
@@ -449,7 +449,7 @@ bool RenderAttributeSection(
                     }
                     else
                     {
-                        state.AddLog("Drop a supported model: .fbx, .glb, or .gltf");
+                        state.AddWarning("Drop a supported model: .fbx, .glb, or .gltf");
                     }
                 }
                 ImGui::EndDragDropTarget();
@@ -508,7 +508,7 @@ bool RenderAttributeSection(
                     }
                     else
                     {
-                        state.AddLog("Drop a supported script: .lua");
+                        state.AddWarning("Drop a supported script: .lua");
                     }
                 }
                 ImGui::EndDragDropTarget();
@@ -559,7 +559,7 @@ bool RenderAttributeSection(
                     }
                     else
                     {
-                        state.AddLog("Drop a supported graph: .graph");
+                        state.AddWarning("Drop a supported graph: .graph");
                     }
                 }
                 ImGui::EndDragDropTarget();
@@ -885,11 +885,11 @@ bool RenderAttributeSection(
                         }
                         else if (!same_scene)
                         {
-                            state.AddLog("Follow target must be from the same scene");
+                            state.AddWarning("Follow target must be from the same scene");
                         }
                         else if (!different_object)
                         {
-                            state.AddLog("A camera cannot follow itself");
+                            state.AddWarning("A camera cannot follow itself");
                         }
                     }
                     ImGui::EndDragDropTarget();
@@ -2191,7 +2191,7 @@ bool RenderAttributeSection(
                     }
                     else
                     {
-                        state.AddLog("Drop a supported effect: .efk or .efkefc");
+                        state.AddWarning("Drop a supported effect: .efk or .efkefc");
                     }
                 }
                 ImGui::EndDragDropTarget();

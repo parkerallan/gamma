@@ -1,6 +1,7 @@
 #include "render/RuntimeRenderer.h"
 
 #include "assets/PrefabAsset.h"
+#include "core/Log.h"
 
 #include <SDL3/SDL.h>
 
@@ -269,7 +270,9 @@ int RuntimeRenderer::LuaPhysicsAddForce(lua_State* lua_state)
 int RuntimeRenderer::LuaLog(lua_State* lua_state)
 {
     const char* message = luaL_optstring(lua_state, 1, "");
-    SDL_Log("[Lua] %s", message);
+    // Scripts run on the UI thread (play mode drives the runtime from the
+    // editor's frame loop), so this can go straight into the shared log.
+    applog::Script(message);
     return 0;
 }
 
@@ -1610,11 +1613,9 @@ int RuntimeRenderer::LuaWorldEmit(lua_State* lua_state)
         if (call_result != LUA_OK)
         {
             const char* message = lua_tostring(lua_state, -1);
-            SDL_LogError(
-                SDL_LOG_CATEGORY_APPLICATION,
-                "[Lua] World.Emit handler failed for event '%s': %s",
-                event_name.c_str(),
-                message != nullptr ? message : "unknown error");
+            applog::Error(
+                "World.Emit handler failed for event '" + event_name + "': " +
+                (message != nullptr ? message : "unknown error"));
             lua_pop(lua_state, 1);
         }
 
