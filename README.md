@@ -2,6 +2,8 @@
 
 Raytracing Game Engine
 
+**Update 9/13/26: I've decided to stop working on this. Too many performance issues I couldn't resolve, mostly because I lack experience with Vulkan. I figured parts of this like the temporal anti-aliasing or material shader implementations may help someone with their engine.**
+
 ## Pinned Dependencies
 - SDL3: `release-3.4.4`
 - Dear ImGui: `v1.92.6-docking`
